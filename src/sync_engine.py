@@ -1,65 +1,10 @@
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from .checkpoint_store import CheckpointStore
-from .models import Checkpoint, EntityConfig, SyncResult
-
-_SCHEMA = "OWNER_RAFAM"
-
-# ─── Entity configurations ────────────────────────────────────────────────────
-# TODO: Confirm actual column names by running scripts/explore_schema.py against
-#       the production DB. Fields marked with # ? are best guesses pending verification.
-
-ENTITY_CONFIGS: dict[str, EntityConfig] = {
-    "jurisdicciones": EntityConfig(
-        name="jurisdicciones",
-        base_query=f"SELECT * FROM {_SCHEMA}.JURISDICCIONES",
-        full_load=True,  # small reference table — always full scan
-    ),
-    "proveedores": EntityConfig(
-        name="proveedores",
-        base_query=f"SELECT * FROM {_SCHEMA}.PROVEEDORES",
-        ts_field="FECHA_MODIFICACION",  # TODO: confirm column name
-    ),
-    "pedidos": EntityConfig(
-        name="pedidos",
-        base_query=f"SELECT * FROM {_SCHEMA}.PEDIDOS",
-        ts_field="FECHA_PEDIDO",  # TODO: confirm; use FECHA_MODIFICACION if it exists
-    ),
-    "ped_items": EntityConfig(
-        name="ped_items",
-        base_query=f"SELECT * FROM {_SCHEMA}.PED_ITEMS",
-        full_load=True,  # no reliable cursor column yet — confirm with explore_schema.py
-    ),
-    "solic_gastos": EntityConfig(
-        name="solic_gastos",
-        base_query=f"SELECT * FROM {_SCHEMA}.SOLIC_GASTOS",
-        ts_field="FECHA_ALTA",  # TODO: confirm column name
-    ),
-    "orden_compra": EntityConfig(
-        name="orden_compra",
-        base_query=f"""
-            SELECT oc.*, prov.CUIT, prov.COD_ESTADO AS ESTADO_PROVEEDOR
-            FROM {_SCHEMA}.ORDEN_COMPRA oc
-            LEFT JOIN {_SCHEMA}.PROVEEDORES prov ON oc.COD_PROV = prov.COD_PROV
-        """,
-        ts_field="oc.FECH_OC",  # qualified with alias — appended directly to JOIN query
-    ),
-    "oc_items": EntityConfig(
-        name="oc_items",
-        base_query=f"SELECT * FROM {_SCHEMA}.OC_ITEMS",
-        full_load=True,  # no date/timestamp column in table
-    ),
-    "orden_pago": EntityConfig(
-        name="orden_pago",
-        base_query=f"SELECT * FROM {_SCHEMA}.ORDEN_PAGO",
-        ts_field="FECHA_OP",  # TODO: confirm column name
-        # Re-process pending payments from the last 30 days in case their
-        # state changed from N→C or N→A after they were first synced.
-        extra_condition="ESTADO_OP = 'N' AND FECHA_OP > SYSDATE - 30",
-    ),
-}
+from .config import ENTITY_CONFIGS
+from .models import Checkpoint, EntityConfig
 
 
 class SyncEngine:
@@ -106,7 +51,7 @@ class SyncEngine:
                 # Only advance if a new value was observed; keep old value otherwise.
                 last_id=last_id if last_id is not None else existing.last_id,
                 last_ts=last_ts if last_ts is not None else existing.last_ts,
-                last_run=datetime.utcnow(),
+                last_run=datetime.now(timezone.utc),
                 records_sent=count,
                 status="ok",
             )
@@ -116,7 +61,7 @@ class SyncEngine:
         """Record an error WITHOUT advancing the cursor (safe to retry)."""
         cp = self._store.get(entity)
         cp.status = f"error: {error[:200]}"
-        cp.last_run = datetime.utcnow()
+        cp.last_run = datetime.now(timezone.utc)
         self._store.save(cp)
 
     # ─── Query builder ────────────────────────────────────────────────────────

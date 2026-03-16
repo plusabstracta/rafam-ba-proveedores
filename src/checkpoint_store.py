@@ -53,49 +53,61 @@ def _row_to_checkpoint(row: sqlite3.Row) -> Checkpoint:
 
 
 class CheckpointStore:
-    """SQLite-backed persistence layer for sync checkpoints."""
+    """SQLite-backed persistence layer for sync checkpoints.
+
+    Maintains a single connection for its lifetime. Use as a context manager
+    or call close() explicitly when done.
+    """
 
     def __init__(self, db_path: Path = _DEFAULT_DB):
         self._db_path = Path(db_path)
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as conn:
-            conn.execute(_CREATE_SQL)
+        self._conn = self._create_connection()
+        self._conn.execute(_CREATE_SQL)
+        self._conn.commit()
 
-    def _connect(self) -> sqlite3.Connection:
+    def _create_connection(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self._db_path))
         conn.row_factory = sqlite3.Row
         return conn
 
+    def close(self) -> None:
+        self._conn.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
     def get(self, entity: str) -> Checkpoint:
-        with self._connect() as conn:
-            row = conn.execute(
-                "SELECT * FROM sync_checkpoints WHERE entity = ?", [entity]
-            ).fetchone()
+        row = self._conn.execute(
+            "SELECT * FROM sync_checkpoints WHERE entity = ?", [entity]
+        ).fetchone()
         return _row_to_checkpoint(row) if row else Checkpoint(entity=entity)
 
     def save(self, checkpoint: Checkpoint) -> None:
-        with self._connect() as conn:
-            conn.execute(
-                _UPSERT_SQL,
-                [
-                    checkpoint.entity,
-                    checkpoint.last_id,
-                    _fmt_dt(checkpoint.last_ts),
-                    _fmt_dt(checkpoint.last_run),
-                    checkpoint.records_sent,
-                    checkpoint.status,
-                ],
-            )
+        self._conn.execute(
+            _UPSERT_SQL,
+            [
+                checkpoint.entity,
+                checkpoint.last_id,
+                _fmt_dt(checkpoint.last_ts),
+                _fmt_dt(checkpoint.last_run),
+                checkpoint.records_sent,
+                checkpoint.status,
+            ],
+        )
+        self._conn.commit()
 
     def reset(self, entity: str) -> None:
-        with self._connect() as conn:
-            conn.execute(
-                "DELETE FROM sync_checkpoints WHERE entity = ?", [entity]
-            )
+        self._conn.execute(
+            "DELETE FROM sync_checkpoints WHERE entity = ?", [entity]
+        )
+        self._conn.commit()
 
     def all_checkpoints(self) -> list[Checkpoint]:
-        with self._connect() as conn:
-            rows = conn.execute(
-                "SELECT * FROM sync_checkpoints ORDER BY entity"
-            ).fetchall()
+        rows = self._conn.execute(
+            "SELECT * FROM sync_checkpoints ORDER BY entity"
+        ).fetchall()
         return [_row_to_checkpoint(r) for r in rows]
