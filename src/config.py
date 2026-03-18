@@ -21,12 +21,12 @@ ENTITY_CONFIGS: dict[str, EntityConfig] = {
     "proveedores": EntityConfig(
         name="proveedores",
         base_query=f"SELECT * FROM {SCHEMA}.PROVEEDORES",
-        ts_field="FECHA_MODIFICACION",  # TODO: confirm column name
+        ts_field="FECHA_ALTA",  # NOT NULL — único timestamp confiable en PROVEEDORES
     ),
     "pedidos": EntityConfig(
         name="pedidos",
         base_query=f"SELECT * FROM {SCHEMA}.PEDIDOS",
-        ts_field="FECHA_PEDIDO",  # TODO: confirm; use FECHA_MODIFICACION if it exists
+        ts_field="FECH_EMI",  # NOT NULL — fecha de emisión del pedido
     ),
     "ped_items": EntityConfig(
         name="ped_items",
@@ -36,7 +36,7 @@ ENTITY_CONFIGS: dict[str, EntityConfig] = {
     "solic_gastos": EntityConfig(
         name="solic_gastos",
         base_query=f"SELECT * FROM {SCHEMA}.SOLIC_GASTOS",
-        ts_field="FECHA_ALTA",  # TODO: confirm column name
+        ts_field="FECH_SOLIC",  # NOT NULL — fecha de la solicitud
     ),
     "orden_compra": EntityConfig(
         name="orden_compra",
@@ -55,9 +55,9 @@ ENTITY_CONFIGS: dict[str, EntityConfig] = {
     "orden_pago": EntityConfig(
         name="orden_pago",
         base_query=f"SELECT * FROM {SCHEMA}.ORDEN_PAGO",
-        ts_field="FECHA_OP",  # TODO: confirm column name
+        ts_field="FECH_OP",  # NOT NULL — nombre real confirmado por explore_schema.py
         # Re-process pending payments from the last 30 days in case their
         # state changed from N→C or N→A after they were first synced.
-        extra_condition="ESTADO_OP = 'N' AND FECHA_OP > SYSDATE - 30",
+        extra_condition="ESTADO_OP = 'N' AND FECH_OP > SYSDATE - 30",
     ),
 }

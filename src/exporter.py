@@ -6,19 +6,24 @@ Interfaz común:
     exporter.close()
 
 Implementaciones:
-    CsvExporter   — escribe archivos CSV en output/
-    NoopExporter  — descarta los datos (modo dry-run / solo checkpoints)
-
-Cuando se implemente el gateway Paxapos, se agrega GatewayExporter aquí
-y se cambia una sola línea en main.py.
+    CsvExporter      — escribe archivos CSV en output/
+    NoopExporter     — descarta los datos (modo dry-run / solo checkpoints)
+    GatewayExporter  — envía filas traducidas al gateway HTTP de Paxapos
 """
 
 import csv
+import json
 import logging
+import os
 from abc import ABC, abstractmethod
 from datetime import datetime
 from pathlib import Path
-from typing import IO
+from typing import IO, TYPE_CHECKING
+
+import requests
+
+if TYPE_CHECKING:
+    from .Traductor.base import BaseTranslator
 
 logger = logging.getLogger(__name__)
 
@@ -81,15 +86,110 @@ class NoopExporter(BaseExporter):
         pass
 
 
+# ─── Gateway Paxapos ────────────────────────────────────────────────────────
+
+class GatewayExporter(BaseExporter):
+    """Envia lotes traducidos al endpoint HTTP de Paxapos."""
+
+    def __init__(
+        self,
+        base_url: str,
+        translators: dict[str, "BaseTranslator"],
+        token: str = "",
+        verify_ssl: bool = True,
+    ):
+        if not base_url:
+            raise ValueError("GATEWAY_URL es requerido para modo gateway")
+
+        self._base_url = base_url.rstrip("/")
+        self._translators = translators
+        self._verify_ssl = verify_ssl
+        self._session = requests.Session()
+        headers: dict[str, str] = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        self._session.headers.update(headers)
+
+    def _build_url(self, endpoint_path: str) -> str:
+        return f"{self._base_url}/{endpoint_path.lstrip('/')}"
+
+    def _raise_if_gateway_error(self, entity: str, response: requests.Response) -> None:
+        """Raise on HTTP or application-level errors returned by Paxapos."""
+        if response.status_code >= 400:
+            raise RuntimeError(
+                f"Gateway error {response.status_code} en {entity}: {response.text[:400]}"
+            )
+
+        # Some Paxapos endpoints return HTTP 200 even when validation fails.
+        content_type = (response.headers.get("Content-Type") or "").lower()
+        if "json" not in content_type:
+            return
+
+        try:
+            payload = response.json()
+        except (ValueError, json.JSONDecodeError):
+            return
+
+        if not isinstance(payload, dict):
+            return
+
+        has_error_flag = bool(payload.get("error"))
+        has_validation_errors = bool(payload.get("validationErrors"))
+        explicit_failure = payload.get("success") is False
+
+        if has_error_flag or has_validation_errors or explicit_failure:
+            raise RuntimeError(f"Gateway validation error en {entity}: {str(payload)[:400]}")
+
+    def write_batch(self, entity: str, columns: list[str], rows: list[tuple]) -> None:
+        translator = self._translators.get(entity)
+        if translator is None:
+            logger.warning("Sin traductor para entidad '%s'. Lote omitido.", entity)
+            return
+
+        url = self._build_url(translator.endpoint_path)
+        for row in rows:
+            payload = translator.translate(columns, row)
+            response = self._session.post(
+                url,
+                json=payload,
+                timeout=30,
+                verify=self._verify_ssl,
+            )
+            self._raise_if_gateway_error(entity, response)
+
+    def close(self) -> None:
+        self._session.close()
+
+
 # ─── Factory ─────────────────────────────────────────────────────────────────
 
 def build_exporter(mode: str) -> BaseExporter:
     """
-    mode: 'csv' | 'noop'
-    Cuando se implemente Paxapos, agregar: 'gateway'
+    mode: 'csv' | 'noop' | 'gateway'
     """
     if mode == "csv":
         return CsvExporter()
     if mode == "noop":
         return NoopExporter()
-    raise ValueError(f"Modo de exportación desconocido: '{mode}'. Opciones: csv, noop")
+    if mode == "gateway":
+        from .Traductor import TRANSLATOR_REGISTRY
+
+        verify_ssl = os.getenv("GATEWAY_VERIFY_SSL", "true").lower() not in {
+            "0",
+            "false",
+            "no",
+            "off",
+        }
+
+        return GatewayExporter(
+            base_url=os.getenv("GATEWAY_URL", ""),
+            translators=TRANSLATOR_REGISTRY,
+            token=os.getenv("GATEWAY_JWT_TOKEN", ""),
+            verify_ssl=verify_ssl,
+        )
+    raise ValueError(
+        f"Modo de exportación desconocido: '{mode}'. Opciones: csv, noop, gateway"
+    )

@@ -1,3 +1,4 @@
 python-oracledb
 python-dotenv
 pytest
+requests

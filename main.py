@@ -225,7 +225,8 @@ def main() -> None:
     run_p.add_argument("--entity", metavar="NOMBRE", help="Sincronizar solo esta entidad")
     run_p.add_argument("--limit", type=int, metavar="N", help="Máximo de filas por entidad (útil para testear)")
     run_p.add_argument("--batch-size", type=int, default=500, metavar="N", help="Filas por lote (default: 500)")
-    run_p.add_argument("--export", choices=["csv", "noop"], default="csv", help="Destino de salida: csv (default) | noop (solo checkpoints)")
+    run_p.add_argument("--export", choices=["csv", "noop", "gateway"], default="csv", help="Destino de salida: csv (default) | noop (solo checkpoints) | gateway",
+    )
 
     args = parser.parse_args()
     {"status": cmd_status, "reset": cmd_reset, "run": cmd_run}[args.command](args)
