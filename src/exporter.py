@@ -116,12 +116,28 @@ class GatewayExporter(BaseExporter):
     def _build_url(self, endpoint_path: str) -> str:
         return f"{self._base_url}/{endpoint_path.lstrip('/')}"
 
+    @staticmethod
+    def _row_context(columns: list[str], row: tuple) -> str:
+        """Build a compact supplier identifier for logs and error traces."""
+        raw = {str(k).upper(): v for k, v in zip(columns, row)}
+        cod_prov = raw.get("COD_PROV")
+        cuit = raw.get("CUIT")
+        razon = raw.get("RAZON_SOCIAL")
+        return f"COD_PROV={cod_prov!r} | CUIT={cuit!r} | RAZON_SOCIAL={razon!r}"
+
     def _raise_if_gateway_error(self, entity: str, response: requests.Response) -> None:
         """Raise on HTTP or application-level errors returned by Paxapos."""
-        if response.status_code >= 400:
-            raise RuntimeError(
-                f"Gateway error {response.status_code} en {entity}: {response.text[:400]}"
-            )
+        status = response.status_code
+        if status == 401:
+            raise RuntimeError("Sin autorización (401) — token JWT vencido o no configurado")
+        if status == 404:
+            raise RuntimeError("Endpoint no encontrado (404) — verificar GATEWAY_URL")
+        if status == 422:
+            raise RuntimeError(f"Dato rechazado por Paxapos (422): {response.text[:300]}")
+        if status >= 500:
+            raise RuntimeError(f"Error interno de Paxapos ({status}): {response.text[:200]}")
+        if status >= 400:
+            raise RuntimeError(f"Paxapos respondió {status}: {response.text[:200]}")
 
         # Some Paxapos endpoints return HTTP 200 even when validation fails.
         content_type = (response.headers.get("Content-Type") or "").lower()
@@ -141,24 +157,68 @@ class GatewayExporter(BaseExporter):
         explicit_failure = payload.get("success") is False
 
         if has_error_flag or has_validation_errors or explicit_failure:
-            raise RuntimeError(f"Gateway validation error en {entity}: {str(payload)[:400]}")
+            raise RuntimeError(f"Paxapos rechazó el registro: {str(payload)[:300]}")
 
     def write_batch(self, entity: str, columns: list[str], rows: list[tuple]) -> None:
         translator = self._translators.get(entity)
         if translator is None:
-            logger.warning("Sin traductor para entidad '%s'. Lote omitido.", entity)
+            logger.warning("[%s] Sin traductor — lote omitido.", entity)
             return
 
         url = self._build_url(translator.endpoint_path)
-        for row in rows:
-            payload = translator.translate(columns, row)
-            response = self._session.post(
-                url,
-                json=payload,
-                timeout=30,
-                verify=self._verify_ssl,
-            )
-            self._raise_if_gateway_error(entity, response)
+        row_errors: list[str] = []
+        total = len(rows)
+
+        for index, row in enumerate(rows, start=1):
+            context = self._row_context(columns, row)
+
+            if index == 1 or index % 100 == 0:
+                logger.info("[%s] Procesando %d/%d...", entity, index, total)
+
+            try:
+                payload = translator.translate(columns, row)
+            except ValueError as exc:
+                row_errors.append(f"[{index}/{total}] Procesamiento ERROR | {context} | {exc}")
+                logger.error("[%s][%d/%d] Procesamiento ERROR | %s | %s", entity, index, total, context, exc)
+                continue
+
+            try:
+                response = self._session.post(url, json=payload, timeout=30, verify=self._verify_ssl)
+            except requests.exceptions.SSLError as exc:
+                msg = f"Error SSL — certificado inválido o expirado: {exc}"
+                row_errors.append(f"[{index}/{total}] Salida ERROR | {context} | {msg}")
+                logger.error("[%s][%d/%d] Salida ERROR | %s | %s", entity, index, total, context, msg)
+                continue
+            except requests.Timeout:
+                msg = "Sin respuesta de Paxapos en 30s — timeout"
+                row_errors.append(f"[{index}/{total}] Salida ERROR | {context} | {msg}")
+                logger.error("[%s][%d/%d] Salida ERROR | %s | %s", entity, index, total, context, msg)
+                continue
+            except requests.ConnectionError as exc:
+                msg = f"Sin acceso a Paxapos — verificar red o GATEWAY_URL: {exc}"
+                row_errors.append(f"[{index}/{total}] Salida ERROR | {context} | {msg}")
+                logger.error("[%s][%d/%d] Salida ERROR | %s | %s", entity, index, total, context, msg)
+                continue
+            except requests.RequestException as exc:
+                msg = f"{type(exc).__name__}: {exc}"
+                row_errors.append(f"[{index}/{total}] Salida ERROR | {context} | {msg}")
+                logger.error("[%s][%d/%d] Salida ERROR | %s | %s", entity, index, total, context, msg)
+                continue
+
+            try:
+                self._raise_if_gateway_error(entity, response)
+            except RuntimeError as exc:
+                row_errors.append(f"[{index}/{total}] Salida ERROR | {context} | {exc}")
+                logger.error("[%s][%d/%d] Salida ERROR | %s | %s", entity, index, total, context, exc)
+                continue
+
+        ok_count = total - len(row_errors)
+        if row_errors:
+            logger.error("[%s] RESUMEN: %d OK | %d ERROR de %d", entity, ok_count, len(row_errors), total)
+            for err in row_errors:
+                logger.error("[%s]   %s", entity, err)
+        else:
+            logger.info("[%s] RESUMEN: %d/%d OK", entity, total, total)
 
     def close(self) -> None:
         self._session.close()

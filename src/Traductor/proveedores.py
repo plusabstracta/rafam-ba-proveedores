@@ -11,7 +11,8 @@ class ProveedoresTranslator(BaseTranslator):
     Field mapping reference (schema confirmed 2026-03-17):
         RAFAM            → Paxapos
         CUIT             → cuit
-        RAZON_SOCIAL     → name
+        RAZON_SOCIAL     → name  (nombre/fantasía)
+        RAZON_SOCIAL     → razon_social
         EMAIL            → mail
         COD_POSTAL       → codigo_postal
         FECHA_ALTA       → created
@@ -38,19 +39,25 @@ class ProveedoresTranslator(BaseTranslator):
         payload: dict[str, Any] = {}
 
         # CUIT — NOT NULL in RAFAM, VARCHAR2(13).
-        # Paxapos expects digits only (no hyphens or separators).
+        # Paxapos expects exactly 11 digits (no hyphens or separators).
         cuit = raw.get("CUIT")
-        if cuit not in (None, ""):
-            cuit_normalizado = self._normalize_cuit(str(cuit))
-            if cuit_normalizado:
-                payload["cuit"] = cuit_normalizado
+        if cuit in (None, ""):
+            raise ValueError("CUIT vacío o nulo")
+        cuit_normalizado = self._normalize_cuit(str(cuit))
+        if len(cuit_normalizado) != 11:
+            raise ValueError(
+                f"CUIT inválido: se esperan 11 dígitos, recibidos {len(cuit_normalizado)}"
+            )
+        payload["cuit"] = cuit_normalizado
 
-        # name — NOT NULL in RAFAM, VARCHAR2(70)
+        # name / razon_social — NOT NULL in RAFAM, VARCHAR2(70)
+        # Paxapos distingue "nombre/fantasía" (name) y "razón social" (razon_social),
+        # pero RAFAM solo almacena razón social — se usa el mismo valor para ambos campos.
         razon_social = raw.get("RAZON_SOCIAL")
-        if razon_social is not None:
-            name = str(razon_social).strip()
-            if name:
-                payload["name"] = name
+        if razon_social is None or not str(razon_social).strip():
+            raise ValueError("RAZON_SOCIAL está vacía o es nula")
+        payload["name"]          = str(razon_social).strip()
+        payload["razon_social"]  = str(razon_social).strip()
 
         # tipo_documento_id — always 1 because RAFAM only uses CUIT
         payload["tipo_documento_id"] = self._TIPO_DOCUMENTO_CUIT
