@@ -1,4 +1,4 @@
-python-oracledb
+oracledb
 python-dotenv
 pytest
 requests
