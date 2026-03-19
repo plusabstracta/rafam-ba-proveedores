@@ -20,8 +20,6 @@ env/
 *.sqlite
 *.db
 
-# Salidas generadas
-output/
 
 # IDEs
 .vscode/
