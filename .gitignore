@@ -20,6 +20,10 @@ env/
 *.sqlite
 *.db
 
+# Datos generados localmente
+output/
+state/
+
 
 # IDEs
 .vscode/

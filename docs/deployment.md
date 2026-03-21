@@ -23,7 +23,8 @@ cd rafam-ba-proveedores
 ### 2. Instalar dependencias Python
 
 ```bash
-pip install -r requirements.txt
+python -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
 ```
 
 ### 3. Instalar Oracle Instant Client
@@ -49,7 +50,9 @@ DB_USER=<usuario de solo lectura>
 DB_PASSWORD=<password>
 
 GATEWAY_URL=https://proveedores.paxapos.com
-GATEWAY_API_KEY=<api key de Paxapos>
+GATEWAY_TENANT=<tenant destino>
+GATEWAY_JWT=<jwt de Paxapos>
+GATEWAY_ENDPOINT_PROVEEDORES=account/proveedores.json
 ```
 
 ---
@@ -79,7 +82,7 @@ GRANT SELECT ON OWNER_RAFAM.ORDEN_PAGO     TO rafam_ro;
 ### Ver estado de los checkpoints
 
 ```bash
-python main.py status
+.venv/bin/python main.py status
 ```
 
 Muestra para cada entidad: estado, último ID/timestamp procesado, cuándo fue el último run y cuántos registros se enviaron.
@@ -88,30 +91,33 @@ Muestra para cada entidad: estado, último ID/timestamp procesado, cuándo fue e
 
 ```bash
 # Sincronización normal (incremental si ya hay checkpoints, full load si es primera vez)
-python main.py run
+.venv/bin/python main.py run
 
 # Solo una entidad
-python main.py run --entity=proveedores
+.venv/bin/python main.py run --entity=proveedores
 
 # Limitar filas (útil para testear)
-python main.py run --limit=100
+.venv/bin/python main.py run --limit=100
 
 # Solo validar checkpoints sin escribir archivos
-python main.py run --export=noop
+.venv/bin/python main.py run --export=noop
+
+# Enviar proveedores al gateway JSON de Paxapos
+.venv/bin/python main.py run --entity=proveedores --export=gateway
 ```
 
 ### Forzar full reload de una entidad
 
 ```bash
-python main.py reset --entity=proveedores
-python main.py run --entity=proveedores
+.venv/bin/python main.py reset --entity=proveedores
+.venv/bin/python main.py run --entity=proveedores
 ```
 
 ### Forzar full reload de todo
 
 ```bash
-python main.py reset --all
-python main.py run
+.venv/bin/python main.py reset --all
+.venv/bin/python main.py run
 ```
 
 ---
@@ -123,14 +129,14 @@ Dependiendo del volumen puede tardar. Se recomienda:
 
 ```bash
 # Correr entidad por entidad para monitorear
-python main.py run --entity=jurisdicciones
-python main.py run --entity=proveedores
-python main.py run --entity=pedidos
-python main.py run --entity=ped_items
-python main.py run --entity=solic_gastos
-python main.py run --entity=orden_compra
-python main.py run --entity=oc_items
-python main.py run --entity=orden_pago
+.venv/bin/python main.py run --entity=jurisdicciones
+.venv/bin/python main.py run --entity=proveedores
+.venv/bin/python main.py run --entity=pedidos
+.venv/bin/python main.py run --entity=ped_items
+.venv/bin/python main.py run --entity=solic_gastos
+.venv/bin/python main.py run --entity=orden_compra
+.venv/bin/python main.py run --entity=oc_items
+.venv/bin/python main.py run --entity=orden_pago
 ```
 
 ---

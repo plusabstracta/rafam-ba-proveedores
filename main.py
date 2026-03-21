@@ -10,27 +10,24 @@ Usage:
 """
 
 import argparse
+import json
 import logging
 import os
 import sys
 
-import oracledb
 from dotenv import load_dotenv
+from sqlalchemy.exc import SQLAlchemyError
 
 from src.checkpoint_store import CheckpointStore
 from src.config import ENTITY_CONFIGS
-from src.exporter import BaseExporter, build_exporter
+from src.db import create_source_engine
+from src.exporter import BaseExporter, build_exporter, fetch_migrator_lookups, fetch_migrator_spec
+from src.source_repository import SourceRepository
 from src.sync_engine import SyncEngine
 
 load_dotenv()
 
 logger = logging.getLogger(__name__)
-
-DB_HOST     = os.getenv("DB_HOST", "10.10.91.241")
-DB_PORT     = int(os.getenv("DB_PORT", 1521))
-DB_SERVICE  = os.getenv("DB_SERVICE", "BDRAFAM")
-DB_USER     = os.getenv("DB_USER")
-DB_PASSWORD = os.getenv("DB_PASSWORD")
 
 
 def _build_engine() -> SyncEngine:
@@ -94,69 +91,63 @@ def cmd_reset(args) -> None:
 
 # ─── run ─────────────────────────────────────────────────────────────────────
 
-def _create_oracle_connection() -> oracledb.Connection:
-    """Create an Oracle connection using environment configuration.
-
-    Uses thin mode by default (no Oracle Instant Client required).
-    Set ORACLE_CLIENT_DIR env var to enable thick mode with a specific client path.
-    """
-    oracle_client_dir = os.getenv("ORACLE_CLIENT_DIR")
-    if oracle_client_dir:
-        oracledb.init_oracle_client(lib_dir=oracle_client_dir)
-
-    dsn = oracledb.makedsn(DB_HOST, DB_PORT, service_name=DB_SERVICE)
-    conn = oracledb.connect(user=DB_USER, password=DB_PASSWORD, dsn=dsn)
-    logger.info("Conectado a [%s] en %s:%s", DB_SERVICE, DB_HOST, DB_PORT)
-    return conn
-
 
 def _sync_entity(
-    conn: oracledb.Connection,
+    source_repo: SourceRepository,
     engine: SyncEngine,
     exporter: BaseExporter,
     entity: str,
     batch_size: int,
     limit: int | None,
+    dry_run: bool,
 ) -> None:
     """Execute the incremental sync for a single entity."""
-    cfg = ENTITY_CONFIGS[entity]
     cp  = engine.get_checkpoint(entity)
+    cfg = ENTITY_CONFIGS[entity]
     mode = "FULL LOAD" if (cp.is_fresh or cfg.full_load) else "INCREMENTAL"
 
     try:
-        sql, params = engine.build_incremental_query(entity, cfg.base_query)
+        stmt = source_repo.build_statement(entity, cp)
         total   = 0
         last_id = None
         last_ts = None
 
-        with conn.cursor() as cursor:
-            cursor.execute(sql, params)
-            columns = [col[0] for col in cursor.description]
-            _warn_missing_cursor_fields(cfg, columns, entity)
+        result = source_repo.execute(stmt)
+        columns = list(result.keys())
+        _warn_missing_cursor_fields(cfg, columns, entity)
 
-            while True:
-                fetch_n = batch_size if limit is None else min(batch_size, limit - total)
-                batch   = cursor.fetchmany(fetch_n)
-                if not batch:
-                    break
+        while True:
+            fetch_n = batch_size if limit is None else min(batch_size, limit - total)
+            if fetch_n <= 0:
+                break
 
-                bid, bts = engine.extract_cursor_values(columns, batch, entity)
-                if bid is not None:
-                    last_id = max(last_id, bid) if last_id is not None else bid
-                if bts is not None:
-                    last_ts = max(last_ts, bts) if last_ts is not None else bts
+            raw_rows = result.fetchmany(fetch_n)
+            if not raw_rows:
+                break
 
-                exporter.write_batch(entity, columns, batch)
-                total += len(batch)
+            batch = [tuple(row) for row in raw_rows]
 
-                if limit is not None and total >= limit:
-                    break
+            bid, bts = engine.extract_cursor_values(columns, batch, entity)
+            if bid is not None:
+                last_id = max(last_id, bid) if last_id is not None else bid
+            if bts is not None:
+                last_ts = max(last_ts, bts) if last_ts is not None else bts
 
-        engine.mark_success(entity, last_id, last_ts, total)
-        logger.info("[%-11s] %s — %d registros", mode, entity, total)
+            exporter.write_batch(entity, columns, batch)
+            total += len(batch)
+
+            if limit is not None and total >= limit:
+                break
+
+        if dry_run:
+            logger.info("[DRY RUN   ] %s — %d registros (sin avanzar checkpoint)", entity, total)
+        else:
+            engine.mark_success(entity, last_id, last_ts, total)
+            logger.info("[%-11s] %s — %d registros", mode, entity, total)
 
     except Exception as exc:
-        engine.mark_error(entity, str(exc))
+        if not dry_run:
+            engine.mark_error(entity, str(exc))
         logger.error("[%-11s] %s — ERROR: %s", mode, entity, exc)
 
 
@@ -171,7 +162,7 @@ def _warn_missing_cursor_fields(cfg, columns: list[str], entity: str) -> None:
     if cfg.ts_field and cfg.ts_field.upper() not in cols_upper:
         logger.warning(
             "ts_field '%s' no encontrado en columnas reales de %s. Disponibles: %s "
-            "→ Actualizá ts_field en ENTITY_CONFIGS para habilitar modo incremental.",
+            "→ Actualiza ts_field en ENTITY_CONFIGS para habilitar modo incremental.",
             cfg.ts_field, entity, ", ".join(columns),
         )
 
@@ -181,30 +172,63 @@ def cmd_run(args) -> None:
         logger.error("Entidad desconocida: '%s'", args.entity)
         sys.exit(1)
 
-    try:
-        conn = _create_oracle_connection()
-    except oracledb.Error as exc:
-        logger.error("Error al conectar a Oracle: %s", exc)
-        sys.exit(1)
-
-    exporter = build_exporter(args.export)
+    exporter = build_exporter(args.export, force_update=args.force_update, dry_run=args.dry_run)
     engine   = _build_engine()
     targets  = [args.entity] if args.entity else list(ENTITY_CONFIGS.keys())
 
     try:
-        for entity in targets:
-            _sync_entity(conn, engine, exporter, entity, args.batch_size, args.limit)
+        source_engine = create_source_engine()
+        with source_engine.connect() as conn:
+            logger.info("Conexión a base origen establecida (%s)", source_engine.url.get_backend_name())
+            source_repo = SourceRepository(conn)
+            for entity in targets:
+                _sync_entity(source_repo, engine, exporter, entity, args.batch_size, args.limit, args.dry_run)
+    except (SQLAlchemyError, ValueError) as exc:
+        logger.error("Error en la ejecución: %s", exc)
+        sys.exit(1)
     finally:
         exporter.close()
-        conn.close()
-        logger.info("Conexión cerrada.")
+        logger.info("Proceso finalizado.")
+
+
+def cmd_spec(args) -> None:
+    if args.target != "migrator":
+        logger.error("Target de spec no soportado: %s", args.target)
+        sys.exit(1)
+
+    try:
+        spec = fetch_migrator_spec()
+    except Exception as exc:
+        logger.error("No se pudo consultar spec: %s", exc)
+        sys.exit(1)
+
+    print(json.dumps(spec, ensure_ascii=False, indent=2))
+
+
+def cmd_lookups(args) -> None:
+    sections = []
+    if args.only:
+        sections = [part.strip() for part in args.only.split(",") if part.strip()]
+
+    try:
+        lookups = fetch_migrator_lookups(sections)
+    except Exception as exc:
+        logger.error("No se pudieron consultar lookups: %s", exc)
+        sys.exit(1)
+
+    print(json.dumps(lookups, ensure_ascii=False, indent=2))
 
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 def main() -> None:
+    app_env = os.getenv("APP_ENV", "dev").strip().lower()
+    default_level = "DEBUG" if app_env == "dev" else "INFO"
+    log_level_name = os.getenv("LOG_LEVEL", default_level).strip().upper()
+    log_level = getattr(logging, log_level_name, logging.INFO)
+
     logging.basicConfig(
-        level=logging.INFO,
+        level=log_level,
         format="%(asctime)s [%(levelname)s] %(message)s",
         datefmt="%H:%M:%S",
     )
@@ -217,6 +241,23 @@ def main() -> None:
 
     sub.add_parser("status", help="Muestra el checkpoint de cada entidad")
 
+    spec_p = sub.add_parser("spec", help="Consulta contratos remotos disponibles")
+    spec_p.add_argument(
+        "--target",
+        choices=["migrator"],
+        default="migrator",
+        help="Contrato remoto a consultar (default: migrator)",
+    )
+
+    lookups_p = sub.add_parser("lookups", help="Consulta catálogos remotos del migrator")
+    lookups_p.add_argument(
+        "--only",
+        metavar="SECCIONES",
+        help=(
+            "Secciones separadas por coma; ej: mercaderias,unidades_de_medida,tipos_factura,tipos_de_pago,proveedores,gastos"
+        ),
+    )
+
     reset_p = sub.add_parser("reset", help="Resetea checkpoints para forzar full load")
     reset_p.add_argument("--entity", metavar="NOMBRE", help="Entidad a resetear")
     reset_p.add_argument("--all", action="store_true", help="Resetear todas las entidades")
@@ -225,10 +266,28 @@ def main() -> None:
     run_p.add_argument("--entity", metavar="NOMBRE", help="Sincronizar solo esta entidad")
     run_p.add_argument("--limit", type=int, metavar="N", help="Máximo de filas por entidad (útil para testear)")
     run_p.add_argument("--batch-size", type=int, default=500, metavar="N", help="Filas por lote (default: 500)")
-    run_p.add_argument("--export", choices=["csv", "noop"], default="csv", help="Destino de salida: csv (default) | noop (solo checkpoints)")
+    run_p.add_argument(
+        "--export",
+        choices=["csv", "noop", "gateway", "migrator"],
+        default="csv",
+        help="Destino de salida: csv (default) | noop (solo checkpoints) | gateway | migrator",
+    )
+    run_p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview: no avanza checkpoints; en migrator envia payload con dry_run=true",
+    )
+    run_p.add_argument(
+        "--force-update",
+        action="store_true",
+        help=(
+            "Solo gateway: si existe vinculacion local RAFAM->Paxapos, "
+            "envia update en vez de saltear (default: create-only)"
+        ),
+    )
 
     args = parser.parse_args()
-    {"status": cmd_status, "reset": cmd_reset, "run": cmd_run}[args.command](args)
+    {"status": cmd_status, "reset": cmd_reset, "run": cmd_run, "spec": cmd_spec, "lookups": cmd_lookups}[args.command](args)
 
 
 if __name__ == "__main__":

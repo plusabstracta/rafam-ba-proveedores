@@ -22,14 +22,16 @@ class Checkpoint:
 
 @dataclass
 class EntityConfig:
-    """Describes how to build incremental queries for a single RAFAM entity."""
+    """Metadata used to build SQLAlchemy queries for a RAFAM entity."""
 
     name: str
-    base_query: str
+    table_name: str
     id_field: Optional[str] = None          # integer cursor column
     ts_field: Optional[str] = None          # timestamp cursor column
     full_load: bool = False                 # always full scan (small/static tables)
-    extra_condition: Optional[str] = None   # raw SQL OR-ed into WHERE (no bind params)
+    pending_state_field: Optional[str] = None
+    pending_state_value: Optional[str] = None
+    pending_reprocess_days: Optional[int] = None
 
 
 @dataclass

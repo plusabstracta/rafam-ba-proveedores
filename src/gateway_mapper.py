@@ -1,0 +1,102 @@
+import re
+from typing import Any
+
+
+_IVA_MAP = {
+    "RINS": 1,   # Responsable Inscripto
+    "MONOT": 2,  # Monotributista
+    "EXEN": 3,   # Exento
+    "CF": 4,     # Consumidor final
+    "NGAN": 5,   # No responsable
+    "RNI": 6,    # Responsable no inscripto
+}
+
+
+def _clean(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text if text else None
+
+
+def _first_non_empty(*values: Any) -> str | None:
+    for value in values:
+        text = _clean(value)
+        if text:
+            return text
+    return None
+
+
+def _normalize_cuit(cuit: Any) -> str | None:
+    text = _clean(cuit)
+    if not text:
+        return None
+    digits = re.sub(r"\D", "", text)
+    if len(digits) != 11:
+        return None
+    return digits
+
+
+def _join_address(street: Any, number: Any) -> str | None:
+    s = _clean(street)
+    n = _clean(number)
+    if s and n:
+        return f"{s} {n}"
+    return s or n
+
+
+def map_proveedor_row(raw: dict[str, Any]) -> dict[str, dict[str, Any]] | None:
+    """Map a RAFAM proveedor row to CakePHP Proveedor payload.
+
+    Output format is ready for Account/ProveedoresController::add:
+        {"Proveedor": {...}}
+    """
+    name = _first_non_empty(raw.get("FANTASIA"), raw.get("RAZON_SOCIAL"))
+    if not name:
+        return None
+
+    cuit = _normalize_cuit(raw.get("CUIT"))
+    iva_code = (_clean(raw.get("COD_IVA")) or "").upper()
+
+    domicilio = _join_address(raw.get("CALLE_LEGAL"), raw.get("NRO_LEGAL"))
+    if not domicilio:
+        domicilio = _join_address(raw.get("CALLE_POSTAL"), raw.get("NRO_POSTAL"))
+
+    telefono = _first_non_empty(
+        raw.get("NRO_TELE_TE1"),
+        raw.get("NRO_TELE_TE2"),
+        raw.get("NRO_TELE_TE3"),
+        raw.get("TE_CELULAR"),
+    )
+
+    data: dict[str, Any] = {
+        "name": name[:100],
+        "razon_social": _clean(raw.get("RAZON_SOCIAL")),
+        "mail": _clean(raw.get("EMAIL")),
+        "telefono": telefono,
+        "domicilio": domicilio,
+        "localidad": _first_non_empty(raw.get("LOCA_LEGAL"), raw.get("LOCA_POSTAL")),
+        "provincia": _first_non_empty(raw.get("PROV_LEGAL"), raw.get("PROV_POSTAL")),
+        "codigo_postal": _first_non_empty(raw.get("COD_LEGAL"), raw.get("COD_POSTAL")),
+        "cuit": cuit,
+        "tipo_documento_id": 1 if cuit else None,  # TIPO_DOCUMENTO_CUIT
+        "iva_condicion_id": _IVA_MAP.get(iva_code),
+    }
+
+    compact = {k: v for k, v in data.items() if v not in (None, "")}
+    return {"Proveedor": compact}
+
+
+def map_proveedor_migrator_row(raw: dict[str, Any]) -> dict[str, Any] | None:
+    proveedor_payload = map_proveedor_row(raw)
+    if not proveedor_payload:
+        return None
+
+    cod_prov = raw.get("COD_PROV")
+    if cod_prov is None:
+        return None
+
+    return {
+        "external_id": {"cod_prov": int(cod_prov)},
+        "Proveedor": proveedor_payload["Proveedor"],
+    }

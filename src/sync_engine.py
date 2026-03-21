@@ -1,4 +1,3 @@
-import re
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -11,9 +10,8 @@ class SyncEngine:
     """
     Incremental sync engine backed by a SQLite checkpoint store.
 
-    The engine does NOT execute queries directly — callers fetch rows using
-    the SQL returned by build_incremental_query() and report results via
-    mark_success() / mark_error().
+    The engine does NOT execute queries directly — callers fetch rows from
+    SQLAlchemy statements and report results via mark_success() / mark_error().
     """
 
     def __init__(
@@ -64,55 +62,6 @@ class SyncEngine:
         cp.last_run = datetime.now(timezone.utc)
         self._store.save(cp)
 
-    # ─── Query builder ────────────────────────────────────────────────────────
-
-    def build_incremental_query(
-        self, entity: str, base_query: str
-    ) -> tuple[str, list]:
-        """
-        Returns (sql, params) ready to pass to cursor.execute().
-
-        - First run (no checkpoint) or full_load entity → returns base_query unchanged.
-        - Subsequent runs → wraps base_query in a CTE and appends a WHERE clause
-          using Oracle positional bind variables (:1, :2, …).
-
-        The WHERE clause uses OR so that both new records (by ID) and modified
-        records (by timestamp) are captured. extra_condition is also OR-ed in.
-        """
-        cfg = self._configs.get(entity)
-        cp = self._store.get(entity)
-
-        if cfg is None or cfg.full_load or cp.is_fresh:
-            return base_query.strip(), []
-
-        conditions: list[str] = []
-        params: list = []
-
-        if cfg.id_field and cp.last_id is not None:
-            params.append(cp.last_id)
-            conditions.append(f"{cfg.id_field} > :{len(params)}")
-
-        if cfg.ts_field and cp.last_ts is not None:
-            # Pass datetime object directly — oracledb handles type conversion.
-            params.append(cp.last_ts)
-            conditions.append(f"{cfg.ts_field} > :{len(params)}")
-
-        if cfg.extra_condition:
-            conditions.append(f"({cfg.extra_condition})")
-
-        if not conditions:
-            return base_query.strip(), []
-
-        base  = base_query.strip()
-        where = "\n   OR ".join(conditions)
-        # Append WHERE directly — avoids CTE issues with SELECT * in some Oracle versions.
-        # If the base query already has a WHERE (e.g. a pre-filtered view), wrap with AND.
-        if re.search(r'\bWHERE\b', base, re.IGNORECASE):
-            sql = f"{base}\n   AND ({where})"
-        else:
-            sql = f"{base}\nWHERE {where}"
-        return sql, params
-
     # ─── Utility ─────────────────────────────────────────────────────────────
 
     def extract_cursor_values(
@@ -144,8 +93,7 @@ class SyncEngine:
                     last_id = int(max(vals))
 
         if cfg.ts_field:
-            # Strip table alias if present (e.g. "oc.FECH_OC" → "FECH_OC")
-            key = cfg.ts_field.upper().split('.')[-1]
+            key = cfg.ts_field.upper()
             if key in col_idx:
                 vals = [r[col_idx[key]] for r in rows if r[col_idx[key]] is not None]
                 if vals:
