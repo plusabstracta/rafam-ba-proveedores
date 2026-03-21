@@ -14,10 +14,13 @@ y se cambia una sola línea en main.py.
 """
 
 import csv
-import os
+import logging
 from abc import ABC, abstractmethod
 from datetime import datetime
 from pathlib import Path
+from typing import IO
+
+logger = logging.getLogger(__name__)
 
 
 class BaseExporter(ABC):
@@ -42,10 +45,10 @@ class CsvExporter(BaseExporter):
         self._output_dir = Path(output_dir)
         self._output_dir.mkdir(parents=True, exist_ok=True)
         self._writers: dict[str, csv.writer] = {}
-        self._files:   dict[str, object]     = {}
+        self._files:   dict[str, IO[str]]     = {}
         self._timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    def _get_writer(self, entity: str, columns: list[str]):
+    def _get_writer(self, entity: str, columns: list[str]) -> csv.writer:
         if entity not in self._writers:
             path = self._output_dir / f"{entity}_{self._timestamp}.csv"
             f = open(path, "w", newline="", encoding="utf-8")
@@ -53,7 +56,7 @@ class CsvExporter(BaseExporter):
             writer.writerow(columns)
             self._files[entity]   = f
             self._writers[entity] = writer
-            print(f"        💾 → {path}")
+            logger.info("Archivo creado: %s", path)
         return self._writers[entity]
 
     def write_batch(self, entity: str, columns: list[str], rows: list[tuple]) -> None:

@@ -10,6 +10,7 @@ Usage:
 """
 
 import argparse
+import logging
 import os
 import sys
 
@@ -17,10 +18,13 @@ import oracledb
 from dotenv import load_dotenv
 
 from src.checkpoint_store import CheckpointStore
-from src.exporter import build_exporter
-from src.sync_engine import ENTITY_CONFIGS, SyncEngine
+from src.config import ENTITY_CONFIGS
+from src.exporter import BaseExporter, build_exporter
+from src.sync_engine import SyncEngine
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 DB_HOST     = os.getenv("DB_HOST", "10.10.91.241")
 DB_PORT     = int(os.getenv("DB_PORT", 1521))
@@ -65,7 +69,7 @@ def cmd_status(_args) -> None:
 
 def cmd_reset(args) -> None:
     if not args.entity and not args.all:
-        print("❌  Especificá --entity=<nombre> o --all")
+        logger.error("Especificá --entity=<nombre> o --all")
         sys.exit(1)
 
     engine = _build_engine()
@@ -73,33 +77,114 @@ def cmd_reset(args) -> None:
     if args.all:
         for entity in ENTITY_CONFIGS:
             engine.reset_checkpoint(entity)
-            print(f"  🔄 Reseteado: {entity}")
-        print("✅  Todos los checkpoints reseteados — próxima ejecución será full load.")
+            logger.info("Reseteado: %s", entity)
+        logger.info("Todos los checkpoints reseteados — próxima ejecución será full load.")
         return
 
     if args.entity not in ENTITY_CONFIGS:
-        print(f"❌  Entidad desconocida: '{args.entity}'")
-        print(f"    Entidades válidas: {', '.join(sorted(ENTITY_CONFIGS))}")
+        logger.error(
+            "Entidad desconocida: '%s'. Válidas: %s",
+            args.entity, ", ".join(sorted(ENTITY_CONFIGS)),
+        )
         sys.exit(1)
 
     engine.reset_checkpoint(args.entity)
-    print(f"✅  Checkpoint reseteado: {args.entity}")
+    logger.info("Checkpoint reseteado: %s", args.entity)
 
 
 # ─── run ─────────────────────────────────────────────────────────────────────
 
+def _create_oracle_connection() -> oracledb.Connection:
+    """Create an Oracle connection using environment configuration.
+
+    Uses thin mode by default (no Oracle Instant Client required).
+    Set ORACLE_CLIENT_DIR env var to enable thick mode with a specific client path.
+    """
+    oracle_client_dir = os.getenv("ORACLE_CLIENT_DIR")
+    if oracle_client_dir:
+        oracledb.init_oracle_client(lib_dir=oracle_client_dir)
+
+    dsn = oracledb.makedsn(DB_HOST, DB_PORT, service_name=DB_SERVICE)
+    conn = oracledb.connect(user=DB_USER, password=DB_PASSWORD, dsn=dsn)
+    logger.info("Conectado a [%s] en %s:%s", DB_SERVICE, DB_HOST, DB_PORT)
+    return conn
+
+
+def _sync_entity(
+    conn: oracledb.Connection,
+    engine: SyncEngine,
+    exporter: BaseExporter,
+    entity: str,
+    batch_size: int,
+    limit: int | None,
+) -> None:
+    """Execute the incremental sync for a single entity."""
+    cfg = ENTITY_CONFIGS[entity]
+    cp  = engine.get_checkpoint(entity)
+    mode = "FULL LOAD" if (cp.is_fresh or cfg.full_load) else "INCREMENTAL"
+
+    try:
+        sql, params = engine.build_incremental_query(entity, cfg.base_query)
+        total   = 0
+        last_id = None
+        last_ts = None
+
+        with conn.cursor() as cursor:
+            cursor.execute(sql, params)
+            columns = [col[0] for col in cursor.description]
+            _warn_missing_cursor_fields(cfg, columns, entity)
+
+            while True:
+                fetch_n = batch_size if limit is None else min(batch_size, limit - total)
+                batch   = cursor.fetchmany(fetch_n)
+                if not batch:
+                    break
+
+                bid, bts = engine.extract_cursor_values(columns, batch, entity)
+                if bid is not None:
+                    last_id = max(last_id, bid) if last_id is not None else bid
+                if bts is not None:
+                    last_ts = max(last_ts, bts) if last_ts is not None else bts
+
+                exporter.write_batch(entity, columns, batch)
+                total += len(batch)
+
+                if limit is not None and total >= limit:
+                    break
+
+        engine.mark_success(entity, last_id, last_ts, total)
+        logger.info("[%-11s] %s — %d registros", mode, entity, total)
+
+    except Exception as exc:
+        engine.mark_error(entity, str(exc))
+        logger.error("[%-11s] %s — ERROR: %s", mode, entity, exc)
+
+
+def _warn_missing_cursor_fields(cfg, columns: list[str], entity: str) -> None:
+    """Log warnings if configured cursor fields aren't present in query results."""
+    cols_upper = {c.upper() for c in columns}
+    if cfg.id_field and cfg.id_field.upper() not in cols_upper:
+        logger.warning(
+            "id_field '%s' no encontrado en columnas reales de %s. Disponibles: %s",
+            cfg.id_field, entity, ", ".join(columns),
+        )
+    if cfg.ts_field and cfg.ts_field.upper() not in cols_upper:
+        logger.warning(
+            "ts_field '%s' no encontrado en columnas reales de %s. Disponibles: %s "
+            "→ Actualizá ts_field en ENTITY_CONFIGS para habilitar modo incremental.",
+            cfg.ts_field, entity, ", ".join(columns),
+        )
+
+
 def cmd_run(args) -> None:
     if args.entity and args.entity not in ENTITY_CONFIGS:
-        print(f"❌  Entidad desconocida: '{args.entity}'")
+        logger.error("Entidad desconocida: '%s'", args.entity)
         sys.exit(1)
 
     try:
-        oracledb.init_oracle_client(lib_dir=r"C:\oracle\instantclient")
-        dsn  = oracledb.makedsn(DB_HOST, DB_PORT, service_name=DB_SERVICE)
-        conn = oracledb.connect(user=DB_USER, password=DB_PASSWORD, dsn=dsn)
-        print(f"✅  Conectado a [{DB_SERVICE}] en {DB_HOST}:{DB_PORT}\n")
+        conn = _create_oracle_connection()
     except oracledb.Error as exc:
-        print(f"❌  Error al conectar: {exc}")
+        logger.error("Error al conectar a Oracle: %s", exc)
         sys.exit(1)
 
     exporter = build_exporter(args.export)
@@ -108,76 +193,22 @@ def cmd_run(args) -> None:
 
     try:
         for entity in targets:
-            cfg = ENTITY_CONFIGS[entity]
-            cp  = engine.get_checkpoint(entity)
-            mode = "FULL LOAD" if (cp.is_fresh or cfg.full_load) else "INCREMENTAL"
-            print(f"🔍  [{mode:<11}] {entity} ...", end=" ", flush=True)
-
-            try:
-                sql, params = engine.build_incremental_query(entity, cfg.base_query)
-                batch_size = args.batch_size
-                limit      = args.limit
-
-                total     = 0
-                last_id   = None
-                last_ts   = None
-                columns   = None
-
-                with conn.cursor() as cursor:
-                    cursor.execute(sql, params)
-                    columns = [col[0] for col in cursor.description]
-
-                    # Validate cursor fields exist in the actual result columns
-                    cols_upper = {c.upper() for c in columns}
-                    if cfg.id_field and cfg.id_field.upper() not in cols_upper:
-                        print(f"\n  ⚠️  id_field '{cfg.id_field}' no encontrado en columnas reales de {entity}.")
-                        print(f"     Columnas disponibles: {', '.join(columns)}")
-                    if cfg.ts_field and cfg.ts_field.upper() not in cols_upper:
-                        print(f"\n  ⚠️  ts_field '{cfg.ts_field}' no encontrado en columnas reales de {entity}.")
-                        print(f"     Columnas disponibles: {', '.join(columns)}")
-                        print(f"     → Actualizá ts_field en ENTITY_CONFIGS para habilitar modo incremental.")
-
-                    while True:
-                        fetch_n = batch_size if limit is None else min(batch_size, limit - total)
-                        batch   = cursor.fetchmany(fetch_n)
-                        if not batch:
-                            break
-
-                        bid, bts = engine.extract_cursor_values(columns, batch, entity)
-                        if bid is not None:
-                            last_id = max(last_id, bid) if last_id is not None else bid
-                        if bts is not None:
-                            last_ts = max(last_ts, bts) if last_ts is not None else bts
-
-                        exporter.write_batch(entity, columns, batch)
-
-                        # ── Opción B (futuro): gateway Paxapos ────────────────
-                        # from src.gateway_client import GatewayClient
-                        # GatewayClient().upsert_batch(entity, columns, batch)
-                        # ─────────────────────────────────────────────────────
-
-                        total += len(batch)
-                        print(f"\r🔍  [{mode:<11}] {entity} ... {total} filas", end="", flush=True)
-
-                        if limit is not None and total >= limit:
-                            break
-
-                engine.mark_success(entity, last_id, last_ts, total)
-                print(f"\r🔍  [{mode:<11}] {entity} ... {total:>6} registros  ")
-
-            except Exception as exc:
-                engine.mark_error(entity, str(exc))
-                print(f"ERROR — {exc}")
-
+            _sync_entity(conn, engine, exporter, entity, args.batch_size, args.limit)
     finally:
         exporter.close()
         conn.close()
-        print("\n🔒  Conexión cerrada.")
+        logger.info("Conexión cerrada.")
 
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        datefmt="%H:%M:%S",
+    )
+
     parser = argparse.ArgumentParser(
         prog="main.py",
         description="Motor de sincronización incremental RAFAM → Paxapos",

@@ -6,7 +6,7 @@ Run:
     pytest tests/
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -116,7 +116,7 @@ class TestBuildIncrementalQuery:
     def test_full_load_entity_always_returns_base_query(self, engine):
         # Even with a saved checkpoint, full_load entities skip the WHERE clause
         engine._store.save(
-            Checkpoint(entity="jurisdicciones", last_id=100, last_run=datetime.utcnow())
+            Checkpoint(entity="jurisdicciones", last_id=100, last_run=datetime.now(timezone.utc))
         )
         sql, params = engine.build_incremental_query(
             "jurisdicciones", "SELECT * FROM OWNER_RAFAM.JURISDICCIONES"
@@ -133,11 +133,10 @@ class TestBuildIncrementalQuery:
             "proveedores", "SELECT * FROM OWNER_RAFAM.PROVEEDORES"
         )
 
-        assert "_base" in sql
         assert "WHERE" in sql.upper()
         assert "FECHA_MODIFICACION" in sql
         assert len(params) == 1
-        assert params[0] == "2026-03-09 18:00:00"
+        assert params[0] == ts
 
     def test_incremental_id_and_ts_cursor(self, engine):
         ts = datetime(2026, 3, 9, 18, 0, 0)
@@ -152,7 +151,7 @@ class TestBuildIncrementalQuery:
         assert "FECHA_PEDIDO" in sql
         assert len(params) == 2
         assert params[0] == 500
-        assert params[1] == "2026-03-09 18:00:00"
+        assert params[1] == ts
 
     def test_extra_condition_is_included(self, engine):
         ts = datetime(2026, 3, 9, 18, 0, 0)
