@@ -21,7 +21,6 @@ env/
 *.db
 
 # Datos generados localmente
-output/
 state/
 
 
