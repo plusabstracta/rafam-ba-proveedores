@@ -83,6 +83,14 @@
 | `DESC_COND_PAGO` | `VARCHAR2(45)` | ✓ |  |  |
 | `OC_DIFERIDO` | `VARCHAR2(1)` | ✓ | 'N' |  |
 
+**Valores de `ESTADO_OC`:**
+
+| Valor | Registros |
+|-------|-----------|
+| `A` | 5448 |
+| `N` | 712 |
+| `R` | 108122 |
+
 ---
 
 ## ORDEN_PAGO
@@ -164,6 +172,14 @@
 | `FECH_ING_COMP` | `DATE` | ✓ |  |  |
 | `RESP_RETIRA_PED` | `VARCHAR2(5)` | ✓ |  |  |
 
+
+**Valores de `PED_ESTADO`:**
+
+| Valor | Registros |
+|-------|-----------|
+| `A` | 392 |
+| `G` | 109112 |
+| `N` | 2910 |
 ---
 
 ## PED_ITEMS
