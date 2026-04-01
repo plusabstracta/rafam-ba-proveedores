@@ -161,6 +161,14 @@ class TestSourceRepository:
             Column("NRO_SOLIC", Integer),
             Column("FECH_SOLIC", DateTime),
         )
+        orden_pago_tbl = Table(
+            "ORDEN_PAGO",
+            metadata,
+            Column("EJERCICIO", Integer),
+            Column("NRO_OP", Integer),
+            Column("NRO_CANCE", Integer),
+            Column("COD_PROV", Integer),
+        )
         metadata.create_all(db)
 
         now = datetime.now(timezone.utc)

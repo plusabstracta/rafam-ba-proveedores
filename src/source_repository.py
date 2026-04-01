@@ -47,6 +47,8 @@ class SourceRepository:
             return self._build_ped_items_statement(cfg, checkpoint)
         if entity == "oc_items":
             return self._build_oc_items_statement(cfg, checkpoint)
+        if entity == "solic_gastos":
+            return self._build_solic_gastos_statement(cfg, checkpoint)
         if entity == "orden_pago":
             return self._build_orden_pago_statement(cfg, checkpoint)
         return self._build_simple_table_statement(cfg, checkpoint)
@@ -146,6 +148,31 @@ class SourceRepository:
             )
         )
         return self._apply_incremental_filters(stmt, oc_items, cfg, checkpoint)
+
+    def _build_solic_gastos_statement(
+        self,
+        cfg: EntityConfig,
+        checkpoint: Checkpoint,
+    ) -> Select:
+        solic_gastos = self._reflect_table("SOLIC_GASTOS")
+        orden_pago = self._reflect_table("ORDEN_PAGO")
+
+        stmt = (
+            select(
+                solic_gastos,
+                orden_pago.c.COD_PROV.label("OP_COD_PROV"),
+            )
+            .select_from(
+                solic_gastos.outerjoin(
+                    orden_pago,
+                    and_(
+                        solic_gastos.c.EJERCICIO == orden_pago.c.EJERCICIO,
+                        solic_gastos.c.NRO_SOLIC == orden_pago.c.NRO_CANCE,
+                    ),
+                )
+            )
+        )
+        return self._apply_incremental_filters(stmt, solic_gastos, cfg, checkpoint)
 
     def _build_orden_pago_statement(
         self,

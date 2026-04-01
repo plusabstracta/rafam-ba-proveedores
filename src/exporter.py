@@ -949,6 +949,18 @@ class MigratorExporter(BaseExporter):
         if fech_venc:
             gasto_data["fecha_vencimiento"] = fech_venc
 
+        # proveedor_id via EntityLinkStore (COD_PROV traído por LEFT JOIN a ORDEN_PAGO)
+        cod_prov = raw.get("OP_COD_PROV")
+        if cod_prov is not None:
+            remote_prov = self._link_store.get_remote_id("proveedores", str(int(cod_prov)))
+            if remote_prov:
+                gasto_data["proveedor_id"] = int(remote_prov)
+            else:
+                logger.debug(
+                    "Migrator [solic_gastos] SG %s-%s-%s: proveedor COD_PROV=%s sin link remoto",
+                    ejercicio, deleg_solic, nro_solic, cod_prov,
+                )
+
         obs = raw.get("OBSERVACIONES")
         if obs and str(obs).strip():
             gasto_data["observacion"] = str(obs).strip()[:255]
