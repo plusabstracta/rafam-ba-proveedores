@@ -141,6 +141,20 @@ class TestWriteBatchOrdenPago:
 
     def test_agrupa_por_nro_op(self):
         exp = self._make_exporter()
+
+        # Pre-poblar link_store con gastos (simula sync previo de solic_gastos)
+        import json
+        exp._link_store.save_link(
+            entity="gasto",
+            source_key=json.dumps({"rafam_ref": "SG-2026-1-100"}, sort_keys=True),
+            remote_id="501",
+        )
+        exp._link_store.save_link(
+            entity="gasto",
+            source_key=json.dumps({"rafam_ref": "SG-2026-1-200"}, sort_keys=True),
+            remote_id="502",
+        )
+
         columns = [
             "EJERCICIO", "NRO_OP", "FECH_OP", "ESTADO_OP",
             "IMPORTE_TOTAL", "CONCEPTO", "NRO_CANCE",
@@ -188,10 +202,10 @@ class TestWriteBatchOrdenPago:
         assert len(ops) == 2
         ids = {op["external_id"]["nro_op"] for op in ops}
         assert ids == {1001, 1002}
-        # verificar que gasto_external_ids se construyó
+        # verificar que gasto_ids se resolvió a IDs numéricos de Paxapos
         for op in ops:
-            assert len(op["gasto_external_ids"]) == 1
-            assert op["gasto_external_ids"][0].startswith("SG-2026-")
+            assert len(op["gasto_ids"]) == 1
+            assert isinstance(op["gasto_ids"][0], int)
 
     def test_op_anulada_no_se_envia(self):
         exp = self._make_exporter()

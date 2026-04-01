@@ -16,6 +16,7 @@ FORCE_UPDATE ?= 0
 	run-jurisdicciones run-proveedores run-pedidos run-ped_items run-solic_gastos \
 	run-orden_compra run-oc_items run-orden_pago \
 	run-proveedores-gateway \
+	run-jurisdicciones-migrator run-jurisdicciones-migrator-dry \
 	run-proveedores-migrator run-proveedores-migrator-dry \
 	run-ped_items-migrator run-ped_items-migrator-dry \
 	run-oc_items-migrator run-oc_items-migrator-dry \
@@ -36,6 +37,8 @@ help:
 	@echo "  make run-orden_compra   Ejecuta sync solo de orden_compra"
 	@echo "  make run-proveedores-gateway  Envia proveedores a Paxapos (POST JSON)"
 	@echo "  make run-proveedores-gateway-force-update  Fuerza update de vinculados en gateway"
+	@echo "  make run-jurisdicciones-migrator-dry  Prueba migrator jurisdicciones (rubros+clasif)"
+	@echo "  make run-jurisdicciones-migrator  Migra jurisdicciones -> rubros y clasificaciones"
 	@echo "  make run-proveedores-migrator  Envia proveedores al migrator RAFAM"
 	@echo "  make run-proveedores-migrator-dry  Prueba migrator con dry_run=true"
 	@echo "  make run-ped_items-migrator-dry  Prueba migracion de ped_items -> pedidos"
@@ -92,6 +95,12 @@ run-proveedores-gateway:
 
 run-proveedores-gateway-force-update:
 	$(PY) main.py run --entity proveedores --batch-size $(BATCH) $(if $(LIMIT),--limit $(LIMIT),) --export gateway --force-update
+
+run-jurisdicciones-migrator:
+	$(PY) main.py run --entity jurisdicciones --batch-size $(BATCH) $(if $(LIMIT),--limit $(LIMIT),) --export migrator
+
+run-jurisdicciones-migrator-dry:
+	$(PY) main.py run --entity jurisdicciones --batch-size $(BATCH) $(if $(LIMIT),--limit $(LIMIT),) --export migrator --dry-run
 
 run-proveedores-migrator:
 	$(PY) main.py run --entity proveedores --batch-size $(BATCH) $(if $(LIMIT),--limit $(LIMIT),) --export migrator

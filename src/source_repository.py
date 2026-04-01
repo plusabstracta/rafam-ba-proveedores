@@ -95,6 +95,7 @@ class SourceRepository:
                 pedidos.c.FECH_EMI.label("PED_FECH_EMI"),
                 pedidos.c.OBSERVACIONES.label("PED_OBSERVACIONES"),
                 pedidos.c.CODIGO_DEP.label("PED_CODIGO_DEP"),
+                pedidos.c.COSTO_TOT.label("PED_COSTO_TOT"),
             )
             .select_from(
                 ped_items.outerjoin(
@@ -115,6 +116,7 @@ class SourceRepository:
     ) -> Select:
         oc_items = self._reflect_table("OC_ITEMS")
         orden_compra = self._reflect_table("ORDEN_COMPRA")
+        solic_gastos = self._reflect_table("SOLIC_GASTOS")
 
         stmt = (
             select(
@@ -123,6 +125,7 @@ class SourceRepository:
                 orden_compra.c.FECH_OC.label("OC_FECH_OC"),
                 orden_compra.c.OBSERVACIONES.label("OC_OBSERVACIONES"),
                 orden_compra.c.ESTADO_OC,
+                solic_gastos.c.JURISDICCION.label("SG_JURISDICCION"),
             )
             .select_from(
                 oc_items.outerjoin(
@@ -131,6 +134,13 @@ class SourceRepository:
                         oc_items.c.EJERCICIO == orden_compra.c.EJERCICIO,
                         oc_items.c.UNI_COMPRA == orden_compra.c.UNI_COMPRA,
                         oc_items.c.NRO_OC == orden_compra.c.NRO_OC,
+                    ),
+                ).outerjoin(
+                    solic_gastos,
+                    and_(
+                        oc_items.c.EJERCICIO == solic_gastos.c.EJERCICIO,
+                        oc_items.c.DELEG_SOLIC == solic_gastos.c.DELEG_SOLIC,
+                        oc_items.c.NRO_SOLIC == solic_gastos.c.NRO_SOLIC,
                     ),
                 )
             )

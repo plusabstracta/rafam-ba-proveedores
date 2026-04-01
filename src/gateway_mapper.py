@@ -45,6 +45,15 @@ def _join_address(street: Any, number: Any) -> str | None:
     return s or n
 
 
+def _build_phone(pais: Any, inte: Any, tele: Any) -> str | None:
+    """Concatena los tres campos de teléfono RAFAM en un único string."""
+    parts = [_clean(pais), _clean(inte), _clean(tele)]
+    non_empty = [p for p in parts if p]
+    if not non_empty:
+        return None
+    return " ".join(non_empty)
+
+
 def map_proveedor_row(raw: dict[str, Any]) -> dict[str, dict[str, Any]] | None:
     """Map a RAFAM proveedor row to CakePHP Proveedor payload.
 
@@ -63,9 +72,9 @@ def map_proveedor_row(raw: dict[str, Any]) -> dict[str, dict[str, Any]] | None:
         domicilio = _join_address(raw.get("CALLE_POSTAL"), raw.get("NRO_POSTAL"))
 
     telefono = _first_non_empty(
-        raw.get("NRO_TELE_TE1"),
-        raw.get("NRO_TELE_TE2"),
-        raw.get("NRO_TELE_TE3"),
+        _build_phone(raw.get("NRO_PAIS_TE1"), raw.get("NRO_INTE_TE1"), raw.get("NRO_TELE_TE1")),
+        _build_phone(raw.get("NRO_PAIS_TE2"), raw.get("NRO_INTE_TE2"), raw.get("NRO_TELE_TE2")),
+        _build_phone(raw.get("NRO_PAIS_TE3"), raw.get("NRO_INTE_TE3"), raw.get("NRO_TELE_TE3")),
         raw.get("TE_CELULAR"),
     )
 
