@@ -264,6 +264,65 @@ Nota sobre rutas CakePHP 2:
 .venv/bin/python main.py reset --all
 ```
 
+## Filtro de fecha y flujo encadenado (`--months` y `--linked`)
+
+### `--months N`
+
+Filtra los registros de los últimos N meses por la fecha principal de cada entidad
+(`FECH_OC`, `FECH_OP`, `FECH_SOLIC`, etc.). Cuando se usa, reemplaza el cursor del
+checkpoint — es decir, siempre trae datos del período indicado sin importar cuánto
+haya avanzado la sincronización incremental.
+
+```bash
+python main.py run --months 3
+```
+
+### `--linked`
+
+Garantiza que todos los registros exportados forman parte de un flujo OC completo,
+anclando cada entidad a `ORDEN_COMPRA.FECH_OC` mediante subqueries SQL:
+
+| Entidad | Lógica |
+|---|---|
+| `orden_compra` | Filtro directo por `FECH_OC >= since` |
+| `oc_items` | JOIN a `ORDEN_COMPRA WHERE FECH_OC >= since` |
+| `proveedores` | `WHERE COD_PROV IN (SELECT COD_PROV FROM ORDEN_COMPRA WHERE FECH_OC >= since)` |
+| `solic_gastos` | `WHERE EXISTS (OC_ITEMS JOIN ORDEN_COMPRA WHERE NRO_SOLIC match AND FECH_OC >= since)` |
+| `orden_pago` | `WHERE EXISTS (OC_ITEMS JOIN ORDEN_COMPRA WHERE NRO_CANCE match AND FECH_OC >= since)` |
+| `jurisdicciones` | Full load (tabla catálogo, sin cambio) |
+
+Esto resuelve el problema de datos huérfanos: OCs del 2019 y pagos del 2023 que no
+se pueden encadenar. Con `--linked`, solo se exporta lo que tiene un flujo completo
+trazable de punta a punta.
+
+### `--output-dir DIR`
+
+Guarda los CSV en una subcarpeta específica en vez de `output/` (default).
+
+```bash
+python main.py run --output-dir output/rafam_ultimos_3_meses
+```
+
+### Uso combinado (recomendado para entregas)
+
+```bash
+# Exportar últimos 3 meses con flujo encadenado, sin impactar Paxapos
+python main.py run --months 3 --linked --dry-run --output-dir output/rafam_ultimos_3_meses
+```
+
+Este comando:
+- Conecta a Oracle RAFAM
+- Trae solo registros de los últimos 3 meses que pertenecen a un flujo OC completo
+- Guarda los CSV en `output/rafam_ultimos_3_meses/`
+- No avanza checkpoints ni envía nada al endpoint de Paxapos
+
+### `--dry-run`
+
+En cualquier modo de exportación:
+- No avanza los checkpoints (la corrida es repetible sin efecto secundario)
+- En modo `--export migrator`: envía el payload con `dry_run=true` al endpoint (sin persistir datos)
+- Los CSV se generan igual en la carpeta especificada
+
 ## Checkpoints incrementales
 
 Cada entidad guarda en `state/checkpoint.db`:
