@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import Column, MetaData, Table, and_, or_, select
+from sqlalchemy import Column, MetaData, Table, and_, exists, or_, select
 from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.engine import Connection
 from sqlalchemy.sql import Select
@@ -41,19 +41,27 @@ class SourceRepository:
             self._tables[table_name] = table
         return table
 
-    def build_statement(self, entity: str, checkpoint: Checkpoint) -> Select:
+    def build_statement(
+        self,
+        entity: str,
+        checkpoint: Checkpoint,
+        since: datetime | None = None,
+        linked: bool = False,
+    ) -> Select:
         cfg = ENTITY_CONFIGS[entity]
+        if entity == "proveedores":
+            return self._build_proveedores_statement(cfg, checkpoint, since, linked)
         if entity == "orden_compra":
-            return self._build_orden_compra_statement(cfg, checkpoint)
+            return self._build_orden_compra_statement(cfg, checkpoint, since)
         if entity == "ped_items":
-            return self._build_ped_items_statement(cfg, checkpoint)
+            return self._build_ped_items_statement(cfg, checkpoint, since)
         if entity == "oc_items":
-            return self._build_oc_items_statement(cfg, checkpoint)
+            return self._build_oc_items_statement(cfg, checkpoint, since)
         if entity == "solic_gastos":
-            return self._build_solic_gastos_statement(cfg, checkpoint)
+            return self._build_solic_gastos_statement(cfg, checkpoint, since, linked)
         if entity == "orden_pago":
-            return self._build_orden_pago_statement(cfg, checkpoint)
-        return self._build_simple_table_statement(cfg, checkpoint)
+            return self._build_orden_pago_statement(cfg, checkpoint, since, linked)
+        return self._build_simple_table_statement(cfg, checkpoint, since)
 
     def execute(self, stmt: Select):
         return self._conn.execution_options(stream_results=True).execute(stmt)
@@ -62,15 +70,36 @@ class SourceRepository:
         self,
         cfg: EntityConfig,
         checkpoint: Checkpoint,
+        since: datetime | None = None,
     ) -> Select:
         table = self._reflect_table(cfg.table_name)
         stmt = select(table)
-        return self._apply_incremental_filters(stmt, table, cfg, checkpoint)
+        return self._apply_incremental_filters(stmt, table, cfg, checkpoint, since)
+
+    def _build_proveedores_statement(
+        self,
+        cfg: EntityConfig,
+        checkpoint: Checkpoint,
+        since: datetime | None = None,
+        linked: bool = False,
+    ) -> Select:
+        prov = self._reflect_table("PROVEEDORES")
+        stmt = select(prov)
+        stmt = self._apply_incremental_filters(stmt, prov, cfg, checkpoint, since)
+        if linked:
+            # Only include proveedores that appear in ORDEN_COMPRA within the date range.
+            oc = self._reflect_table("ORDEN_COMPRA")
+            oc_sub = select(oc.c.COD_PROV)
+            if since is not None:
+                oc_sub = oc_sub.where(oc.c.FECH_OC >= since)
+            stmt = stmt.where(prov.c.COD_PROV.in_(oc_sub))
+        return stmt
 
     def _build_orden_compra_statement(
         self,
         cfg: EntityConfig,
         checkpoint: Checkpoint,
+        since: datetime | None = None,
     ) -> Select:
         oc = self._reflect_table("ORDEN_COMPRA")
         prov = self._reflect_table("PROVEEDORES")
@@ -83,12 +112,13 @@ class SourceRepository:
             )
             .select_from(oc.outerjoin(prov, oc.c.COD_PROV == prov.c.COD_PROV))
         )
-        return self._apply_incremental_filters(stmt, oc, cfg, checkpoint)
+        return self._apply_incremental_filters(stmt, oc, cfg, checkpoint, since)
 
     def _build_ped_items_statement(
         self,
         cfg: EntityConfig,
         checkpoint: Checkpoint,
+        since: datetime | None = None,
     ) -> Select:
         ped_items = self._reflect_table("PED_ITEMS")
         pedidos = self._reflect_table("PEDIDOS")
@@ -111,12 +141,16 @@ class SourceRepository:
                 )
             )
         )
-        return self._apply_incremental_filters(stmt, ped_items, cfg, checkpoint)
+        stmt = self._apply_incremental_filters(stmt, ped_items, cfg, checkpoint)
+        if since is not None:
+            stmt = stmt.where(pedidos.c.FECH_EMI >= since)
+        return stmt
 
     def _build_oc_items_statement(
         self,
         cfg: EntityConfig,
         checkpoint: Checkpoint,
+        since: datetime | None = None,
     ) -> Select:
         oc_items = self._reflect_table("OC_ITEMS")
         orden_compra = self._reflect_table("ORDEN_COMPRA")
@@ -149,12 +183,17 @@ class SourceRepository:
                 )
             )
         )
-        return self._apply_incremental_filters(stmt, oc_items, cfg, checkpoint)
+        stmt = self._apply_incremental_filters(stmt, oc_items, cfg, checkpoint)
+        if since is not None:
+            stmt = stmt.where(orden_compra.c.FECH_OC >= since)
+        return stmt
 
     def _build_solic_gastos_statement(
         self,
         cfg: EntityConfig,
         checkpoint: Checkpoint,
+        since: datetime | None = None,
+        linked: bool = False,
     ) -> Select:
         solic_gastos = self._reflect_table("SOLIC_GASTOS")
         orden_pago = self._reflect_table("ORDEN_PAGO")
@@ -174,12 +213,38 @@ class SourceRepository:
                 )
             )
         )
-        return self._apply_incremental_filters(stmt, solic_gastos, cfg, checkpoint)
+        stmt = self._apply_incremental_filters(stmt, solic_gastos, cfg, checkpoint, since)
+        if linked:
+            # Only include solic_gastos traceable to an OC within the date range.
+            oci = self._reflect_table("OC_ITEMS")
+            oc = self._reflect_table("ORDEN_COMPRA")
+            linked_conds = [
+                oci.c.EJERCICIO == solic_gastos.c.EJERCICIO,
+                oci.c.DELEG_SOLIC == solic_gastos.c.DELEG_SOLIC,
+                oci.c.NRO_SOLIC == solic_gastos.c.NRO_SOLIC,
+            ]
+            if since is not None:
+                linked_conds.append(oc.c.FECH_OC >= since)
+            linked_sub = (
+                select(oci.c.NRO_SOLIC)
+                .select_from(
+                    oci.join(oc, and_(
+                        oci.c.EJERCICIO == oc.c.EJERCICIO,
+                        oci.c.UNI_COMPRA == oc.c.UNI_COMPRA,
+                        oci.c.NRO_OC == oc.c.NRO_OC,
+                    ))
+                )
+                .where(and_(*linked_conds))
+            )
+            stmt = stmt.where(exists(linked_sub))
+        return stmt
 
     def _build_orden_pago_statement(
         self,
         cfg: EntityConfig,
         checkpoint: Checkpoint,
+        since: datetime | None = None,
+        linked: bool = False,
     ) -> Select:
         orden_pago = self._reflect_table("ORDEN_PAGO")
         solic_gastos = self._reflect_table("SOLIC_GASTOS")
@@ -200,9 +265,45 @@ class SourceRepository:
                 )
             )
         )
-        return self._apply_incremental_filters(stmt, orden_pago, cfg, checkpoint)
+        stmt = self._apply_incremental_filters(stmt, orden_pago, cfg, checkpoint, since)
+        if linked:
+            # Only include pagos traceable to an OC within the date range.
+            # orden_pago.NRO_CANCE = solic_gastos.NRO_SOLIC = oc_items.NRO_SOLIC
+            oci = self._reflect_table("OC_ITEMS")
+            oc = self._reflect_table("ORDEN_COMPRA")
+            linked_conds = [
+                oci.c.EJERCICIO == orden_pago.c.EJERCICIO,
+                oci.c.NRO_SOLIC == orden_pago.c.NRO_CANCE,
+            ]
+            if since is not None:
+                linked_conds.append(oc.c.FECH_OC >= since)
+            linked_sub = (
+                select(oci.c.NRO_SOLIC)
+                .select_from(
+                    oci.join(oc, and_(
+                        oci.c.EJERCICIO == oc.c.EJERCICIO,
+                        oci.c.UNI_COMPRA == oc.c.UNI_COMPRA,
+                        oci.c.NRO_OC == oc.c.NRO_OC,
+                    ))
+                )
+                .where(and_(*linked_conds))
+            )
+            stmt = stmt.where(exists(linked_sub))
+        return stmt
 
-    def _apply_incremental_filters(self, stmt: Select, table, cfg: EntityConfig, cp: Checkpoint) -> Select:
+    def _apply_incremental_filters(
+        self,
+        stmt: Select,
+        table,
+        cfg: EntityConfig,
+        cp: Checkpoint,
+        since: datetime | None = None,
+    ) -> Select:
+        ts_col = self._safe_column(table, cfg.ts_field)
+
+        if since is not None and ts_col is not None:
+            stmt = stmt.where(ts_col >= since)
+
         if cfg.full_load or cp.is_fresh:
             return stmt
 
@@ -212,7 +313,6 @@ class SourceRepository:
         if id_col is not None and cp.last_id is not None:
             filters.append(id_col > cp.last_id)
 
-        ts_col = self._safe_column(table, cfg.ts_field)
         if ts_col is not None and cp.last_ts is not None:
             filters.append(ts_col > cp.last_ts)
 

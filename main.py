@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import sys
+from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
 from sqlalchemy.exc import SQLAlchemyError
@@ -100,6 +101,8 @@ def _sync_entity(
     batch_size: int,
     limit: int | None,
     dry_run: bool,
+    since: datetime | None = None,
+    linked: bool = False,
 ) -> None:
     """Execute the incremental sync for a single entity."""
     cp  = engine.get_checkpoint(entity)
@@ -107,7 +110,7 @@ def _sync_entity(
     mode = "FULL LOAD" if (cp.is_fresh or cfg.full_load) else "INCREMENTAL"
 
     try:
-        stmt = source_repo.build_statement(entity, cp)
+        stmt = source_repo.build_statement(entity, cp, since=since, linked=linked)
         total   = 0
         last_id = None
         last_ts = None
@@ -172,9 +175,18 @@ def cmd_run(args) -> None:
         logger.error("Entidad desconocida: '%s'", args.entity)
         sys.exit(1)
 
-    exporter = build_exporter(args.export, force_update=args.force_update, dry_run=args.dry_run)
+    exporter = build_exporter(args.export, force_update=args.force_update, dry_run=args.dry_run, output_dir=args.output_dir)
     engine   = _build_engine()
     targets  = [args.entity] if args.entity else list(ENTITY_CONFIGS.keys())
+
+    since: datetime | None = None
+    if args.months:
+        since = datetime.now(timezone.utc) - timedelta(days=args.months * 30)
+        logger.info("Filtro activo: registros desde %s (%d meses)", since.strftime("%Y-%m-%d"), args.months)
+
+    linked = args.linked
+    if linked:
+        logger.info("Modo --linked activo: entidades ancladas a ORDEN_COMPRA.FECH_OC")
 
     try:
         source_engine = create_source_engine()
@@ -182,7 +194,7 @@ def cmd_run(args) -> None:
             logger.info("Conexión a base origen establecida (%s)", source_engine.url.get_backend_name())
             source_repo = SourceRepository(conn)
             for entity in targets:
-                _sync_entity(source_repo, engine, exporter, entity, args.batch_size, args.limit, args.dry_run)
+                _sync_entity(source_repo, engine, exporter, entity, args.batch_size, args.limit, args.dry_run, since, linked)
     except (SQLAlchemyError, ValueError) as exc:
         logger.error("Error en la ejecución: %s", exc)
         sys.exit(1)
@@ -267,6 +279,18 @@ def main() -> None:
     run_p.add_argument("--limit", type=int, metavar="N", help="Máximo de filas por entidad (útil para testear)")
     run_p.add_argument("--batch-size", type=int, default=500, metavar="N", help="Filas por lote (default: 500)")
     run_p.add_argument(
+        "--months",
+        type=int,
+        metavar="N",
+        help="Filtrar registros de los últimos N meses por fecha (ej: --months 3)",
+    )
+    run_p.add_argument(
+        "--output-dir",
+        metavar="DIR",
+        default="output",
+        help="Directorio donde guardar los CSV (default: output)",
+    )
+    run_p.add_argument(
         "--export",
         choices=["csv", "noop", "gateway", "migrator"],
         default="csv",
@@ -276,6 +300,15 @@ def main() -> None:
         "--dry-run",
         action="store_true",
         help="Preview: no avanza checkpoints; en migrator envia payload con dry_run=true",
+    )
+    run_p.add_argument(
+        "--linked",
+        action="store_true",
+        help=(
+            "Solo exporta registros que forman parte de un flujo OC completo "
+            "(proveedores, solic_gastos y orden_pago se anclan a ORDEN_COMPRA.FECH_OC). "
+            "Combinar con --months para garantizar encadenamiento temporal."
+        ),
     )
     run_p.add_argument(
         "--force-update",

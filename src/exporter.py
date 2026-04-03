@@ -1552,12 +1552,17 @@ class MigratorExporter(BaseExporter):
 
 # ─── Factory ─────────────────────────────────────────────────────────────────
 
-def build_exporter(mode: str, force_update: bool = False, dry_run: bool = False) -> BaseExporter:
+def build_exporter(
+    mode: str,
+    force_update: bool = False,
+    dry_run: bool = False,
+    output_dir: str | None = None,
+) -> BaseExporter:
     """
-    mode: 'csv' | 'noop' | 'gateway'
+    mode: 'csv' | 'noop' | 'gateway' | 'migrator'
     """
     if mode == "csv":
-        return CsvExporter()
+        return CsvExporter(output_dir=output_dir or "output")
     if mode == "noop":
         return NoopExporter()
     if mode == "gateway":
