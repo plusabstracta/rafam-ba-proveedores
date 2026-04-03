@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import MetaData, and_, or_, select
+from sqlalchemy import Column, MetaData, Table, and_, or_, select
+from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.engine import Connection
 from sqlalchemy.sql import Select
 
@@ -27,14 +28,15 @@ class SourceRepository:
         if table is None:
             table = self._metadata.tables.get(table_name)
         if table is None:
-            from sqlalchemy import Table
-
-            table = Table(
-                table_name,
-                self._metadata,
-                autoload_with=self._conn,
-                schema=self._schema,
-            )
+            # Use get_columns() instead of autoload_with to bypass has_table(),
+            # which uses FETCH FIRST syntax unsupported on Oracle 11g.
+            # Column names are uppercased to match Oracle conventions, since
+            # python-oracledb returns them lowercase from get_columns().
+            insp = sa_inspect(self._conn)
+            col_defs = insp.get_columns(table_name, schema=self._schema)
+            table = Table(table_name, self._metadata, schema=self._schema)
+            for col_def in col_defs:
+                table.append_column(Column(col_def["name"].upper(), col_def["type"]))
             self._tables[key] = table
             self._tables[table_name] = table
         return table

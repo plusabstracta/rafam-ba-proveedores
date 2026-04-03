@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
 
+import oracledb
 from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
 
@@ -33,7 +34,10 @@ def create_source_engine() -> Engine:
     if not user or not password:
         raise ValueError("Faltan DB_USER / DB_PASSWORD para Oracle")
 
-    # SQLAlchemy + python-oracledb thin mode.
+    # Thick mode requerido para Oracle < 12.2. Mirrors explore_schema.py.
+    oracle_client_dir = os.getenv("ORACLE_CLIENT_DIR")
+    oracledb.init_oracle_client(lib_dir=oracle_client_dir or None)
+
     url = f"oracle+oracledb://{user}:{password}@{host}:{port}/?service_name={service}"
     return create_engine(url, future=True)
 

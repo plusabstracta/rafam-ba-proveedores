@@ -148,7 +148,7 @@ def _sync_entity(
     except Exception as exc:
         if not dry_run:
             engine.mark_error(entity, str(exc))
-        logger.error("[%-11s] %s — ERROR: %s", mode, entity, exc)
+        logger.error("[%-11s] %s — ERROR: %s", mode, entity, exc, exc_info=True)
 
 
 def _warn_missing_cursor_fields(cfg, columns: list[str], entity: str) -> None:
