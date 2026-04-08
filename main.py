@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import sys
+import time
 
 from dotenv import load_dotenv
 from sqlalchemy.exc import SQLAlchemyError
@@ -105,6 +106,7 @@ def _sync_entity(
     cp  = engine.get_checkpoint(entity)
     cfg = ENTITY_CONFIGS[entity]
     mode = "FULL LOAD" if (cp.is_fresh or cfg.full_load) else "INCREMENTAL"
+    batch_delay = float(os.getenv("MIGRATOR_BATCH_DELAY_SECONDS", "0"))
 
     try:
         stmt = source_repo.build_statement(entity, cp)
@@ -116,6 +118,7 @@ def _sync_entity(
         columns = list(result.keys())
         _warn_missing_cursor_fields(cfg, columns, entity)
 
+        batch_count = 0
         while True:
             fetch_n = batch_size if limit is None else min(batch_size, limit - total)
             if fetch_n <= 0:
@@ -135,6 +138,10 @@ def _sync_entity(
 
             exporter.write_batch(entity, columns, batch)
             total += len(batch)
+            batch_count += 1
+
+            if batch_delay > 0 and batch_count > 1:
+                time.sleep(batch_delay)
 
             if limit is not None and total >= limit:
                 break

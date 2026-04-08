@@ -98,6 +98,22 @@ class SyncEngine:
                 vals = [r[col_idx[key]] for r in rows if r[col_idx[key]] is not None]
                 if vals:
                     raw = max(vals)
-                    last_ts = raw if isinstance(raw, datetime) else None
+                    if isinstance(raw, datetime):
+                        last_ts = raw
+                    elif isinstance(raw, str):
+                        last_ts = self._parse_ts(raw)
 
         return last_id, last_ts
+
+    @staticmethod
+    def _parse_ts(value: str) -> Optional[datetime]:
+        """Parse common timestamp string formats from SQLite TEXT columns."""
+        text = value.strip()
+        if not text:
+            return None
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+            try:
+                return datetime.strptime(text, fmt)
+            except ValueError:
+                continue
+        return None

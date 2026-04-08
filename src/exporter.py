@@ -908,6 +908,14 @@ class MigratorExporter(BaseExporter):
         except (TypeError, ValueError):
             return None
 
+        # Paxapos usa DECIMAL(10,2): máximo 99.999.999,99
+        if importe_total > 99_999_999.99:
+            logger.warning(
+                "Migrator [solic_gastos] SG %s-%s-%s: importe_total=%s excede DECIMAL(10,2), omitido",
+                ejercicio, deleg_solic, nro_solic, importe_total,
+            )
+            return None
+
         fecha_raw = raw.get("FECH_SOLIC")
         fecha = self._format_date_only(fecha_raw)
         if not fecha:
@@ -950,9 +958,9 @@ class MigratorExporter(BaseExporter):
             gasto_data["fecha_vencimiento"] = fech_venc
 
         # proveedor_id via EntityLinkStore (COD_PROV traído por LEFT JOIN a ORDEN_PAGO)
-        cod_prov = raw.get("OP_COD_PROV")
+        cod_prov = self._to_int(raw.get("OP_COD_PROV"))
         if cod_prov is not None:
-            remote_prov = self._link_store.get_remote_id("proveedores", str(int(cod_prov)))
+            remote_prov = self._link_store.get_remote_id("proveedores", str(cod_prov))
             if remote_prov:
                 gasto_data["proveedor_id"] = int(remote_prov)
             else:
@@ -1005,6 +1013,14 @@ class MigratorExporter(BaseExporter):
                 total = float(importe) if importe is not None else 0.0
             except (TypeError, ValueError):
                 total = 0.0
+
+            # Paxapos usa DECIMAL(10,2): máximo 99.999.999,99
+            if total > 99_999_999.99:
+                logger.warning(
+                    "Migrator [orden_pago] OP %s-%s: total=%s excede DECIMAL(10,2), omitido",
+                    ejercicio, nro_op, total,
+                )
+                continue
 
             egreso: dict = {
                 "identificador_pago": f"RAFAM-OP-{ejercicio}-{nro_op}",
