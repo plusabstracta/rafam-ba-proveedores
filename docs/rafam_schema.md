@@ -73,7 +73,7 @@
 | `NRO_DOC_APROB` | `NUMBER(7,0)` | ✓ |  |  |
 | `ANIO_DOC_APROB` | `NUMBER(4,0)` | ✓ |  |  |
 | `CONFIRMADO` | `VARCHAR2(1)` | ✓ |  |  |
-| `FECH_CONFIRM` | `DATE` | ✓ |  |  |
+| `FECH_CONFIRM` | `DATE` | ✓ |  |  | -> esta es mi fecha de cambio estado a registrado
 | `CANT_IMPRES` | `NUMBER(3,0)` | ✓ |  |  |
 | `FECH_ANUL` | `DATE` | ✓ |  |  |
 | `MOTIVO_ANUL` | `VARCHAR2(6)` | ✓ |  |  |
@@ -87,9 +87,9 @@
 
 | Valor | Registros |
 |-------|-----------|
-| `A` | 5448 |
-| `N` | 712 |
-| `R` | 108122 |
+| `A` | 5448 | anulado 
+| `N` | 712 | normal 
+| `R` | 108122 | registrado
 
 ---
 
@@ -177,9 +177,9 @@
 
 | Valor | Registros |
 |-------|-----------|
-| `A` | 392 |
-| `G` | 109112 |
-| `N` | 2910 |
+| `A` | 392 | anulado
+| `G` | 109112 | "generado"
+| `N` | 2910 | normal
 ---
 
 ## PED_ITEMS
