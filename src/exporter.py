@@ -748,7 +748,9 @@ class MigratorExporter(BaseExporter):
         self._log_unresolved_summary("ped_items")
 
     def _write_batch_oc_items(self, columns: list[str], rows: list[tuple]) -> None:
+        # ── 1. Agrupar filas por OC (cabecera + items) ────────────────────
         grouped: dict[tuple[int, int, int], dict] = {}
+        grouped_raw: dict[tuple[int, int, int], dict] = {}
         unresolved_items = 0
 
         for row in rows:
@@ -762,7 +764,7 @@ class MigratorExporter(BaseExporter):
 
             key = (ejercicio, uni_compra, nro_oc)
             if key not in grouped:
-                pedido = {
+                pedido: dict = {
                     "internal_id": f"rafam-oc-{ejercicio}-{uni_compra}-{nro_oc}",
                     "tipo": "orden_compra",
                     "observacion": self._compose_oc_observacion(raw, ejercicio, uni_compra, nro_oc),
@@ -788,6 +790,8 @@ class MigratorExporter(BaseExporter):
                     "Pedido": pedido,
                     "items": [],
                 }
+                # Guardar datos de cabecera OC para extras del link
+                grouped_raw[key] = raw
 
             item = self._map_oc_item(raw)
             if item is None:
@@ -796,13 +800,92 @@ class MigratorExporter(BaseExporter):
                 continue
             grouped[key]["items"].append(item)
 
-        ordenes_compra = [p for p in grouped.values() if p["items"]]
+        # ── 2. Clasificar OCs por acción según estado y link previo ───────
+        ocs_to_create: list[dict] = []      # estado N, sin link o link con estado != N
+        ocs_to_anular: list[dict] = []      # estado A, link previo con estado N (estaba en Paxapos)
+        ocs_to_skip_register: list[tuple[int, int, int]] = []  # estado R/A sin link previo N
+        created_count = 0
+        anuladas_count = 0
+        skipped_same_state = 0
+
+        for key, oc_data in grouped.items():
+            if not oc_data["items"]:
+                continue
+
+            raw = grouped_raw[key]
+            estado_actual = str(raw.get("ESTADO_OC", "")).strip().upper()
+            source_key = json.dumps(
+                {"ejercicio": key[0], "nro_oc": key[2], "uni_compra": key[1]},
+                sort_keys=True,
+            )
+            link_previo = self._link_store.get_link("orden_compra", source_key)
+            estado_previo = link_previo.get("estado_oc", "").strip().upper() if link_previo else None
+
+            if estado_actual == "N":
+                if link_previo is None or estado_previo != "N":
+                    # Nueva para Paxapos: no existía o venía de R
+                    ocs_to_create.append(oc_data)
+                else:
+                    # Ya estaba con N y ya tiene remote_id → skip
+                    skipped_same_state += 1
+            elif estado_actual == "A":
+                if link_previo and estado_previo == "N" and link_previo.get("remote_id"):
+                    # Estaba en Paxapos con N → anular
+                    oc_data["Pedido"]["estado_aprobacion"] = 4
+                    oc_data["Pedido"]["motivo_rechazo"] = "Anulada en RAFAM"
+                    ocs_to_anular.append(oc_data)
+                else:
+                    # Anulada sin haber sido N → solo registrar localmente
+                    ocs_to_skip_register.append(key)
+            else:
+                # Estado R u otro → solo registrar localmente
+                ocs_to_skip_register.append(key)
+
+        # ── 3. Registrar en link TODAS las OCs (con o sin envío) ──────────
+        # Las que se saltan o registran solo localmente (R, A sin N previo)
+        for key in ocs_to_skip_register:
+            raw = grouped_raw[key]
+            source_key = json.dumps(
+                {"ejercicio": key[0], "nro_oc": key[2], "uni_compra": key[1]},
+                sort_keys=True,
+            )
+            estado_oc = str(raw.get("ESTADO_OC", "")).strip().upper() or None
+            fech_confirm = self._format_date_only(raw.get("FECH_CONFIRM", "")) or None
+            cod_prov = str(raw.get("COD_PROV")) if raw.get("COD_PROV") is not None else None
+            importe_tot = str(raw.get("IMPORTE_TOT")) if raw.get("IMPORTE_TOT") is not None else None
+
+            # Preservar remote_id si ya existía
+            existing = self._link_store.get_link("orden_compra", source_key)
+            remote_id = existing.get("remote_id", "") if existing else ""
+
+            self._link_store.save_link(
+                entity="orden_compra",
+                source_key=source_key,
+                remote_id=remote_id,
+                estado_oc=estado_oc,
+                fech_confirm=fech_confirm,
+                cod_prov=cod_prov,
+                importe_tot=importe_tot,
+            )
+
+        # ── 4. Enviar OCs a crear + OCs a anular en un solo payload ───────
+        ordenes_compra = ocs_to_create + ocs_to_anular
+        raw_by_source_key: dict[str, dict] = {}
+        for key in grouped_raw:
+            sk = json.dumps(
+                {"ejercicio": key[0], "nro_oc": key[2], "uni_compra": key[1]},
+                sort_keys=True,
+            )
+            raw_by_source_key[sk] = grouped_raw[key]
+
         if not ordenes_compra:
-            msg = f"Migrator [oc_items]: lote sin items resolubles (omitidos={unresolved_items})"
-            if self._dry_run:
-                logger.warning(msg)
-                return
-            raise RuntimeError(msg)
+            logger.info(
+                "Migrator [oc_items]: nada que enviar (skip_estado=%d, mismo_estado=%d, sin_items=%d)",
+                len(ocs_to_skip_register),
+                skipped_same_state,
+                unresolved_items,
+            )
+            return
 
         payload = {
             "dry_run": self._dry_run,
@@ -822,10 +905,11 @@ class MigratorExporter(BaseExporter):
 
         url = f"{self._base_url}/{self._import_endpoint}"
         logger.debug(
-            "Migrator request [oc_items] POST %s dry_run=%s ocs=%d items_omitidos=%d",
+            "Migrator request [oc_items] POST %s dry_run=%s crear=%d anular=%d items_omitidos=%d",
             url,
             self._dry_run,
-            len(ordenes_compra),
+            len(ocs_to_create),
+            len(ocs_to_anular),
             unresolved_items,
         )
         parsed = self._post_json(url, payload)
@@ -836,14 +920,17 @@ class MigratorExporter(BaseExporter):
         error_count = section_stats.get("error", 0)
 
         logger.info(
-            "Migrator OK [oc_items->ordenes_compra]: %d ok, %d error, ocs=%d, items_omitidos=%d, dry_run=%s",
+            "Migrator OK [oc_items->ordenes_compra]: %d ok, %d error, crear=%d, anular=%d, "
+            "skip_estado=%d, mismo_estado=%d, dry_run=%s",
             ok_count,
             error_count,
-            len(ordenes_compra),
-            unresolved_items,
+            len(ocs_to_create),
+            len(ocs_to_anular),
+            len(ocs_to_skip_register),
+            skipped_same_state,
             self._dry_run,
         )
-        self._persist_links("oc_items", parsed, {})
+        self._persist_links("oc_items", parsed, raw_by_source_key)
         self._log_unresolved_summary("oc_items")
 
     def _write_batch_solic_gastos(self, columns: list[str], rows: list[tuple]) -> None:
@@ -1390,7 +1477,7 @@ class MigratorExporter(BaseExporter):
         elif entity == "ped_items":
             self._persist_links_section(results, "pedidos", "pedido", ["ejercicio", "num_ped"])
         elif entity == "oc_items":
-            self._persist_links_section(results, "ordenes_compra", "orden_compra", ["ejercicio", "uni_compra", "nro_oc"])
+            self._persist_links_orden_compra(results, raw_by_source_key)
         elif entity == "solic_gastos":
             self._persist_links_section(results, "gastos", "gasto", None)
         elif entity == "orden_pago":
@@ -1414,11 +1501,13 @@ class MigratorExporter(BaseExporter):
 
             raw = raw_by_source_key.get(str(source_key))
             cuit = self._normalize_cuit(raw.get("CUIT")) if raw else None
+            cod_estado = str(raw.get("COD_ESTADO")) if raw and raw.get("COD_ESTADO") is not None else None
             self._link_store.save_link(
                 entity="proveedores",
                 source_key=str(source_key),
                 remote_id=str(remote_id),
                 cuit=cuit,
+                cod_estado=cod_estado,
             )
 
     def _persist_links_jurisdicciones(self, results: dict) -> None:
@@ -1459,6 +1548,45 @@ class MigratorExporter(BaseExporter):
                     source_key=json.dumps({"jurisdiccion": str(jurisdiccion)}, sort_keys=True),
                     remote_id=str(remote_id),
                 )
+
+    def _persist_links_orden_compra(self, results: dict, raw_by_source_key: dict[str, dict]) -> None:
+        """Persiste entity_links para ordenes_compra con extras (estado_oc, fech_confirm, etc.)."""
+        section = results.get("ordenes_compra", [])
+        if not isinstance(section, list):
+            return
+
+        pk_fields = ["ejercicio", "uni_compra", "nro_oc"]
+        for result in section:
+            if not isinstance(result, dict) or not result.get("success"):
+                continue
+            external_id = result.get("external_id") or {}
+            if not isinstance(external_id, dict):
+                continue
+            remote_id = result.get("id")
+            if remote_id is None:
+                continue
+
+            key_dict = {k: external_id[k] for k in pk_fields if k in external_id}
+            if len(key_dict) != len(pk_fields):
+                logger.warning("Migrator [orden_compra]: external_id incompleto: %s", external_id)
+                continue
+            source_key = json.dumps(key_dict, sort_keys=True)
+
+            raw = raw_by_source_key.get(source_key, {})
+            estado_oc = str(raw.get("ESTADO_OC", "")).strip().upper() or None
+            fech_confirm = self._format_date_only(raw.get("FECH_CONFIRM", "")) or None
+            cod_prov = str(raw.get("COD_PROV")) if raw.get("COD_PROV") is not None else None
+            importe_tot = str(raw.get("IMPORTE_TOT")) if raw.get("IMPORTE_TOT") is not None else None
+
+            self._link_store.save_link(
+                entity="orden_compra",
+                source_key=source_key,
+                remote_id=str(remote_id),
+                estado_oc=estado_oc,
+                fech_confirm=fech_confirm,
+                cod_prov=cod_prov,
+                importe_tot=importe_tot,
+            )
 
     def _persist_links_section(
         self,

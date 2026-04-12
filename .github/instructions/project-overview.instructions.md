@@ -58,6 +58,7 @@ a un portal de proveedores basado en **Paxapos** (CakePHP 2) a través de APIs R
 - **SQLAlchemy 2.x** como única capa de acceso a datos (Oracle y SQLite).
 - **`oracledb`** como driver Oracle (thick mode para Oracle < 12.2).
 - **Sin frameworks web.** Esto es un script CLI, no un servidor.
+- **Operación local vía Makefile.** Para setup, carga, ejecución y reseteo usar objetivos `make` (evitar flujos ad-hoc de tooling externo para entorno Python).
 
 ### Archivos protegidos
 

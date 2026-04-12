@@ -38,6 +38,10 @@ ENTITY_CONFIGS: dict[str, EntityConfig] = {
         name="orden_compra",
         table_name="ORDEN_COMPRA",
         ts_field="FECH_OC",
+        # Re-process OCs with estado N from recent days to detect N→A transitions.
+        pending_state_field="ESTADO_OC",
+        pending_state_value="N",
+        pending_reprocess_days=30,
     ),
     "oc_items": EntityConfig(
         name="oc_items",

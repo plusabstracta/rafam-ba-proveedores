@@ -129,6 +129,8 @@ class SourceRepository:
                 orden_compra.c.FECH_OC.label("OC_FECH_OC"),
                 orden_compra.c.OBSERVACIONES.label("OC_OBSERVACIONES"),
                 orden_compra.c.ESTADO_OC,
+                orden_compra.c.FECH_CONFIRM,
+                orden_compra.c.IMPORTE_TOT,
                 solic_gastos.c.JURISDICCION.label("SG_JURISDICCION"),
             )
             .select_from(

@@ -8,11 +8,11 @@ _TABLE_PREFIX = "link_"
 # Extra columns per entity (beyond the base source_key, remote_id, updated_at).
 # Override via the ``schemas`` parameter in EntityLinkStore.__init__().
 DEFAULT_LINK_SCHEMAS: dict[str, list[str]] = {
-    "proveedores": ["cuit"],
+    "proveedores": ["cuit", "cod_estado"],
     "clasificacion": [],
     "rubro": [],
     "pedido": [],
-    "orden_compra": ["fech_confirm", "estado_oc"],
+    "orden_compra": ["fech_confirm", "estado_oc", "cod_prov", "importe_tot"],
     "gasto": [],
     "orden_pago": [],
 }
