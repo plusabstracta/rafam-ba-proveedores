@@ -38,8 +38,14 @@ class EntityLinkStore:
         self._conn.row_factory = sqlite3.Row
         self._schemas = schemas if schemas is not None else DEFAULT_LINK_SCHEMAS
         self._created_tables: set[str] = set()
+        self._ensure_all_tables()
 
     # ── internal ──────────────────────────────────────────────────────────
+
+    def _ensure_all_tables(self) -> None:
+        """Pre-create all entity link tables defined in the schema."""
+        for entity in self._schemas:
+            self._ensure_table(entity)
 
     def _ensure_table(self, entity: str) -> str:
         """Create ``link_<entity>`` if missing; ALTER TABLE to add new columns."""
