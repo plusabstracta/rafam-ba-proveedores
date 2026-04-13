@@ -813,7 +813,7 @@ class MigratorExporter(BaseExporter):
                 continue
 
             raw = grouped_raw[key]
-            estado_actual = str(raw.get("ESTADO_OC", "")).strip().upper()
+            estado_actual = str(raw.get("OC_ESTADO_OC", "")).strip().upper()
             source_key = json.dumps(
                 {"ejercicio": key[0], "nro_oc": key[2], "uni_compra": key[1]},
                 sort_keys=True,
@@ -849,10 +849,10 @@ class MigratorExporter(BaseExporter):
                 {"ejercicio": key[0], "nro_oc": key[2], "uni_compra": key[1]},
                 sort_keys=True,
             )
-            estado_oc = str(raw.get("ESTADO_OC", "")).strip().upper() or None
-            fech_confirm = self._format_date_only(raw.get("FECH_CONFIRM", "")) or None
+            estado_oc = str(raw.get("OC_ESTADO_OC", "")).strip().upper() or None
+            fech_confirm = self._format_date_only(raw.get("OC_FECH_CONFIRM", "")) or None
             cod_prov = str(raw.get("COD_PROV")) if raw.get("COD_PROV") is not None else None
-            importe_tot = str(raw.get("IMPORTE_TOT")) if raw.get("IMPORTE_TOT") is not None else None
+            importe_tot = str(raw.get("OC_IMPORTE_TOT")) if raw.get("OC_IMPORTE_TOT") is not None else None
 
             # Preservar remote_id si ya existía
             existing = self._link_store.get_link("orden_compra", source_key)
@@ -1573,10 +1573,10 @@ class MigratorExporter(BaseExporter):
             source_key = json.dumps(key_dict, sort_keys=True)
 
             raw = raw_by_source_key.get(source_key, {})
-            estado_oc = str(raw.get("ESTADO_OC", "")).strip().upper() or None
-            fech_confirm = self._format_date_only(raw.get("FECH_CONFIRM", "")) or None
+            estado_oc = str(raw.get("OC_ESTADO_OC", "")).strip().upper() or None
+            fech_confirm = self._format_date_only(raw.get("OC_FECH_CONFIRM", "")) or None
             cod_prov = str(raw.get("COD_PROV")) if raw.get("COD_PROV") is not None else None
-            importe_tot = str(raw.get("IMPORTE_TOT")) if raw.get("IMPORTE_TOT") is not None else None
+            importe_tot = str(raw.get("OC_IMPORTE_TOT")) if raw.get("OC_IMPORTE_TOT") is not None else None
 
             self._link_store.save_link(
                 entity="orden_compra",
