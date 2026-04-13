@@ -12,9 +12,9 @@ DEFAULT_LINK_SCHEMAS: dict[str, list[str]] = {
     "clasificacion": [],
     "rubro": [],
     "pedido": [],
-    "orden_compra": ["fech_confirm", "estado_oc", "cod_prov", "importe_tot"],
-    "gasto": [],
-    "orden_pago": [],
+    "orden_compra": ["fech_confirm", "estado_oc", "cod_prov", "importe_tot", "gasto_refs"],
+    "gasto": ["estado_solic", "importe_tot", "cod_prov"],
+    "orden_pago": ["estado_op", "importe_total"],
 }
 
 
@@ -130,3 +130,17 @@ class EntityLinkStore:
         if not row:
             return None
         return dict(row)
+
+    def get_sent_oc_gasto_refs(self) -> set[str]:
+        """Return gasto rafam_refs linked to OCs that have been sent to Paxapos."""
+        table = self._ensure_table("orden_compra")
+        rows = self._conn.execute(
+            f"SELECT gasto_refs FROM [{table}] WHERE remote_id != '' AND gasto_refs != ''"
+        ).fetchall()
+        refs: set[str] = set()
+        for row in rows:
+            for ref in row["gasto_refs"].split(","):
+                ref = ref.strip()
+                if ref:
+                    refs.add(ref)
+        return refs

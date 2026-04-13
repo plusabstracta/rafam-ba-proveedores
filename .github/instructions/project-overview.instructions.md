@@ -123,7 +123,102 @@ src/entity_link_store.py → vínculos RAFAM_ID ↔ Paxapos_ID
 - Payloads CakePHP 2 usan wrapper con nombre del modelo: `{"Proveedor": {...}}`.
 - Responses batch (HTTP 207): parsear `results` item por item — un error parcial no invalida todo el batch.
 
-### 3.7 Testing
+#### Endpoint migrator: `RafamMigracionesController::importar()`
+
+Controller: `Plugin/Account/Controller/RafamMigracionesController.php`
+
+Orden interno de procesamiento (hardcodeado en foreach):
+```
+rubros → clasificaciones → proveedores → pedidos → ordenes_compra → gastos → ordenes_pago
+```
+Se pueden enviar todas las entidades en un solo payload y el endpoint respeta el orden.
+
+#### Órdenes de Compra (`_importPedido`)
+
+- Modelo: `Compras.Pedido` → tabla `compras_pedidos` (con `tablePrefix = 'compras_'`).
+- Upsert por `Pedido.internal_id` (formato: `rafam-oc-{ej}-{uni}-{nro}`).
+- Estado: `estado_aprobacion` — valor `4` para anular una OC existente.
+- Acepta `gasto_ids: [int]` para vincular OC↔Gasto via HABTM (tanto en create como en update).
+- Acepta `gasto_external_ids: [string]` como fallback (resuelve buscando traza `RAFAM:{...}` en `Gasto.observacion`).
+- Respuesta: `{success, id, mode: create|update, external_id}`.
+
+#### Gastos (`_importGasto`)
+
+- Modelo: `Account.Gasto` → tabla `gastos`.
+- Upsert por `proveedor_id + factura_nro` (+ `punto_de_venta` si viene). NO usa `external_id` para dedup.
+- `external_id` se graba como traza en `Gasto.observacion` con formato `RAFAM:{...json...}`.
+- Sin proveedor o sin factura_nro → siempre INSERT nuevo (sin posibilidad de dedup).
+- Campos obligatorios: `importe_total`, `fecha`. Todo lo demás es opcional.
+- **No existe mecanismo de anulación** — omitir gastos con `ESTADO_SOLIC=A` del envío.
+- **No acepta `pedido_id`** — el vínculo Gasto↔OC solo se establece desde el lado de la OC (via `gasto_ids`).
+- Asociaciones relevantes: `belongsTo => Proveedor, Clasificacion`, `hasMany => Compras.Pedido`, `HABTM => Egreso` (via `account_egresos_gastos`).
+- Respuesta: `{success, id, mode: create|update, external_id}`.
+
+#### Órdenes de Pago (`_importOrdenPago`)
+
+- Modelo: `Account.Egreso` → tabla `egresos`.
+- Upsert por `Egreso.identificador_pago` (formato: `RAFAM-OP-{ej}-{nro}`). Si no viene, se autogenera como `RAFAM-{md5(externalId)}`.
+- Si ya existe → `skip_existing` (NO actualiza estado ni campos). No hay forma de hacer N→C post-creación.
+- Requiere mínimo 1 gasto resoluble — falla explícitamente si `gastoIds` está vacío.
+- `gasto_ids` (IDs numéricos) tiene prioridad. `gasto_external_ids` es fallback automático.
+- Feature flag: `Site.ordenes_de_pago` debe estar en `true` — si no, devuelve HTTP 400 inmediatamente.
+- Estados del Egreso: `0=Pendiente, 1=Aprobado, 2=Rechazado, 3=Pagado`. No existe "Anulado" — omitir OPs con `ESTADO_OP=A` del envío.
+- Si no se envía `estado`: con `fecha` → auto `PAGADO(3)`, sin `fecha` → auto `PENDIENTE(0)`.
+- `allowedFields` del save: `identificador_pago, fecha, tipo_de_pago_id, total, observacion, estado, fecha_programada, cuenta_bancaria_id, numero_operacion`. Notar que `proveedor_id` NO está.
+- Respuesta: `{success, id, mode: create|skip_existing, external_id, gasto_ids}`.
+
+#### Cadena de vínculos en Paxapos
+
+```
+OC (compras_pedidos.gasto_id) ──HABTM──► Gasto ◄──HABTM (account_egresos_gastos)── Egreso (OP)
+```
+
+- OC→Gasto: se establece enviando `gasto_ids` en el payload de la OC.
+- Gasto→OC: no hay forma desde `_importGasto`.
+- OP→Gasto: se establece enviando `gasto_ids` en el payload de la OP.
+
+#### Cadena de vínculos en RAFAM (fuente)
+
+```
+OC_ITEMS ──(DELEG_SOLIC, NRO_SOLIC)──► SOLIC_GASTOS ◄──(NRO_CANCE)── ORDEN_PAGO
+```
+
+El Gasto (SOLIC_GASTOS) es el puente entre OC y OP. La FK de OC_ITEMS a SOLIC_GASTOS permite resolver qué gastos pertenecen a cada OC.
+
+#### Colisión de columnas en JOINs
+
+Cuando un LEFT JOIN trae columnas con el mismo nombre que la tabla principal (ej: `ESTADO_OC` existe en `OC_ITEMS` y en `ORDEN_COMPRA`), se debe usar `.label()` en SQLAlchemy para prefijar:
+```python
+orden_compra.c.ESTADO_OC.label("OC_ESTADO_OC")
+```
+Luego leer como `raw.get("OC_ESTADO_OC")` en el exporter. Bug real encontrado en Sprint 1.
+
+### 3.7 Entity Link Store — esquema de extras por entidad
+
+Cada entidad tiene una tabla `link_<entity>` en SQLite con columnas base (`source_key`, `remote_id`, `updated_at`) más extras configurables:
+
+| Entidad | Extras | source_key format |
+|---|---|---|
+| `proveedores` | `cuit`, `cod_estado` | `"<COD_PROV>"` |
+| `clasificacion` | — | `json({"jurisdiccion": "..."}`) |
+| `rubro` | — | `json({"jurisdiccion": "..."})` |
+| `pedido` | — | `json({"ejercicio": N, "num_ped": N})` |
+| `orden_compra` | `fech_confirm`, `estado_oc`, `cod_prov`, `importe_tot` | `json({"ejercicio": N, "nro_oc": N, "uni_compra": N})` |
+| `gasto` | `estado_solic`, `importe_tot`, `cod_prov` | `json({"rafam_ref": "SG-ej-deleg-nro"})` |
+| `orden_pago` | `estado_op`, `importe_total` | `json({"ejercicio": N, "nro_op": N})` |
+
+Los extras permiten detectar cambios de estado entre corridas (ej: `estado_oc` guardado vs actual).
+
+### 3.8 Detección de cambio de estado
+
+Implementado para Órdenes de Compra (Sprint 1):
+- `R→N` (Registrada→Normal): la OC aparece con estado N, no existía en link_store → se crea.
+- `N→A` (Normal→Anulada): la OC existía con `estado_oc=N` en link_store, ahora viene con `A` → se envía con `estado_aprobacion: 4`.
+- `pending_reprocess_days=30`: re-consulta OCs con estado N de los últimos 30 días para detectar transiciones.
+
+NO implementado para Gastos ni OPs (el endpoint no soporta anulación ni update post-creación).
+
+### 3.9 Testing
 
 - Tests con `pytest` usando SQLite in-memory.
 - Fixtures mock de lookups para evitar dependencia de red.

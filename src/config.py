@@ -33,6 +33,11 @@ ENTITY_CONFIGS: dict[str, EntityConfig] = {
         name="solic_gastos",
         table_name="SOLIC_GASTOS",
         ts_field="FECH_SOLIC",
+        # Re-process confirmed gastos from recent days to catch those
+        # whose linked OC was sent after the gasto was first processed.
+        pending_state_field="ESTADO_SOLIC",
+        pending_state_value="C",
+        pending_reprocess_days=30,
     ),
     "orden_compra": EntityConfig(
         name="orden_compra",

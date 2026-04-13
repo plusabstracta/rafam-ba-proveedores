@@ -751,6 +751,7 @@ class MigratorExporter(BaseExporter):
         # ── 1. Agrupar filas por OC (cabecera + items) ────────────────────
         grouped: dict[tuple[int, int, int], dict] = {}
         grouped_raw: dict[tuple[int, int, int], dict] = {}
+        grouped_gasto_refs: dict[tuple[int, int, int], list[str]] = {}
         unresolved_items = 0
 
         for row in rows:
@@ -793,6 +794,15 @@ class MigratorExporter(BaseExporter):
                 # Guardar datos de cabecera OC para extras del link
                 grouped_raw[key] = raw
 
+            # Recolectar ref de gasto desde DELEG_SOLIC + NRO_SOLIC del ítem
+            deleg_solic = self._to_int(raw.get("DELEG_SOLIC"))
+            nro_solic = self._to_int(raw.get("NRO_SOLIC"))
+            if deleg_solic is not None and nro_solic is not None:
+                rafam_ref = f"SG-{ejercicio}-{deleg_solic}-{nro_solic}"
+                refs = grouped_gasto_refs.setdefault(key, [])
+                if rafam_ref not in refs:
+                    refs.append(rafam_ref)
+
             item = self._map_oc_item(raw)
             if item is None:
                 unresolved_items += 1
@@ -800,10 +810,25 @@ class MigratorExporter(BaseExporter):
                 continue
             grouped[key]["items"].append(item)
 
+        # ── 1b. Resolver gasto_ids por OC via link_gasto ─────────────────
+        for key, oc_data in grouped.items():
+            gasto_refs = grouped_gasto_refs.get(key, [])
+            if not gasto_refs:
+                continue
+            gasto_ids = []
+            for ref in gasto_refs:
+                gasto_key = json.dumps({"rafam_ref": ref}, sort_keys=True)
+                remote_gasto = self._link_store.get_remote_id("gasto", gasto_key)
+                if remote_gasto:
+                    gasto_ids.append(int(remote_gasto))
+            if gasto_ids:
+                oc_data["gasto_ids"] = gasto_ids
+
         # ── 2. Clasificar OCs por acción según estado y link previo ───────
         ocs_to_create: list[dict] = []      # estado N, sin link o link con estado != N
         ocs_to_anular: list[dict] = []      # estado A, link previo con estado N (estaba en Paxapos)
         ocs_to_skip_register: list[tuple[int, int, int]] = []  # estado R/A sin link previo N
+        ocs_same_state: list[tuple[int, int, int]] = []  # estado N ya enviado, sin gastos nuevos
         created_count = 0
         anuladas_count = 0
         skipped_same_state = 0
@@ -825,8 +850,12 @@ class MigratorExporter(BaseExporter):
                 if link_previo is None or estado_previo != "N":
                     # Nueva para Paxapos: no existía o venía de R
                     ocs_to_create.append(oc_data)
+                elif oc_data.get("gasto_ids"):
+                    # Ya enviada con N pero ahora tiene gastos resueltos → re-enviar para vincular
+                    ocs_to_create.append(oc_data)
                 else:
-                    # Ya estaba con N y ya tiene remote_id → skip
+                    # Ya estaba con N y ya tiene remote_id → skip envío, actualizar refs
+                    ocs_same_state.append(key)
                     skipped_same_state += 1
             elif estado_actual == "A":
                 if link_previo and estado_previo == "N" and link_previo.get("remote_id"):
@@ -843,7 +872,7 @@ class MigratorExporter(BaseExporter):
 
         # ── 3. Registrar en link TODAS las OCs (con o sin envío) ──────────
         # Las que se saltan o registran solo localmente (R, A sin N previo)
-        for key in ocs_to_skip_register:
+        for key in ocs_to_skip_register + ocs_same_state:
             raw = grouped_raw[key]
             source_key = json.dumps(
                 {"ejercicio": key[0], "nro_oc": key[2], "uni_compra": key[1]},
@@ -853,6 +882,8 @@ class MigratorExporter(BaseExporter):
             fech_confirm = self._format_date_only(raw.get("OC_FECH_CONFIRM", "")) or None
             cod_prov = str(raw.get("COD_PROV")) if raw.get("COD_PROV") is not None else None
             importe_tot = str(raw.get("OC_IMPORTE_TOT")) if raw.get("OC_IMPORTE_TOT") is not None else None
+            gasto_refs_list = grouped_gasto_refs.get(key, [])
+            gasto_refs = ",".join(gasto_refs_list) if gasto_refs_list else ""
 
             # Preservar remote_id si ya existía
             existing = self._link_store.get_link("orden_compra", source_key)
@@ -866,6 +897,7 @@ class MigratorExporter(BaseExporter):
                 fech_confirm=fech_confirm,
                 cod_prov=cod_prov,
                 importe_tot=importe_tot,
+                gasto_refs=gasto_refs,
             )
 
         # ── 4. Enviar OCs a crear + OCs a anular en un solo payload ───────
@@ -877,6 +909,9 @@ class MigratorExporter(BaseExporter):
                 sort_keys=True,
             )
             raw_by_source_key[sk] = grouped_raw[key]
+            # Agregar gasto_refs para persist
+            gasto_refs_list = grouped_gasto_refs.get(key, [])
+            raw_by_source_key[sk]["_GASTO_REFS"] = ",".join(gasto_refs_list) if gasto_refs_list else ""
 
         if not ordenes_compra:
             logger.info(
@@ -934,13 +969,35 @@ class MigratorExporter(BaseExporter):
         self._log_unresolved_summary("oc_items")
 
     def _write_batch_solic_gastos(self, columns: list[str], rows: list[tuple]) -> None:
+        # Solo enviar gastos vinculados a OCs ya enviadas a Paxapos
+        allowed_refs = self._link_store.get_sent_oc_gasto_refs()
+
         gastos = []
+        raw_by_source_key: dict[str, dict] = {}
+        skipped_no_oc = 0
         for row in rows:
             raw = dict(zip(columns, row))
             gasto = self._map_solic_gasto(raw)
             if gasto is None:
                 continue
+
+            # Filtrar: solo gastos cuya ref esté vinculada a una OC enviada
+            ext = gasto.get("external_id", {})
+            rafam_ref = ext.get("rafam_ref", "") if ext else ""
+            if rafam_ref not in allowed_refs:
+                skipped_no_oc += 1
+                continue
+
             gastos.append(gasto)
+            if ext:
+                sk = json.dumps(ext, sort_keys=True)
+                raw_by_source_key[sk] = raw
+
+        if skipped_no_oc:
+            logger.info(
+                "Migrator [solic_gastos]: %d gastos omitidos (sin OC enviada vinculada)",
+                skipped_no_oc,
+            )
 
         if not gastos:
             logger.info("Migrator [solic_gastos]: lote vacío luego del mapeo")
@@ -978,7 +1035,7 @@ class MigratorExporter(BaseExporter):
             "Migrator OK [solic_gastos->gastos]: %d ok, %d error, gastos=%d, dry_run=%s",
             ok_count, error_count, len(gastos), self._dry_run,
         )
-        self._persist_links("solic_gastos", parsed, {})
+        self._persist_links("solic_gastos", parsed, raw_by_source_key)
 
     def _map_solic_gasto(self, raw: dict) -> dict | None:
         ejercicio = self._to_int(raw.get("EJERCICIO"))
@@ -1069,6 +1126,7 @@ class MigratorExporter(BaseExporter):
         # Agrupa por (EJERCICIO, NRO_OP) y acumula las refs de gastos del LEFT JOIN
         grouped: dict[tuple[int, int], dict] = {}
         grouped_gasto_refs: dict[tuple[int, int], list[str]] = {}
+        raw_by_source_key: dict[str, dict] = {}
 
         for row in rows:
             raw = dict(zip(columns, row))
@@ -1094,6 +1152,10 @@ class MigratorExporter(BaseExporter):
             estado = str(raw.get("ESTADO_OP", "")).strip().upper()
             if estado == "A":  # Anulada: omitir
                 continue
+
+            # Guardar raw para extras en persist_links
+            sk = json.dumps({"ejercicio": ejercicio, "nro_op": nro_op}, sort_keys=True)
+            raw_by_source_key[sk] = raw
 
             importe = raw.get("IMPORTE_TOTAL")
             try:
@@ -1213,7 +1275,7 @@ class MigratorExporter(BaseExporter):
             "Migrator OK [orden_pago]: %d ok, %d error, ops=%d, omitidas=%d, dry_run=%s",
             ok_count, error_count, len(ordenes_pago), skipped_no_gasto, self._dry_run,
         )
-        self._persist_links("orden_pago", parsed, {})
+        self._persist_links("orden_pago", parsed, raw_by_source_key)
 
     def _map_row(self, entity: str, raw: dict) -> dict | None:
         if entity == "proveedores":
@@ -1479,9 +1541,9 @@ class MigratorExporter(BaseExporter):
         elif entity == "oc_items":
             self._persist_links_orden_compra(results, raw_by_source_key)
         elif entity == "solic_gastos":
-            self._persist_links_section(results, "gastos", "gasto", None)
+            self._persist_links_solic_gastos(results, raw_by_source_key)
         elif entity == "orden_pago":
-            self._persist_links_section(results, "ordenes_pago", "orden_pago", ["ejercicio", "nro_op"])
+            self._persist_links_orden_pago(results, raw_by_source_key)
 
     def _persist_links_proveedores(self, results: dict, raw_by_source_key: dict[str, dict]) -> None:
         proveedores = results.get("proveedores", [])
@@ -1578,6 +1640,8 @@ class MigratorExporter(BaseExporter):
             cod_prov = str(raw.get("COD_PROV")) if raw.get("COD_PROV") is not None else None
             importe_tot = str(raw.get("OC_IMPORTE_TOT")) if raw.get("OC_IMPORTE_TOT") is not None else None
 
+            gasto_refs = raw.get("_GASTO_REFS", "")
+
             self._link_store.save_link(
                 entity="orden_compra",
                 source_key=source_key,
@@ -1586,6 +1650,74 @@ class MigratorExporter(BaseExporter):
                 fech_confirm=fech_confirm,
                 cod_prov=cod_prov,
                 importe_tot=importe_tot,
+                gasto_refs=gasto_refs,
+            )
+
+    def _persist_links_solic_gastos(self, results: dict, raw_by_source_key: dict[str, dict]) -> None:
+        """Persiste entity_links para gastos con extras (estado_solic, importe_tot, cod_prov)."""
+        section = results.get("gastos", [])
+        if not isinstance(section, list):
+            return
+
+        for result in section:
+            if not isinstance(result, dict) or not result.get("success"):
+                continue
+            external_id = result.get("external_id") or {}
+            if not isinstance(external_id, dict):
+                continue
+            remote_id = result.get("id")
+            if remote_id is None:
+                continue
+
+            source_key = json.dumps(external_id, sort_keys=True)
+
+            raw = raw_by_source_key.get(source_key, {})
+            estado_solic = str(raw.get("ESTADO_SOLIC", "")).strip().upper() or None
+            importe_tot = str(raw.get("IMPORTE_TOT")) if raw.get("IMPORTE_TOT") is not None else None
+            cod_prov = str(raw.get("OP_COD_PROV")) if raw.get("OP_COD_PROV") is not None else None
+
+            self._link_store.save_link(
+                entity="gasto",
+                source_key=source_key,
+                remote_id=str(remote_id),
+                estado_solic=estado_solic,
+                importe_tot=importe_tot,
+                cod_prov=cod_prov,
+            )
+
+    def _persist_links_orden_pago(self, results: dict, raw_by_source_key: dict[str, dict]) -> None:
+        """Persiste entity_links para ordenes_pago con extras (estado_op, importe_total)."""
+        section = results.get("ordenes_pago", [])
+        if not isinstance(section, list):
+            return
+
+        pk_fields = ["ejercicio", "nro_op"]
+        for result in section:
+            if not isinstance(result, dict) or not result.get("success"):
+                continue
+            external_id = result.get("external_id") or {}
+            if not isinstance(external_id, dict):
+                continue
+            remote_id = result.get("id")
+            if remote_id is None:
+                continue
+
+            key_dict = {k: external_id[k] for k in pk_fields if k in external_id}
+            if len(key_dict) != len(pk_fields):
+                logger.warning("Migrator [orden_pago]: external_id incompleto: %s", external_id)
+                continue
+            source_key = json.dumps(key_dict, sort_keys=True)
+
+            raw = raw_by_source_key.get(source_key, {})
+            estado_op = str(raw.get("ESTADO_OP", "")).strip().upper() or None
+            importe_total = str(raw.get("IMPORTE_TOTAL")) if raw.get("IMPORTE_TOTAL") is not None else None
+
+            self._link_store.save_link(
+                entity="orden_pago",
+                source_key=source_key,
+                remote_id=str(remote_id),
+                estado_op=estado_op,
+                importe_total=importe_total,
             )
 
     def _persist_links_section(
