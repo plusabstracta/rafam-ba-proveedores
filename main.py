@@ -136,12 +136,12 @@ def _sync_entity(
             if bts is not None:
                 last_ts = max(last_ts, bts) if last_ts is not None else bts
 
+            if batch_delay > 0 and batch_count > 0:
+                time.sleep(batch_delay)
+
             exporter.write_batch(entity, columns, batch)
             total += len(batch)
             batch_count += 1
-
-            if batch_delay > 0 and batch_count > 1:
-                time.sleep(batch_delay)
 
             if limit is not None and total >= limit:
                 break

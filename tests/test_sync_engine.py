@@ -161,12 +161,22 @@ class TestSourceRepository:
             Column("NRO_SOLIC", Integer),
             Column("FECH_SOLIC", DateTime),
         )
-        orden_pago_tbl = Table(
-            "ORDEN_PAGO",
+        oc_items_tbl = Table(
+            "OC_ITEMS",
             metadata,
             Column("EJERCICIO", Integer),
-            Column("NRO_OP", Integer),
-            Column("NRO_CANCE", Integer),
+            Column("UNI_COMPRA", Integer),
+            Column("NRO_OC", Integer),
+            Column("ITEM_OC", Integer),
+            Column("DELEG_SOLIC", Integer),
+            Column("NRO_SOLIC", Integer),
+        )
+        orden_compra_tbl = Table(
+            "ORDEN_COMPRA",
+            metadata,
+            Column("EJERCICIO", Integer),
+            Column("UNI_COMPRA", Integer),
+            Column("NRO_OC", Integer),
             Column("COD_PROV", Integer),
         )
         metadata.create_all(db)

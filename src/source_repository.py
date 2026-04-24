@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import Column, MetaData, Table, and_, or_, select
+from sqlalchemy import Column, MetaData, Table, and_, func, or_, select
 from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.engine import Connection
 from sqlalchemy.sql import Select
@@ -159,19 +159,49 @@ class SourceRepository:
         checkpoint: Checkpoint,
     ) -> Select:
         solic_gastos = self._reflect_table("SOLIC_GASTOS")
-        orden_pago = self._reflect_table("ORDEN_PAGO")
+        oc_items = self._reflect_table("OC_ITEMS")
+        orden_compra = self._reflect_table("ORDEN_COMPRA")
+
+        # Subquery: one COD_PROV per (EJERCICIO, DELEG_SOLIC, NRO_SOLIC)
+        # via OC_ITEMS → ORDEN_COMPRA.  MIN() is a deterministic tie-breaker
+        # for the rare cases where a gasto links to OCs with different providers.
+        oc_prov = (
+            select(
+                oc_items.c.EJERCICIO,
+                oc_items.c.DELEG_SOLIC,
+                oc_items.c.NRO_SOLIC,
+                func.min(orden_compra.c.COD_PROV).label("OC_COD_PROV"),
+            )
+            .select_from(
+                oc_items.join(
+                    orden_compra,
+                    and_(
+                        oc_items.c.EJERCICIO == orden_compra.c.EJERCICIO,
+                        oc_items.c.UNI_COMPRA == orden_compra.c.UNI_COMPRA,
+                        oc_items.c.NRO_OC == orden_compra.c.NRO_OC,
+                    ),
+                )
+            )
+            .group_by(
+                oc_items.c.EJERCICIO,
+                oc_items.c.DELEG_SOLIC,
+                oc_items.c.NRO_SOLIC,
+            )
+            .subquery("oc_prov")
+        )
 
         stmt = (
             select(
                 solic_gastos,
-                orden_pago.c.COD_PROV.label("OP_COD_PROV"),
+                oc_prov.c.OC_COD_PROV,
             )
             .select_from(
                 solic_gastos.outerjoin(
-                    orden_pago,
+                    oc_prov,
                     and_(
-                        solic_gastos.c.EJERCICIO == orden_pago.c.EJERCICIO,
-                        solic_gastos.c.NRO_SOLIC == orden_pago.c.NRO_CANCE,
+                        solic_gastos.c.EJERCICIO == oc_prov.c.EJERCICIO,
+                        solic_gastos.c.DELEG_SOLIC == oc_prov.c.DELEG_SOLIC,
+                        solic_gastos.c.NRO_SOLIC == oc_prov.c.NRO_SOLIC,
                     ),
                 )
             )

@@ -825,10 +825,10 @@ class MigratorExporter(BaseExporter):
                 oc_data["gasto_ids"] = gasto_ids
 
         # ── 2. Clasificar OCs por acción según estado y link previo ───────
-        ocs_to_create: list[dict] = []      # estado N, sin link o link con estado != N
-        ocs_to_anular: list[dict] = []      # estado A, link previo con estado N (estaba en Paxapos)
-        ocs_to_skip_register: list[tuple[int, int, int]] = []  # estado R/A sin link previo N
-        ocs_same_state: list[tuple[int, int, int]] = []  # estado N ya enviado, sin gastos nuevos
+        ocs_to_create: list[dict] = []      # estado R, sin link o link con estado != R
+        ocs_to_anular: list[dict] = []      # estado A, link previo con estado R (estaba en Paxapos)
+        ocs_to_skip_register: list[tuple[int, int, int]] = []  # estado N/A sin link previo R
+        ocs_same_state: list[tuple[int, int, int]] = []  # estado R ya enviado, sin gastos nuevos
         created_count = 0
         anuladas_count = 0
         skipped_same_state = 0
@@ -846,28 +846,28 @@ class MigratorExporter(BaseExporter):
             link_previo = self._link_store.get_link("orden_compra", source_key)
             estado_previo = link_previo.get("estado_oc", "").strip().upper() if link_previo else None
 
-            if estado_actual == "N":
-                if link_previo is None or estado_previo != "N":
-                    # Nueva para Paxapos: no existía o venía de R
+            if estado_actual == "R":
+                if link_previo is None or estado_previo != "R":
+                    # Nueva para Paxapos: no existía o venía de otro estado
                     ocs_to_create.append(oc_data)
                 elif oc_data.get("gasto_ids"):
-                    # Ya enviada con N pero ahora tiene gastos resueltos → re-enviar para vincular
+                    # Ya enviada con R pero ahora tiene gastos resueltos → re-enviar para vincular
                     ocs_to_create.append(oc_data)
                 else:
-                    # Ya estaba con N y ya tiene remote_id → skip envío, actualizar refs
+                    # Ya estaba con R y ya tiene remote_id → skip envío, actualizar refs
                     ocs_same_state.append(key)
                     skipped_same_state += 1
             elif estado_actual == "A":
-                if link_previo and estado_previo == "N" and link_previo.get("remote_id"):
-                    # Estaba en Paxapos con N → anular
+                if link_previo and estado_previo == "R" and link_previo.get("remote_id"):
+                    # Estaba en Paxapos con R → anular
                     oc_data["Pedido"]["estado_aprobacion"] = 4
                     oc_data["Pedido"]["motivo_rechazo"] = "Anulada en RAFAM"
                     ocs_to_anular.append(oc_data)
                 else:
-                    # Anulada sin haber sido N → solo registrar localmente
+                    # Anulada sin haber sido R → solo registrar localmente
                     ocs_to_skip_register.append(key)
             else:
-                # Estado R u otro → solo registrar localmente
+                # Estado N u otro → solo registrar localmente
                 ocs_to_skip_register.append(key)
 
         # ── 3. Registrar en link TODAS las OCs (con o sin envío) ──────────
@@ -1101,8 +1101,8 @@ class MigratorExporter(BaseExporter):
         if fech_venc:
             gasto_data["fecha_vencimiento"] = fech_venc
 
-        # proveedor_id via EntityLinkStore (COD_PROV traído por LEFT JOIN a ORDEN_PAGO)
-        cod_prov = self._to_int(raw.get("OP_COD_PROV"))
+        # proveedor_id via EntityLinkStore (COD_PROV traído por LEFT JOIN a ORDEN_COMPRA via OC_ITEMS)
+        cod_prov = self._to_int(raw.get("OC_COD_PROV"))
         if cod_prov is not None:
             remote_prov = self._link_store.get_remote_id("proveedores", str(cod_prov))
             if remote_prov:
@@ -1674,7 +1674,7 @@ class MigratorExporter(BaseExporter):
             raw = raw_by_source_key.get(source_key, {})
             estado_solic = str(raw.get("ESTADO_SOLIC", "")).strip().upper() or None
             importe_tot = str(raw.get("IMPORTE_TOT")) if raw.get("IMPORTE_TOT") is not None else None
-            cod_prov = str(raw.get("OP_COD_PROV")) if raw.get("OP_COD_PROV") is not None else None
+            cod_prov = str(raw.get("OC_COD_PROV")) if raw.get("OC_COD_PROV") is not None else None
 
             self._link_store.save_link(
                 entity="gasto",
