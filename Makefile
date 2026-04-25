@@ -12,7 +12,7 @@ LIMIT ?=
 EXPORT ?= csv
 FORCE_UPDATE ?= 0
 
-.PHONY: help setup install env load-dev status run-all test reset-all \
+.PHONY: help setup install env load-dev update-mapping explore-schema status run-all test reset-all \
 	run-jurisdicciones run-proveedores run-pedidos run-ped_items run-solic_gastos \
 	run-orden_compra run-oc_items run-orden_pago \
 	run-proveedores-gateway \
@@ -31,6 +31,8 @@ help:
 	@echo ""
 	@echo "  make setup              Crea .venv, instala deps y genera .env si no existe"
 	@echo "  make load-dev           Carga CSVs a SQLite local"
+	@echo "  make update-mapping     Regenera docs/field_mapping.md desde la DB (SQLite o Oracle)"
+	@echo "  make explore-schema     Genera docs/rafam_schema.md desde Oracle"
 	@echo "  make status             Muestra estado de checkpoints"
 	@echo "  make run-all            Ejecuta sync de todas las entidades"
 	@echo "  make run-proveedores    Ejecuta sync solo de proveedores"
@@ -71,6 +73,15 @@ env:
 
 load-dev:
 	$(PY) scripts/load_csv_to_sqlite.py --csv-dir $(CSV_DIR) --output-db $(DEV_DB)
+
+update-mapping:
+	SQLITE_DB_PATH=$(DEV_DB) DB_BACKEND=sqlite $(PY) scripts/update_field_mapping.py
+
+update-mapping-oracle:
+	DB_BACKEND=oracle $(PY) scripts/update_field_mapping.py
+
+explore-schema:
+	$(PY) scripts/explore_schema.py
 
 status:
 	$(PY) main.py status
