@@ -73,15 +73,40 @@ class SourceRepository:
         checkpoint: Checkpoint,
     ) -> Select:
         oc = self._reflect_table("ORDEN_COMPRA")
-        prov = self._reflect_table("PROVEEDORES")
+        oc_items = self._reflect_table("OC_ITEMS")
+        solic_gastos = self._reflect_table("SOLIC_GASTOS")
 
+        # ORDEN_COMPRA → OC_ITEMS (items) → SOLIC_GASTOS (jurisdicción).
+        # El cursor incremental aplica sobre ORDEN_COMPRA (FECH_OC / ESTADO_OC),
+        # así solo se traen OCs recién modificadas CON sus items.
         stmt = (
             select(
-                oc,
-                prov.c.CUIT,
-                prov.c.COD_ESTADO.label("ESTADO_PROVEEDOR"),
+                oc_items,
+                oc.c.COD_PROV,
+                oc.c.FECH_OC.label("OC_FECH_OC"),
+                oc.c.OBSERVACIONES.label("OC_OBSERVACIONES"),
+                oc.c.ESTADO_OC.label("OC_ESTADO_OC"),
+                oc.c.FECH_CONFIRM.label("OC_FECH_CONFIRM"),
+                oc.c.IMPORTE_TOT.label("OC_IMPORTE_TOT"),
+                solic_gastos.c.JURISDICCION.label("SG_JURISDICCION"),
             )
-            .select_from(oc.outerjoin(prov, oc.c.COD_PROV == prov.c.COD_PROV))
+            .select_from(
+                oc.join(
+                    oc_items,
+                    and_(
+                        oc.c.EJERCICIO == oc_items.c.EJERCICIO,
+                        oc.c.UNI_COMPRA == oc_items.c.UNI_COMPRA,
+                        oc.c.NRO_OC == oc_items.c.NRO_OC,
+                    ),
+                ).outerjoin(
+                    solic_gastos,
+                    and_(
+                        oc_items.c.EJERCICIO == solic_gastos.c.EJERCICIO,
+                        oc_items.c.DELEG_SOLIC == solic_gastos.c.DELEG_SOLIC,
+                        oc_items.c.NRO_SOLIC == solic_gastos.c.NRO_SOLIC,
+                    ),
+                )
+            )
         )
         return self._apply_incremental_filters(stmt, oc, cfg, checkpoint)
 
