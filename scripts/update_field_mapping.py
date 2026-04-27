@@ -304,12 +304,18 @@ def _entity_rows(table: str, columns: list[dict[str, str]], backend: str) -> lis
     return rows
 
 
-def _build_markdown(all_columns: dict[str, list[dict[str, str]]], backend: str) -> str:
+def _build_markdown(
+    all_columns: dict[str, list[dict[str, str]]],
+    backend: str,
+    engine: Any | None = None,
+    include_samples: bool = True,
+) -> str:
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     source_label = (
         f"Oracle `{SCHEMA}`" if backend == "oracle"
         else "SQLite dev (snapshots CSV)"
     )
+    schema_prefix = f"{SCHEMA}." if backend == "oracle" else ""
 
     lines: list[str] = [
         "# Mapeo de campos RAFAM → Paxapos",
@@ -372,10 +378,444 @@ def _build_markdown(all_columns: dict[str, list[dict[str, str]]], backend: str) 
         )
 
     lines += ["", "---", ""]
+
+    # Section 8: inferred relations
+    lines.extend(_build_inferred_relations_section(all_columns))
+
+    # Section 9: business flow queries
+    lines.extend(_build_flow_queries_section(backend, schema_prefix))
+
+    # Section 10: provider consistency queries
+    lines.extend(_build_provider_analysis_section(backend, schema_prefix))
+
+    # Section 11: real sample data (requires live connection)
+    if include_samples and engine is not None:
+        lines.extend(_build_sample_data_section(engine, backend, schema_prefix))
+
     return "\n".join(lines)
 
 
-# ─── Main ─────────────────────────────────────────────────────────────────────
+# ─── Column-based FK inference ────────────────────────────────────────────────
+
+# Column names that act as join keys across tables.
+# Each entry: (col_name, [(table_a, alias_a), (table_b, alias_b), ...])
+# If a column appears in ≥2 of the listed tables it's flagged as an inferred FK.
+_JOIN_CANDIDATES: list[tuple[str, list[str]]] = [
+    ("EJERCICIO",    ["PEDIDOS", "PED_ITEMS", "SOLIC_GASTOS", "ORDEN_COMPRA", "OC_ITEMS", "ORDEN_PAGO"]),
+    ("COD_PROV",     ["PROVEEDORES", "ORDEN_COMPRA", "OC_ITEMS", "ORDEN_PAGO"]),
+    ("JURISDICCION", ["JURISDICCIONES", "PEDIDOS", "PED_ITEMS", "SOLIC_GASTOS", "ORDEN_PAGO"]),
+    ("NRO_OC",       ["ORDEN_COMPRA", "OC_ITEMS"]),
+    ("NRO_SOLIC",    ["SOLIC_GASTOS", "OC_ITEMS", "ORDEN_PAGO"]),
+    ("NUM_PED",      ["PEDIDOS", "PED_ITEMS"]),
+    ("UNI_COMPRA",   ["ORDEN_COMPRA", "OC_ITEMS"]),
+    ("DELEG_SOLIC",  ["SOLIC_GASTOS", "OC_ITEMS"]),
+]
+
+
+def _infer_relations(
+    all_columns: dict[str, list[dict[str, str]]],
+) -> list[dict[str, Any]]:
+    """Return inferred FK relations based on shared column names across tables."""
+    col_to_tables: dict[str, list[str]] = {}
+    for table, cols in all_columns.items():
+        for col in cols:
+            col_to_tables.setdefault(col["name"], []).append(table)
+
+    results: list[dict[str, Any]] = []
+    seen: set[frozenset[str]] = set()
+
+    for col_name, candidate_tables in _JOIN_CANDIDATES:
+        tables_with_col = [t for t in candidate_tables if col_name in col_to_tables.get(col_name, []) or
+                           col_name in {c["name"] for c in all_columns.get(t, [])}]
+        if len(tables_with_col) < 2:
+            continue
+        for i, t_a in enumerate(tables_with_col):
+            for t_b in tables_with_col[i + 1:]:
+                key = frozenset({f"{t_a}.{col_name}", f"{t_b}.{col_name}"})
+                if key in seen:
+                    continue
+                seen.add(key)
+                results.append({"col": col_name, "table_a": t_a, "table_b": t_b})
+
+    return results
+
+
+def _build_inferred_relations_section(
+    all_columns: dict[str, list[dict[str, str]]],
+) -> list[str]:
+    inferred = _infer_relations(all_columns)
+
+    lines: list[str] = [
+        "## 8. Relaciones inferidas por coincidencia de columnas",
+        "",
+        "> Columnas con el mismo nombre presentes en 2 o mas tablas — indican joins posibles.",
+        "> Complementa la seccion 7 (FKs declaradas).",
+        "",
+        "| Columna compartida | Tabla A | Tabla B |",
+        "|--------------------|---------|---------|",
+    ]
+    for rel in inferred:
+        lines.append(f"| `{rel['col']}` | {rel['table_a']} | {rel['table_b']} |")
+
+    lines += ["", "---", ""]
+    return lines
+
+
+# ─── Business flow queries ────────────────────────────────────────────────────
+
+# Parametrizable JOIN chains. Each entry has:
+#   title    — section heading
+#   desc     — what this query shows
+#   sql      — the query (parameterized with {schema} and {limit})
+#   sqlite   — simplified version that omits schema prefix
+
+_FLOW_QUERIES: list[dict[str, str]] = [
+    {
+        "title": "Pedido completo con sus items",
+        "desc": "Navega PEDIDOS → PED_ITEMS para ver las lineas de cada solicitud interna.",
+        "sql": (
+            "SELECT\n"
+            "  p.EJERCICIO,\n"
+            "  p.NUM_PED,\n"
+            "  p.FECH_EMI,\n"
+            "  p.PED_ESTADO,\n"
+            "  p.COSTO_TOT,\n"
+            "  pi.ORDEN        AS item_nro,\n"
+            "  pi.DESCRIP_BIE  AS descripcion,\n"
+            "  pi.CANTIDAD,\n"
+            "  pi.COSTO_UNI\n"
+            "FROM {schema}PEDIDOS  p\n"
+            "JOIN {schema}PED_ITEMS pi ON  pi.EJERCICIO = p.EJERCICIO\n"
+            "                         AND pi.NUM_PED   = p.NUM_PED\n"
+            "ORDER BY p.EJERCICIO DESC, p.NUM_PED DESC, pi.ORDEN\n"
+            "{limit}"
+        ),
+    },
+    {
+        "title": "Flujo completo: Pedido → Solicitud de gasto → OC → OP",
+        "desc": (
+            "Recorre el ciclo de compra completo desde el pedido original "
+            "hasta el pago efectivo. Util para auditar una compra de punta a punta."
+        ),
+        "sql": (
+            "SELECT\n"
+            "  p.EJERCICIO,\n"
+            "  p.NUM_PED,\n"
+            "  p.FECH_EMI          AS fecha_pedido,\n"
+            "  p.PED_ESTADO        AS estado_pedido,\n"
+            "  sg.NRO_SOLIC,\n"
+            "  sg.FECH_SOLIC       AS fecha_solic,\n"
+            "  sg.ESTADO_SOLIC,\n"
+            "  sg.IMPORTE_TOT      AS importe_sg,\n"
+            "  oc.NRO_OC,\n"
+            "  oc.FECH_OC          AS fecha_oc,\n"
+            "  oc.ESTADO_OC,\n"
+            "  oc.IMPORTE_TOT      AS importe_oc,\n"
+            "  oc.COD_PROV         AS prov_oc,\n"
+            "  op.NRO_OP,\n"
+            "  op.FECH_OP          AS fecha_pago,\n"
+            "  op.ESTADO_OP,\n"
+            "  op.IMPORTE_TOTAL    AS importe_pago,\n"
+            "  op.COD_PROV         AS prov_op\n"
+            "FROM      {schema}PEDIDOS      p\n"
+            "JOIN      {schema}SOLIC_GASTOS sg ON  sg.EJERCICIO = p.EJERCICIO\n"
+            "                                  AND sg.NRO_PED   = p.NUM_PED\n"
+            "LEFT JOIN {schema}ORDEN_COMPRA oc ON  oc.EJERCICIO = sg.EJERCICIO\n"
+            "LEFT JOIN {schema}ORDEN_PAGO   op ON  op.EJERCICIO       = sg.EJERCICIO\n"
+            "                                  AND op.SG_DELEG_SOLIC  = sg.DELEG_SOLIC\n"
+            "                                  AND op.SG_NRO_SOLIC    = sg.NRO_SOLIC\n"
+            "ORDER BY p.EJERCICIO DESC, p.NUM_PED, sg.NRO_SOLIC\n"
+            "{limit}"
+        ),
+    },
+    {
+        "title": "OC con todos sus items y proveedor",
+        "desc": "Detalle de lineas de cada Orden de Compra junto con razon social del proveedor.",
+        "sql": (
+            "SELECT\n"
+            "  oc.EJERCICIO,\n"
+            "  oc.UNI_COMPRA,\n"
+            "  oc.NRO_OC,\n"
+            "  oc.FECH_OC,\n"
+            "  oc.ESTADO_OC,\n"
+            "  oc.IMPORTE_TOT,\n"
+            "  pr.RAZON_SOCIAL,\n"
+            "  oi.ITEM_OC,\n"
+            "  oi.DESCRIPCION,\n"
+            "  oi.CANTIDAD,\n"
+            "  oi.IMP_UNITARIO\n"
+            "FROM {schema}ORDEN_COMPRA oc\n"
+            "JOIN {schema}PROVEEDORES  pr ON pr.COD_PROV   = oc.COD_PROV\n"
+            "JOIN {schema}OC_ITEMS     oi ON  oi.EJERCICIO  = oc.EJERCICIO\n"
+            "                             AND oi.UNI_COMPRA = oc.UNI_COMPRA\n"
+            "                             AND oi.NRO_OC     = oc.NRO_OC\n"
+            "ORDER BY oc.EJERCICIO DESC, oc.NRO_OC, oi.ITEM_OC\n"
+            "{limit}"
+        ),
+    },
+    {
+        "title": "Ordenes de pago por proveedor",
+        "desc": "Resumen de pagos agrupados por proveedor y estado.",
+        "sql": (
+            "SELECT\n"
+            "  pr.COD_PROV,\n"
+            "  pr.RAZON_SOCIAL,\n"
+            "  op.ESTADO_OP,\n"
+            "  COUNT(*)                    AS cant_op,\n"
+            "  SUM(op.IMPORTE_TOTAL)       AS total_pagado\n"
+            "FROM {schema}ORDEN_PAGO  op\n"
+            "JOIN {schema}PROVEEDORES pr ON pr.COD_PROV = op.COD_PROV\n"
+            "GROUP BY pr.COD_PROV, pr.RAZON_SOCIAL, op.ESTADO_OP\n"
+            "ORDER BY total_pagado DESC\n"
+            "{limit}"
+        ),
+    },
+]
+
+_LIMIT_ORACLE = "FETCH FIRST {n} ROWS ONLY"
+_LIMIT_SQLITE = "LIMIT {n}"
+
+
+def _render_query(sql_template: str, schema_prefix: str, backend: str, limit: int = 10) -> str:
+    limit_clause = (
+        (_LIMIT_ORACLE if backend == "oracle" else _LIMIT_SQLITE).format(n=limit)
+    )
+    return sql_template.format(schema=schema_prefix, limit=limit_clause)
+
+
+def _build_flow_queries_section(backend: str, schema_prefix: str) -> list[str]:
+    lines: list[str] = [
+        "## 9. Flujo de negocio — queries de ejemplo",
+        "",
+        "> Queries que recorren el ciclo de compra completo.",
+        "> Compatible con Oracle y SQLite (sustituir prefijo de schema segun entorno).",
+        "",
+    ]
+    for q in _FLOW_QUERIES:
+        sql = _render_query(q["sql"], schema_prefix, backend, limit=10)
+        lines += [
+            f"### {q['title']}",
+            "",
+            q["desc"],
+            "",
+            "```sql",
+            sql,
+            "```",
+            "",
+        ]
+
+    lines += ["---", ""]
+    return lines
+
+
+# ─── Provider consistency analysis ───────────────────────────────────────────
+
+_PROVIDER_CONSISTENCY_QUERIES: list[dict[str, str]] = [
+    {
+        "title": "OC_ITEMS donde COD_PROV difiere de su ORDEN_COMPRA",
+        "desc": (
+            "Detecta items de OC cuyo proveedor registrado no coincide con "
+            "el proveedor de la cabecera de la OC. Puede indicar datos inconsistentes."
+        ),
+        "sql": (
+            "SELECT\n"
+            "  oi.EJERCICIO,\n"
+            "  oi.UNI_COMPRA,\n"
+            "  oi.NRO_OC,\n"
+            "  oi.ITEM_OC,\n"
+            "  oi.COD_PROV       AS prov_item,\n"
+            "  oc.COD_PROV       AS prov_oc,\n"
+            "  oi.DESCRIPCION\n"
+            "FROM {schema}OC_ITEMS     oi\n"
+            "JOIN {schema}ORDEN_COMPRA oc ON  oc.EJERCICIO  = oi.EJERCICIO\n"
+            "                             AND oc.UNI_COMPRA = oi.UNI_COMPRA\n"
+            "                             AND oc.NRO_OC     = oi.NRO_OC\n"
+            "WHERE oi.COD_PROV != oc.COD_PROV\n"
+            "ORDER BY oi.EJERCICIO DESC, oi.NRO_OC\n"
+            "{limit}"
+        ),
+    },
+    {
+        "title": "ORDEN_PAGO donde COD_PROV difiere de la ORDEN_COMPRA asociada",
+        "desc": (
+            "Detecta ordenes de pago cuyo proveedor no coincide con el proveedor "
+            "de la OC referenciada (RECO_DEU_COMPRA). Puede indicar reasignaciones o errores de carga."
+        ),
+        "sql": (
+            "SELECT\n"
+            "  op.EJERCICIO,\n"
+            "  op.NRO_OP,\n"
+            "  op.COD_PROV             AS prov_op,\n"
+            "  op.RECO_DEU_COMPRA      AS nro_oc_ref,\n"
+            "  op.RECO_DEU_COMPRA_EJER AS ejer_oc_ref,\n"
+            "  oc.COD_PROV             AS prov_oc,\n"
+            "  oc.IMPORTE_TOT          AS importe_oc,\n"
+            "  op.IMPORTE_TOTAL        AS importe_pago\n"
+            "FROM {schema}ORDEN_PAGO   op\n"
+            "JOIN {schema}ORDEN_COMPRA oc ON  oc.EJERCICIO = op.RECO_DEU_COMPRA_EJER\n"
+            "                             AND oc.NRO_OC    = op.RECO_DEU_COMPRA\n"
+            "WHERE op.COD_PROV != oc.COD_PROV\n"
+            "ORDER BY op.EJERCICIO DESC, op.NRO_OP\n"
+            "{limit}"
+        ),
+    },
+    {
+        "title": "Proveedores referenciados en OC pero ausentes en PROVEEDORES",
+        "desc": (
+            "Detecta COD_PROV usados en ORDEN_COMPRA que no tienen registro "
+            "en la tabla maestra PROVEEDORES. Indica posibles datos huerfanos."
+        ),
+        "sql": (
+            "SELECT DISTINCT\n"
+            "  oc.COD_PROV,\n"
+            "  COUNT(*) AS cant_oc\n"
+            "FROM {schema}ORDEN_COMPRA oc\n"
+            "WHERE NOT EXISTS (\n"
+            "  SELECT 1 FROM {schema}PROVEEDORES pr WHERE pr.COD_PROV = oc.COD_PROV\n"
+            ")\n"
+            "GROUP BY oc.COD_PROV\n"
+            "ORDER BY cant_oc DESC\n"
+            "{limit}"
+        ),
+    },
+    {
+        "title": "Proveedores referenciados en ORDEN_PAGO pero ausentes en PROVEEDORES",
+        "desc": "Mismo analisis para ORDEN_PAGO.COD_PROV.",
+        "sql": (
+            "SELECT DISTINCT\n"
+            "  op.COD_PROV,\n"
+            "  COUNT(*) AS cant_op\n"
+            "FROM {schema}ORDEN_PAGO op\n"
+            "WHERE NOT EXISTS (\n"
+            "  SELECT 1 FROM {schema}PROVEEDORES pr WHERE pr.COD_PROV = op.COD_PROV\n"
+            ")\n"
+            "GROUP BY op.COD_PROV\n"
+            "ORDER BY cant_op DESC\n"
+            "{limit}"
+        ),
+    },
+]
+
+
+def _build_provider_analysis_section(backend: str, schema_prefix: str) -> list[str]:
+    lines: list[str] = [
+        "## 10. Analisis de consistencia del proveedor",
+        "",
+        "> Detecta divergencias de COD_PROV entre tablas relacionadas.",
+        "> Ejecutar contra Oracle o SQLite con datos reales para obtener resultados.",
+        "",
+    ]
+    for q in _PROVIDER_CONSISTENCY_QUERIES:
+        sql = _render_query(q["sql"], schema_prefix, backend, limit=20)
+        lines += [
+            f"### {q['title']}",
+            "",
+            q["desc"],
+            "",
+            "```sql",
+            sql,
+            "```",
+            "",
+        ]
+    lines += ["---", ""]
+    return lines
+
+
+# ─── Real sample data ─────────────────────────────────────────────────────────
+
+_SAMPLE_QUERIES: list[dict[str, str]] = [
+    {
+        "title": "Muestra de PROVEEDORES",
+        "sql": "SELECT * FROM {schema}PROVEEDORES ORDER BY COD_PROV {limit}",
+        "cols": ["COD_PROV", "RAZON_SOCIAL", "CUIT", "COD_IVA", "COD_ESTADO", "FECHA_ALTA"],
+    },
+    {
+        "title": "Muestra de PEDIDOS recientes",
+        "sql": "SELECT * FROM {schema}PEDIDOS ORDER BY EJERCICIO DESC, NUM_PED DESC {limit}",
+        "cols": ["EJERCICIO", "NUM_PED", "FECH_EMI", "JURISDICCION", "COSTO_TOT", "PED_ESTADO"],
+    },
+    {
+        "title": "Muestra de ORDEN_COMPRA recientes",
+        "sql": "SELECT * FROM {schema}ORDEN_COMPRA ORDER BY EJERCICIO DESC, NRO_OC DESC {limit}",
+        "cols": ["EJERCICIO", "UNI_COMPRA", "NRO_OC", "FECH_OC", "COD_PROV", "ESTADO_OC", "IMPORTE_TOT"],
+    },
+    {
+        "title": "Muestra de ORDEN_PAGO recientes",
+        "sql": "SELECT * FROM {schema}ORDEN_PAGO ORDER BY EJERCICIO DESC, NRO_OP DESC {limit}",
+        "cols": ["EJERCICIO", "NRO_OP", "FECH_OP", "COD_PROV", "ESTADO_OP", "IMPORTE_TOTAL", "IMPORTE_LIQUIDO"],
+    },
+    {
+        "title": "Muestra de SOLIC_GASTOS recientes",
+        "sql": "SELECT * FROM {schema}SOLIC_GASTOS ORDER BY EJERCICIO DESC, NRO_SOLIC DESC {limit}",
+        "cols": ["EJERCICIO", "DELEG_SOLIC", "NRO_SOLIC", "NRO_PED", "FECH_SOLIC", "ESTADO_SOLIC", "IMPORTE_TOT"],
+    },
+]
+
+
+def _run_sample_query(
+    conn: Any,
+    sql_template: str,
+    cols: list[str],
+    schema_prefix: str,
+    backend: str,
+    limit: int = 8,
+) -> list[dict[str, Any]]:
+    """Execute a sample query and return rows as dicts (only specified cols)."""
+    from sqlalchemy import text as sa_text
+
+    # Build SELECT with only the desired columns to keep output compact
+    col_list = ", ".join(cols)
+    # Replace * with col_list in the template, then render
+    sql = sql_template.replace("SELECT *", f"SELECT {col_list}")
+    rendered = _render_query(sql, schema_prefix, backend, limit=limit)
+
+    try:
+        result = conn.execute(sa_text(rendered))
+        keys = list(result.keys())
+        return [dict(zip(keys, row)) for row in result.fetchall()]
+    except Exception as exc:
+        return [{"error": str(exc)}]
+
+
+def _rows_to_markdown_table(rows: list[dict[str, Any]]) -> list[str]:
+    if not rows:
+        return ["*(sin resultados)*", ""]
+    if "error" in rows[0]:
+        return [f"> **Error al ejecutar:** `{rows[0]['error']}`", ""]
+
+    headers = list(rows[0].keys())
+    sep = "|".join("---" for _ in headers)
+    head = "|".join(headers)
+    lines = [f"| {head} |", f"| {sep} |"]
+    for row in rows:
+        cells = " | ".join(str(v) if v is not None else "" for v in row.values())
+        lines.append(f"| {cells} |")
+    lines.append("")
+    return lines
+
+
+def _build_sample_data_section(
+    engine: Any,
+    backend: str,
+    schema_prefix: str,
+) -> list[str]:
+    lines: list[str] = [
+        "## 11. Datos reales de muestra",
+        "",
+        "> Primeras filas de cada tabla clave (hasta 8 registros).",
+        "> Util para validar el comportamiento del sistema y confirmar mappings.",
+        "",
+    ]
+
+    with engine.connect() as conn:
+        for q in _SAMPLE_QUERIES:
+            lines.append(f"### {q['title']}")
+            lines.append("")
+            rows = _run_sample_query(conn, q["sql"], q["cols"], schema_prefix, backend)
+            lines.extend(_rows_to_markdown_table(rows))
+
+    lines += ["---", ""]
+    return lines
 
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -390,6 +830,11 @@ def main() -> None:
         "--db",
         metavar="PATH",
         help="Ruta al SQLite (sobreescribe SQLITE_DB_PATH). Solo para DB_BACKEND=sqlite.",
+    )
+    parser.add_argument(
+        "--no-samples",
+        action="store_true",
+        help="Omitir la seccion 11 (datos reales de muestra). Util para correr rapido.",
     )
     args = parser.parse_args()
 
@@ -424,7 +869,8 @@ def main() -> None:
         else:
             all_columns[table] = []
 
-    md = _build_markdown(all_columns, backend)
+    include_samples = not args.no_samples
+    md = _build_markdown(all_columns, backend, engine=engine, include_samples=include_samples)
 
     if args.dry_run:
         sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
