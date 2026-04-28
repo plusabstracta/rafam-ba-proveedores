@@ -253,14 +253,36 @@ def _get_columns(inspector: Any, table: str, backend: str) -> list[dict[str, str
         return []
 
 
-def _available_tables(inspector: Any, backend: str) -> set[str]:
+def _available_tables(inspector: Any, backend: str, engine: Any = None) -> set[str]:
     """Return uppercase table names visible to the current connection."""
+    from sqlalchemy import text as sa_text
+
     try:
         schema = SCHEMA if backend == "oracle" else None
-        return {t.upper() for t in inspector.get_table_names(schema=schema)}
+        tables = {t.upper() for t in inspector.get_table_names(schema=schema)}
     except Exception as exc:
-        print(f"[ERROR] No se pudo listar tablas: {exc}", file=sys.stderr)
+        print(f"[ERROR] No se pudo listar tablas via inspector: {exc}", file=sys.stderr)
+        tables = set()
+
+    if not tables and backend == "oracle" and engine is not None:
+        # Fallback: query ALL_TABLES directly (handles restricted privileges)
+        print("[INFO] get_table_names vacio — intentando ALL_TABLES directamente...", file=sys.stderr)
+        try:
+            with engine.connect() as conn:
+                result = conn.execute(
+                    sa_text("SELECT table_name FROM all_tables WHERE owner = :s"),
+                    {"s": SCHEMA},
+                )
+                tables = {row[0].upper() for row in result}
+        except Exception as exc2:
+            print(f"[ERROR] No se pudo listar tablas via ALL_TABLES: {exc2}", file=sys.stderr)
+            sys.exit(1)
+
+    if not tables:
+        print(f"[ERROR] No se encontraron tablas para el schema '{SCHEMA}'.", file=sys.stderr)
         sys.exit(1)
+
+    return tables
 
 
 # ─── Markdown builders ────────────────────────────────────────────────────────
@@ -763,11 +785,16 @@ def _run_sample_query(
     """Execute a sample query and return rows as dicts (only specified cols)."""
     from sqlalchemy import text as sa_text
 
-    # Build SELECT with only the desired columns to keep output compact
     col_list = ", ".join(cols)
-    # Replace * with col_list in the template, then render
     sql = sql_template.replace("SELECT *", f"SELECT {col_list}")
-    rendered = _render_query(sql, schema_prefix, backend, limit=limit)
+
+    if backend == "oracle":
+        # Use ROWNUM subquery for Oracle pre-12c compatibility
+        # (FETCH FIRST requires Oracle 12c+)
+        inner = sql.replace("{limit}", "").format(schema=schema_prefix).rstrip()
+        rendered = f"SELECT * FROM ({inner}) WHERE ROWNUM <= {limit}"
+    else:
+        rendered = _render_query(sql, schema_prefix, backend, limit=limit)
 
     try:
         result = conn.execute(sa_text(rendered))
@@ -848,7 +875,7 @@ def main() -> None:
     engine = _create_engine(backend, db_path)
     inspector = sa_inspect(engine)
 
-    available = _available_tables(inspector, backend)
+    available = _available_tables(inspector, backend, engine=engine)
     all_tables = {t for sec in SECTIONS for t in sec["tables"]}
     missing = all_tables - available
 
