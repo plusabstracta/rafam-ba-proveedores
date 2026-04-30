@@ -755,6 +755,7 @@ class MigratorExporter(BaseExporter):
         grouped: dict[tuple[int, int, int], dict] = {}
         grouped_raw: dict[tuple[int, int, int], dict] = {}
         grouped_gasto_refs: dict[tuple[int, int, int], list[str]] = {}
+        skipped_no_prov: set[tuple[int, int, int]] = set()
         unresolved_items = 0
 
         for row in rows:
@@ -767,25 +768,43 @@ class MigratorExporter(BaseExporter):
                 continue
 
             key = (ejercicio, uni_compra, nro_oc)
+            if key in skipped_no_prov:
+                continue
             if key not in grouped:
-                pedido: dict = {
-                    "internal_id": f"rafam-oc-{ejercicio}-{uni_compra}-{nro_oc}",
-                    "tipo": "orden_compra",
-                    "observacion": self._compose_oc_observacion(raw, ejercicio, uni_compra, nro_oc),
-                }
                 # Resolver proveedor_id via link_store (RAFAM COD_PROV → Paxapos id)
                 cod_prov = raw.get("COD_PROV")
+                remote_prov_id: int | None = None
                 if cod_prov is not None:
                     remote_prov = self._link_store.get_remote_id("proveedores", str(cod_prov))
                     if remote_prov:
-                        pedido["proveedor_id"] = int(remote_prov)
-                    else:
-                        logger.debug(
-                            "Migrator [oc_items] OC %s-%s-%s: proveedor COD_PROV=%s sin link remoto",
-                            ejercicio, uni_compra, nro_oc, cod_prov,
-                        )
+                        remote_prov_id = int(remote_prov)
 
-                grouped[key] = {
+                # Omitir OC sin proveedor — no tiene sentido migrarla
+                if remote_prov_id is None:
+                    logger.warning(
+                        "Migrator [oc_items] OC %s-%s-%s: omitida — sin proveedor (COD_PROV=%s)",
+                        ejercicio, uni_compra, nro_oc, cod_prov,
+                    )
+                    skipped_no_prov.add(key)
+                    continue
+
+                pedido: dict = {
+                    "internal_id": f"rafam-oc-{ejercicio}-{uni_compra}-{nro_oc}",
+                    "tipo": "orden_compra",
+                    "proveedor_id": remote_prov_id,
+                }
+
+                # Observación: solo incluir si la OC tiene observaciones reales en RAFAM
+                obs = self._compose_oc_observacion(raw)
+                if obs:
+                    pedido["observacion"] = obs
+
+                # Fecha de creación real de RAFAM (no la de migración)
+                fech_oc = self._format_date_only(raw.get("OC_FECH_OC"))
+                if fech_oc:
+                    pedido["created"] = f"{fech_oc} 00:00:00"
+
+                oc_data: dict = {
                     "external_id": {
                         "ejercicio": ejercicio,
                         "uni_compra": uni_compra,
@@ -794,6 +813,14 @@ class MigratorExporter(BaseExporter):
                     "Pedido": pedido,
                     "items": [],
                 }
+
+                # centro_costo_id desde la primera JURISDICCION disponible
+                sg_jurisdiccion = raw.get("SG_JURISDICCION")
+                if sg_jurisdiccion:
+                    from src.gateway_mapper import resolve_centro_costo_id
+                    oc_data["centro_costo_id"] = resolve_centro_costo_id(sg_jurisdiccion)
+
+                grouped[key] = oc_data
                 # Guardar datos de cabecera OC para extras del link
                 grouped_raw[key] = raw
 
@@ -989,6 +1016,7 @@ class MigratorExporter(BaseExporter):
         grouped: dict[tuple[int, int, int], dict] = {}
         grouped_raw: dict[tuple[int, int, int], dict] = {}
         grouped_gasto_refs: dict[tuple[int, int, int], list[str]] = {}
+        skipped_no_prov: set[tuple[int, int, int]] = set()
         unresolved_items = 0
 
         for row in rows:
@@ -1001,24 +1029,43 @@ class MigratorExporter(BaseExporter):
                 continue
 
             key = (ejercicio, uni_compra, nro_oc)
+            if key in skipped_no_prov:
+                continue
             if key not in grouped:
-                pedido: dict = {
-                    "internal_id": f"rafam-oc-{ejercicio}-{uni_compra}-{nro_oc}",
-                    "tipo": "orden_compra",
-                    "observacion": self._compose_oc_observacion(raw, ejercicio, uni_compra, nro_oc),
-                }
+                # Resolver proveedor_id via link_store (RAFAM COD_PROV → Paxapos id)
                 cod_prov = raw.get("COD_PROV")
+                remote_prov_id: int | None = None
                 if cod_prov is not None:
                     remote_prov = self._link_store.get_remote_id("proveedores", str(cod_prov))
                     if remote_prov:
-                        pedido["proveedor_id"] = int(remote_prov)
-                    else:
-                        logger.debug(
-                            "Migrator [orden_compra] OC %s-%s-%s: proveedor COD_PROV=%s sin link remoto",
-                            ejercicio, uni_compra, nro_oc, cod_prov,
-                        )
+                        remote_prov_id = int(remote_prov)
 
-                grouped[key] = {
+                # Omitir OC sin proveedor — no tiene sentido migrarla
+                if remote_prov_id is None:
+                    logger.warning(
+                        "Migrator [orden_compra] OC %s-%s-%s: omitida — sin proveedor (COD_PROV=%s)",
+                        ejercicio, uni_compra, nro_oc, cod_prov,
+                    )
+                    skipped_no_prov.add(key)
+                    continue
+
+                pedido: dict = {
+                    "internal_id": f"rafam-oc-{ejercicio}-{uni_compra}-{nro_oc}",
+                    "tipo": "orden_compra",
+                    "proveedor_id": remote_prov_id,
+                }
+
+                # Observación: solo incluir si la OC tiene observaciones reales en RAFAM
+                obs = self._compose_oc_observacion(raw)
+                if obs:
+                    pedido["observacion"] = obs
+
+                # Fecha de creación real de RAFAM (no la de migración)
+                fech_oc = self._format_date_only(raw.get("OC_FECH_OC"))
+                if fech_oc:
+                    pedido["created"] = f"{fech_oc} 00:00:00"
+
+                oc_data: dict = {
                     "external_id": {
                         "ejercicio": ejercicio,
                         "uni_compra": uni_compra,
@@ -1027,6 +1074,14 @@ class MigratorExporter(BaseExporter):
                     "Pedido": pedido,
                     "items": [],
                 }
+
+                # centro_costo_id desde la primera JURISDICCION disponible
+                sg_jurisdiccion = raw.get("SG_JURISDICCION")
+                if sg_jurisdiccion:
+                    from src.gateway_mapper import resolve_centro_costo_id
+                    oc_data["centro_costo_id"] = resolve_centro_costo_id(sg_jurisdiccion)
+
+                grouped[key] = oc_data
                 grouped_raw[key] = raw
 
             # Recolectar ref de gasto
@@ -1587,10 +1642,12 @@ class MigratorExporter(BaseExporter):
         if raw.get("CANT_RECIB") is not None:
             item["recibida_cantidad"] = float(raw.get("CANT_RECIB"))
 
+        # Enviar como `name` (no `descripcion`) para que Paxapos nombre la mercadería
+        # auto-creada correctamente.  `descripcion` no se envía porque se duplica
+        # en la UI del item; `name` solo alimenta _buildDeterministicMercaderiaName().
         descripcion = raw.get("DESCRIPCION")
         if descripcion:
-            item["descripcion"] = str(descripcion)[:255]
-            item["observacion"] = str(descripcion)[:255]
+            item["name"] = str(descripcion).strip()[:255]
 
         # rubro_id via link_store (JURISDICCION de SOLIC_GASTOS JOIN → rubro Paxapos)
         rubro_id = self._resolve_rubro_id(raw, jurisdiccion_key="SG_JURISDICCION")
@@ -1694,11 +1751,12 @@ class MigratorExporter(BaseExporter):
         )
 
     @staticmethod
-    def _compose_oc_observacion(raw: dict, ejercicio: int, uni_compra: int, nro_oc: int) -> str:
+    def _compose_oc_observacion(raw: dict) -> str | None:
+        """Return real RAFAM observation or None. Never fabricate a traza string."""
         obs = raw.get("OC_OBSERVACIONES")
-        if obs:
-            return str(obs)[:255]
-        return f"Migrado RAFAM OC {ejercicio}-{uni_compra}-{nro_oc}"
+        if obs and str(obs).strip():
+            return str(obs).strip()[:255]
+        return None
 
     def _headers(self) -> dict[str, str]:
         return {
