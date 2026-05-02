@@ -11,6 +11,42 @@ _IVA_MAP = {
     "RNI": 6,    # Responsable no inscripto
 }
 
+# Mapeo RAFAM JURISDICCION → Paxapos CentroCosto.id
+# CentroCosto 8 ("Otro") es el fallback para jurisdicciones no mapeadas.
+_JURISDICCION_CENTRO_COSTO_MAP: dict[str, int] = {
+    # CentroCosto 7 — Administrativo - General
+    "1110101000": 7,   # Intendencia
+    "1110102000": 7,   # Secretaria de Gobierno
+    "1110200000": 7,   # H.C.D.
+    "1110112000": 7,   # Secretaria de Hacienda
+    "1110115000": 7,   # Secretaria de Coordinación
+    "1110117000": 7,   # Secretaria Legal, Técnica y Administrativa
+    "1110105000": 7,   # Secretaría de Cultura y Educación
+    "1110108000": 7,   # Secretaria de Producción
+    "1110109000": 7,   # Secretaria de Deportes
+    # CentroCosto 6 — CASER
+    "1110111000": 6,   # Sec. de Obras y Serv. Públicos (CASER)
+    # CentroCosto 5 — Seguridad
+    "1110113000": 5,   # Sec. de Políticas de Prevención de la Seguridad
+    # CentroCosto 4 — Corralón (Mantenimiento)
+    "1110118000": 4,   # Secretaria de Servicios Generales y Mantenimiento
+    # CentroCosto 3 — Desarrollo
+    "1110106000": 3,   # Secretaría de Desarrollo Social
+    # CentroCosto 2 — Obras Públicas
+    "1110103000": 2,   # Secretaria de Obras y Servicios Públicos
+    # CentroCosto 1 — Salud
+    "1110104000": 1,   # Secretaria de Salud
+}
+_JURISDICCION_CENTRO_COSTO_DEFAULT = 8  # CentroCosto "Otro"
+
+
+def resolve_centro_costo_id(jurisdiccion: Any) -> int:
+    """Devuelve el CentroCosto.id de Paxapos para una jurisdicción RAFAM."""
+    if jurisdiccion is None:
+        return _JURISDICCION_CENTRO_COSTO_DEFAULT
+    key = str(jurisdiccion).strip()
+    return _JURISDICCION_CENTRO_COSTO_MAP.get(key, _JURISDICCION_CENTRO_COSTO_DEFAULT)
+
 
 def _clean(value: Any) -> str | None:
     if value is None:

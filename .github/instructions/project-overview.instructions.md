@@ -225,6 +225,31 @@ NO implementado para Gastos ni OPs (el endpoint no soporta anulación ni update 
 - Tests de mapping: verificar que cada campo RAFAM se transforma correctamente al formato Paxapos.
 - No testear lógica de Oracle directamente — eso se valida en integración con contenedor Docker.
 
+#### Cuándo ejecutar tests
+
+Ejecutar tests **siempre** que se modifique `src/exporter.py`, `src/gateway_mapper.py`, `src/entity_link_store.py`, `src/sync_engine.py`, o `src/source_repository.py`.
+
+#### Comandos
+
+```bash
+# Unitarios (sin DB, <1s) — correr siempre
+.venv/bin/python -m pytest tests/test_migrator_mapping.py tests/test_sync_engine.py -v
+
+# Integración con datos reales (requiere state/dev_rafam.db)
+DB_BACKEND=sqlite .venv/bin/python -m pytest tests/test_oc_integration.py -v
+
+# Todo junto
+DB_BACKEND=sqlite .venv/bin/python -m pytest tests/ -v
+```
+
+#### Suites de test
+
+| Archivo | Tipo | Qué valida | Dependencias |
+|---|---|---|---|
+| `tests/test_migrator_mapping.py` | Unitario | Payload Paxapos: campos, name, centro_costo_id, agrupación OC, observaciones | Ninguna (mocks) |
+| `tests/test_sync_engine.py` | Unitario | Lógica incremental, checkpoints, cursores | Ninguna (mocks) |
+| `tests/test_oc_integration.py` | Integración | Pipeline OC completo con datos reales | `state/dev_rafam.db` |
+
 ---
 
 ## 4. Anti-patrones a evitar

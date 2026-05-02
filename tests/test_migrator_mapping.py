@@ -254,3 +254,290 @@ class TestResolveTipoFacturaId:
 
     def test_none_retorna_default(self, exporter):
         assert exporter._resolve_tipo_factura_id(None) is None
+
+
+# ─── OC items (orden de compra con items) ─────────────────────────────────────
+
+OC_COLUMNS = [
+    "EJERCICIO", "UNI_COMPRA", "NRO_OC", "ITEM_OC",
+    "DELEG_SOLIC", "NRO_SOLIC", "ITEM_REAL",
+    "DESCRIPCION", "CANTIDAD", "IMP_UNITARIO", "CANT_RECIB", "IMPORTE_EJER",
+    "COD_PROV",
+    "OC_FECH_OC", "OC_OBSERVACIONES", "OC_ESTADO_OC", "OC_FECH_CONFIRM",
+    "OC_IMPORTE_TOT", "SG_JURISDICCION",
+]
+
+
+def _oc_row(
+    *,
+    ejercicio="2026", uni_compra="1", nro_oc="100", item_oc="1",
+    deleg_solic="1", nro_solic="500", item_real="1",
+    descripcion="Papel A4", cantidad="10", imp_unitario="50.0",
+    cant_recib="0", importe_ejer="500",
+    cod_prov="99",
+    fech_oc="2026-03-15 00:00:00", observaciones="", estado_oc="R",
+    fech_confirm="2026-03-16 00:00:00", importe_tot="500.00",
+    sg_jurisdiccion="",
+):
+    vals = {
+        "EJERCICIO": ejercicio, "UNI_COMPRA": uni_compra,
+        "NRO_OC": nro_oc, "ITEM_OC": item_oc,
+        "DELEG_SOLIC": deleg_solic, "NRO_SOLIC": nro_solic,
+        "ITEM_REAL": item_real,
+        "DESCRIPCION": descripcion, "CANTIDAD": cantidad,
+        "IMP_UNITARIO": imp_unitario, "CANT_RECIB": cant_recib,
+        "IMPORTE_EJER": importe_ejer,
+        "COD_PROV": cod_prov,
+        "OC_FECH_OC": fech_oc, "OC_OBSERVACIONES": observaciones,
+        "OC_ESTADO_OC": estado_oc, "OC_FECH_CONFIRM": fech_confirm,
+        "OC_IMPORTE_TOT": importe_tot, "SG_JURISDICCION": sg_jurisdiccion,
+    }
+    return tuple(vals.get(c, "") for c in OC_COLUMNS)
+
+
+class TestWriteBatchOcItems:
+    """Tests para _write_batch_oc_items / _write_batch_orden_compra."""
+
+    def _make_exporter_with_prov(self, cod_prov="99", remote_prov_id="777"):
+        """Crea MigratorExporter con un proveedor pre-linkeado."""
+        with patch("src.exporter.fetch_migrator_lookups") as mock_lookups:
+            mock_lookups.return_value = {
+                "unidades_de_medida": [{"id": "1", "name": "Unidad"}],
+                "tipos_factura": [],
+                "tipos_de_pago": [],
+            }
+            with patch.dict("os.environ", {
+                "MIGRATOR_BASE_URL": "https://example.com",
+                "MIGRATOR_TENANT": "test",
+                "MIGRATOR_API_KEY": "key",
+                "MIGRATOR_DEFAULT_UNIDAD_ID": "1",
+                "MIGRATOR_DEFAULT_TIPO_PAGO_ID": "4",
+            }):
+                exp = MigratorExporter(dry_run=True)
+        if cod_prov and remote_prov_id:
+            exp._link_store.save_link(
+                entity="proveedores",
+                source_key=cod_prov,
+                remote_id=remote_prov_id,
+            )
+        return exp
+
+    # ── OC con proveedor válido: se envía correctamente ──
+
+    def test_oc_con_proveedor_se_envia(self):
+        exp = self._make_exporter_with_prov()
+        rows = [
+            _oc_row(item_oc="1", cantidad="10", imp_unitario="50"),
+            _oc_row(item_oc="2", cantidad="5", imp_unitario="100"),
+        ]
+        sent = []
+        exp._post_json = lambda url, p: (
+            sent.append(p)
+            or {"stats": {"ordenes_compra": {"ok": 1, "error": 0}}}
+        )
+        exp.write_batch("oc_items", OC_COLUMNS, rows)
+
+        assert len(sent) == 1
+        ocs = sent[0]["ordenes_compra"]
+        assert len(ocs) == 1
+        assert ocs[0]["Pedido"]["proveedor_id"] == 777
+        assert ocs[0]["Pedido"]["tipo"] == "orden_compra"
+        assert len(ocs[0]["items"]) == 2
+
+    # ── OC sin proveedor: se omite ──
+
+    def test_oc_sin_proveedor_no_se_envia(self):
+        exp = self._make_exporter_with_prov(cod_prov=None, remote_prov_id=None)
+        rows = [_oc_row(cod_prov="999")]  # proveedor 999 no existe en links
+
+        sent = []
+        exp._post_json = lambda url, p: (
+            sent.append(p)
+            or {"stats": {"ordenes_compra": {"ok": 0, "error": 0}}}
+        )
+        exp.write_batch("oc_items", OC_COLUMNS, rows)
+        assert sent == []
+
+    def test_oc_sin_proveedor_no_loguea_duplicado(self):
+        """Una OC con 3 items y sin proveedor loguea solo 1 warning."""
+        exp = self._make_exporter_with_prov(cod_prov=None, remote_prov_id=None)
+        rows = [
+            _oc_row(item_oc="1", cod_prov="999"),
+            _oc_row(item_oc="2", cod_prov="999"),
+            _oc_row(item_oc="3", cod_prov="999"),
+        ]
+        import logging
+        with patch.object(logging.getLogger("src.exporter"), "warning") as mock_warn:
+            exp.write_batch("oc_items", OC_COLUMNS, rows)
+        # Solo 1 warning para la OC, no 3
+        oc_skip_calls = [
+            c for c in mock_warn.call_args_list
+            if "omitida" in str(c)
+        ]
+        assert len(oc_skip_calls) == 1
+
+    # ── Fecha created: se envía la FECH_OC real ──
+
+    def test_fecha_created_se_envia(self):
+        exp = self._make_exporter_with_prov()
+        rows = [_oc_row(fech_oc="2026-03-15 00:00:00")]
+
+        sent = []
+        exp._post_json = lambda url, p: (
+            sent.append(p)
+            or {"stats": {"ordenes_compra": {"ok": 1, "error": 0}}}
+        )
+        exp.write_batch("oc_items", OC_COLUMNS, rows)
+
+        pedido = sent[0]["ordenes_compra"][0]["Pedido"]
+        assert pedido["created"] == "2026-03-15 00:00:00"
+
+    def test_fecha_created_vacia_no_se_incluye(self):
+        exp = self._make_exporter_with_prov()
+        rows = [_oc_row(fech_oc="")]
+
+        sent = []
+        exp._post_json = lambda url, p: (
+            sent.append(p)
+            or {"stats": {"ordenes_compra": {"ok": 1, "error": 0}}}
+        )
+        exp.write_batch("oc_items", OC_COLUMNS, rows)
+
+        pedido = sent[0]["ordenes_compra"][0]["Pedido"]
+        assert "created" not in pedido
+
+    # ── Observación: solo la real, no traza ──
+
+    def test_observacion_real_se_incluye(self):
+        exp = self._make_exporter_with_prov()
+        rows = [_oc_row(observaciones="Entregar en depósito central")]
+
+        sent = []
+        exp._post_json = lambda url, p: (
+            sent.append(p)
+            or {"stats": {"ordenes_compra": {"ok": 1, "error": 0}}}
+        )
+        exp.write_batch("oc_items", OC_COLUMNS, rows)
+
+        pedido = sent[0]["ordenes_compra"][0]["Pedido"]
+        assert pedido["observacion"] == "Entregar en depósito central"
+
+    def test_observacion_vacia_no_se_incluye(self):
+        exp = self._make_exporter_with_prov()
+        rows = [_oc_row(observaciones="")]
+
+        sent = []
+        exp._post_json = lambda url, p: (
+            sent.append(p)
+            or {"stats": {"ordenes_compra": {"ok": 1, "error": 0}}}
+        )
+        exp.write_batch("oc_items", OC_COLUMNS, rows)
+
+        pedido = sent[0]["ordenes_compra"][0]["Pedido"]
+        assert "observacion" not in pedido
+        # Asegurar que NO aparece "Migrado RAFAM OC ..."
+        assert "Migrado" not in str(pedido)
+
+    # ── Items: envían name, no descripcion ──
+
+    def test_item_no_envia_descripcion(self):
+        exp = self._make_exporter_with_prov()
+        rows = [_oc_row(descripcion="Papel A4 resma 500 hojas")]
+
+        sent = []
+        exp._post_json = lambda url, p: (
+            sent.append(p)
+            or {"stats": {"ordenes_compra": {"ok": 1, "error": 0}}}
+        )
+        exp.write_batch("oc_items", OC_COLUMNS, rows)
+
+        item = sent[0]["ordenes_compra"][0]["items"][0]
+        assert "descripcion" not in item
+        assert "observacion" not in item
+
+    def test_item_envia_name_para_mercaderia(self):
+        exp = self._make_exporter_with_prov()
+        rows = [_oc_row(descripcion="Papel A4 resma 500 hojas")]
+
+        sent = []
+        exp._post_json = lambda url, p: (
+            sent.append(p)
+            or {"stats": {"ordenes_compra": {"ok": 1, "error": 0}}}
+        )
+        exp.write_batch("oc_items", OC_COLUMNS, rows)
+
+        item = sent[0]["ordenes_compra"][0]["items"][0]
+        assert item["name"] == "Papel A4 resma 500 hojas"
+
+    def test_item_tiene_campos_basicos(self):
+        exp = self._make_exporter_with_prov()
+        rows = [_oc_row(cantidad="10", imp_unitario="50.5", cant_recib="3")]
+
+        sent = []
+        exp._post_json = lambda url, p: (
+            sent.append(p)
+            or {"stats": {"ordenes_compra": {"ok": 1, "error": 0}}}
+        )
+        exp.write_batch("oc_items", OC_COLUMNS, rows)
+
+        item = sent[0]["ordenes_compra"][0]["items"][0]
+        assert item["cantidad"] == 10.0
+        assert item["precio"] == 50.5
+        assert item["recibida_cantidad"] == 3.0
+        assert "mercaderia_external_ref" in item
+        assert item["mercaderia_external_ref"]["entity"] == "oc_items"
+        assert item["unidad_de_medida_id"] == 1  # default
+
+    # ── Varias OCs en un batch ──
+
+    def test_multiples_ocs_se_agrupan_correctamente(self):
+        exp = self._make_exporter_with_prov()
+        rows = [
+            _oc_row(nro_oc="100", item_oc="1"),
+            _oc_row(nro_oc="100", item_oc="2"),
+            _oc_row(nro_oc="200", item_oc="1"),
+        ]
+
+        sent = []
+        exp._post_json = lambda url, p: (
+            sent.append(p)
+            or {"stats": {"ordenes_compra": {"ok": 2, "error": 0}}}
+        )
+        exp.write_batch("oc_items", OC_COLUMNS, rows)
+
+        ocs = sent[0]["ordenes_compra"]
+        assert len(ocs) == 2
+        oc_100 = next(o for o in ocs if o["external_id"]["nro_oc"] == 100)
+        oc_200 = next(o for o in ocs if o["external_id"]["nro_oc"] == 200)
+        assert len(oc_100["items"]) == 2
+        assert len(oc_200["items"]) == 1
+
+    # ── Centro de costo ──
+
+    def test_centro_costo_id_se_incluye(self):
+        exp = self._make_exporter_with_prov()
+        rows = [_oc_row(sg_jurisdiccion="1110104000")]  # Secretaria de Salud = CC 1
+
+        sent = []
+        exp._post_json = lambda url, p: (
+            sent.append(p)
+            or {"stats": {"ordenes_compra": {"ok": 1, "error": 0}}}
+        )
+        exp.write_batch("oc_items", OC_COLUMNS, rows)
+
+        oc = sent[0]["ordenes_compra"][0]
+        assert oc["centro_costo_id"] == 1  # Salud
+
+    def test_centro_costo_id_sin_jurisdiccion_no_se_incluye(self):
+        exp = self._make_exporter_with_prov()
+        rows = [_oc_row(sg_jurisdiccion="")]
+
+        sent = []
+        exp._post_json = lambda url, p: (
+            sent.append(p)
+            or {"stats": {"ordenes_compra": {"ok": 1, "error": 0}}}
+        )
+        exp.write_batch("oc_items", OC_COLUMNS, rows)
+
+        oc = sent[0]["ordenes_compra"][0]
+        assert "centro_costo_id" not in oc
