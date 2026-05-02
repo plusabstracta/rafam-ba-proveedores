@@ -231,12 +231,58 @@ FK_RELATIONSHIPS: list[dict[str, Any]] = [
 
 # ─── Secciones del documento (en orden de aparición) ─────────────────────────
 SECTIONS: list[dict[str, Any]] = [
-    {"num": 1, "title": "Proveedores",          "tables": ["PROVEEDORES"]},
-    {"num": 2, "title": "Jurisdicciones",        "tables": ["JURISDICCIONES"]},
-    {"num": 3, "title": "Pedidos",               "tables": ["PEDIDOS", "PED_ITEMS"]},
-    {"num": 4, "title": "Solicitudes de gasto",  "tables": ["SOLIC_GASTOS"]},
-    {"num": 5, "title": "Órdenes de compra",     "tables": ["ORDEN_COMPRA", "OC_ITEMS"]},
-    {"num": 6, "title": "Órdenes de pago",       "tables": ["ORDEN_PAGO"]},
+    # Core
+    {"num": 1,  "title": "Proveedores",                             "tables": ["PROVEEDORES"]},
+    {"num": 2,  "title": "Jurisdicciones",                          "tables": ["JURISDICCIONES"]},
+    {"num": 3,  "title": "Pedidos",                                 "tables": ["PEDIDOS", "PED_ITEMS"]},
+    {"num": 4,  "title": "Solicitudes de gasto",                    "tables": ["SOLIC_GASTOS"]},
+    {"num": 5,  "title": "Órdenes de compra",                       "tables": ["ORDEN_COMPRA", "OC_ITEMS"]},
+    {"num": 6,  "title": "Órdenes de pago",                        "tables": ["ORDEN_PAGO"]},
+    # Adiciones core
+    {"num": 7,  "title": "Retenciones, deducciones y comprobantes", "tables": ["RG_COMP", "CTA_HOJA_DE_RUTA", "RETENCIONES", "DEDUCCIONES"]},
+    # Relacionadas con PROVEEDORES
+    {"num": 8,  "title": "Tablas relacionadas — Proveedores",        "tables": [
+        "ACT_IMP_PROV", "ADJUDICACIONES", "BENEFICIARIOS", "CESIONARIOS",
+        "COTIZA_PROV", "COTIZA_PROV_ITEMS", "CTA_COMPROB", "CTA_CTACTE_MOVS",
+        "CTA_PROVEEDORES_ALICUOTAS", "CTA_UTE", "CTR_DOCUM_PROV",
+        "DATOS_PART_CONS", "DATOS_PART_CONT", "DEUFLO_PROV", "DEVOLUCION",
+        "EGRESOS", "EMBARGOS", "HISTO_ESTADOS", "NOMINA_PROV",
+        "ORDEN_PAGO_DEDUC_UTE", "ORDEN_PAGOEA_DEDUC_UTE", "ORDEN_REINT_PRESUP",
+        "PER_AGENTES", "PER_AGENTES_HIST", "PER_CONCEPTOS_PROVEEDOR",
+        "REGUL_CAMBIO_OCEA", "REGUL_CORREC_IMPUT", "REGUL_DESAF",
+        "TES_DEPOSITOS_GARANTIAS", "VI_SUBRUB_PROV",
+    ]},
+    # Relacionadas con JURISDICCIONES
+    {"num": 9,  "title": "Tablas relacionadas — Jurisdicciones",     "tables": [
+        "CALCULO_MODIF", "CUOTAS_JURISDIC", "CTA_TMP_REG_DEVEN_IMP",
+        "DEPENDENCIAS", "DEVENGAMIENTOS", "ESTRUC_PROG",
+        "FORMULARIO1", "FORMULARIO2", "FORMULARIO4",
+        "FORMULARIOC1", "FORMULARIOC2", "FORMULARIOP4",
+        "INGRESOS", "ING_COD_INGRESOS_DET", "METAS_PROG",
+        "MOV_PRES_COMP", "MOV_PRES_REC_DEV", "PER_CONCEPTOS_GASTOS_M",
+        "PER_SELECCION_DET", "PRE_JURIS_RECURSOS",
+        "REGUL_CORREC_RECUR_IMPUT", "REGUL_RECURSOS_EX_IMPUT",
+        "REGUL_RETENCIONES", "SOLIC_GASTOS_ITEMS", "USUARIOS_JURISDICCIONES",
+    ]},
+    # Relacionadas con ORDEN_COMPRA / ORDEN_PAGO
+    {"num": 10, "title": "Tablas relacionadas — Órdenes de compra y pago", "tables": [
+        "CTA_IMPUT_PERSONAL", "MOV_PRES_PAG", "REGUL_CAMBIO",
+        "OC_PLAN_ENT", "RECEPCION",
+    ]},
+    # Relacionadas con PEDIDOS / DEDUCCIONES
+    {"num": 11, "title": "Tablas relacionadas — Pedidos y deducciones", "tables": [
+        "PED_COTIZACIONES",
+        "ORDEN_PAGOEA_DEDUC", "ORDEN_PAGO_DEDUC",
+        "REGUL_RETENCIONES_IMPUT", "RETENCIONES_REGDED",
+    ]},
+    # Múltiples relaciones
+    {"num": 12, "title": "Tablas con múltiples relaciones",           "tables": [
+        "MOV_EXTRAPRES_DEV", "MOV_EXTRAPRES_PAG", "MOV_EXTRAPRES_REC", "MOV_PRES_DEV",
+        "ORDEN_DEVOL", "ORDEN_PAGOEA", "ORDEN_REINT",
+        "REG_COMP", "REG_DEVEN",
+        "REGUL_CAMBIO_PE_IMPUT", "REGUL_CORREC_EX_IMPUT",
+        "REGUL_GASTOS", "REGUL_GASTOS_EX", "REGUL_OPE_DEVOL",
+    ]},
 ]
 
 
@@ -257,32 +303,61 @@ def _available_tables(inspector: Any, backend: str, engine: Any = None) -> set[s
     """Return uppercase table names visible to the current connection."""
     from sqlalchemy import text as sa_text
 
-    try:
-        schema = SCHEMA if backend == "oracle" else None
-        tables = {t.upper() for t in inspector.get_table_names(schema=schema)}
-    except Exception as exc:
-        print(f"[ERROR] No se pudo listar tablas via inspector: {exc}", file=sys.stderr)
-        tables = set()
-
-    if not tables and backend == "oracle" and engine is not None:
-        # Fallback: query ALL_TABLES directly (handles restricted privileges)
-        print("[INFO] get_table_names vacio — intentando ALL_TABLES directamente...", file=sys.stderr)
+    if backend != "oracle":
         try:
-            with engine.connect() as conn:
-                result = conn.execute(
-                    sa_text("SELECT table_name FROM all_tables WHERE owner = :s"),
-                    {"s": SCHEMA},
-                )
-                tables = {row[0].upper() for row in result}
-        except Exception as exc2:
-            print(f"[ERROR] No se pudo listar tablas via ALL_TABLES: {exc2}", file=sys.stderr)
+            return {t.upper() for t in inspector.get_table_names(schema=None)}
+        except Exception as exc:
+            print(f"[ERROR] No se pudo listar tablas: {exc}", file=sys.stderr)
             sys.exit(1)
 
-    if not tables:
-        print(f"[ERROR] No se encontraron tablas para el schema '{SCHEMA}'.", file=sys.stderr)
-        sys.exit(1)
+    # Oracle: try multiple strategies in order
+    assert engine is not None
 
-    return tables
+    with engine.connect() as conn:
+        # Log connected user to aid debugging
+        try:
+            current_user = conn.execute(sa_text("SELECT USER FROM DUAL")).scalar()
+            print(f"[INFO] Usuario Oracle conectado: {current_user}", file=sys.stderr)
+        except Exception:
+            current_user = "desconocido"
+
+        # 1. ALL_TABLES for the target schema
+        try:
+            result = conn.execute(
+                sa_text("SELECT table_name FROM all_tables WHERE owner = :s"),
+                {"s": SCHEMA},
+            )
+            tables = {row[0].upper() for row in result}
+            if tables:
+                print(f"[INFO] {len(tables)} tablas encontradas via ALL_TABLES (owner={SCHEMA})", file=sys.stderr)
+                return tables
+        except Exception as exc:
+            print(f"[WARN] ALL_TABLES fallo: {exc}", file=sys.stderr)
+
+        # 2. USER_TABLES (when connected user IS the schema owner)
+        try:
+            result = conn.execute(sa_text("SELECT table_name FROM user_tables"))
+            tables = {row[0].upper() for row in result}
+            if tables:
+                print(f"[INFO] {len(tables)} tablas encontradas via USER_TABLES", file=sys.stderr)
+                return tables
+        except Exception as exc:
+            print(f"[WARN] USER_TABLES fallo: {exc}", file=sys.stderr)
+
+        # 3. inspector fallback
+        try:
+            tables = {t.upper() for t in inspector.get_table_names(schema=SCHEMA)}
+            if tables:
+                return tables
+        except Exception:
+            pass
+
+    print(
+        f"[ERROR] No se encontraron tablas. Usuario='{current_user}', schema='{SCHEMA}'.\n"
+        "        Verificar que DB_USER tenga SELECT sobre las tablas de OWNER_RAFAM.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
 
 
 # ─── Markdown builders ────────────────────────────────────────────────────────
@@ -373,9 +448,9 @@ def _build_markdown(
 
     # Section 7: relationships
     lines += [
-        "## 7. Relaciones entre tablas (claves foráneas)",
+        "## 13. Relaciones entre tablas (claves foráneas)",
         "",
-        "### 7.1 Claves primarias",
+        "### 13.1 Claves primarias",
         "",
         "| Tabla | Clave primaria |",
         "|-------|----------------|",
@@ -386,7 +461,7 @@ def _build_markdown(
 
     lines += [
         "",
-        "### 7.2 Tabla de FKs",
+        "### 13.2 Tabla de FKs",
         "",
         "| Tabla hija | Columna(s) FK | Tabla padre | Columna(s) referenciada | Nota |",
         "|------------|---------------|-------------|-------------------------|------|",
@@ -468,7 +543,7 @@ def _build_inferred_relations_section(
     inferred = _infer_relations(all_columns)
 
     lines: list[str] = [
-        "## 8. Relaciones inferidas por coincidencia de columnas",
+        "## 14. Relaciones inferidas por coincidencia de columnas",
         "",
         "> Columnas con el mismo nombre presentes en 2 o mas tablas — indican joins posibles.",
         "> Complementa la seccion 7 (FKs declaradas).",
@@ -607,7 +682,7 @@ def _render_query(sql_template: str, schema_prefix: str, backend: str, limit: in
 
 def _build_flow_queries_section(backend: str, schema_prefix: str) -> list[str]:
     lines: list[str] = [
-        "## 9. Flujo de negocio — queries de ejemplo",
+        "## 15. Flujo de negocio — queries de ejemplo",
         "",
         "> Queries que recorren el ciclo de compra completo.",
         "> Compatible con Oracle y SQLite (sustituir prefijo de schema segun entorno).",
@@ -721,7 +796,7 @@ _PROVIDER_CONSISTENCY_QUERIES: list[dict[str, str]] = [
 
 def _build_provider_analysis_section(backend: str, schema_prefix: str) -> list[str]:
     lines: list[str] = [
-        "## 10. Analisis de consistencia del proveedor",
+        "## 16. Analisis de consistencia del proveedor",
         "",
         "> Detecta divergencias de COD_PROV entre tablas relacionadas.",
         "> Ejecutar contra Oracle o SQLite con datos reales para obtener resultados.",
@@ -827,7 +902,7 @@ def _build_sample_data_section(
     schema_prefix: str,
 ) -> list[str]:
     lines: list[str] = [
-        "## 11. Datos reales de muestra",
+        "## 17. Datos reales de muestra",
         "",
         "> Primeras filas de cada tabla clave (hasta 8 registros).",
         "> Util para validar el comportamiento del sistema y confirmar mappings.",
