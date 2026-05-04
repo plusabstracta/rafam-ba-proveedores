@@ -108,6 +108,7 @@ src/entity_link_store.py → vínculos RAFAM_ID ↔ Paxapos_ID
 - **Variables de entorno** (`.env` vía `python-dotenv`) como única fuente de configuración runtime.
 - **`APP_ENV`** controla defaults: `dev` → `LOG_LEVEL=DEBUG`, `prod` → `LOG_LEVEL=INFO`.
 - **`RAFAM_SOURCE_BACKEND`** permite intercambiar Oracle ↔ SQLite sin cambiar código.
+- **Perfiles operativos:** RAFAM-only completa solo `RAFAM_SOURCE_*` para generar CSVs; importación Paxapos completa además `LOCAL_STATE_DB_PATH` y `PAXAPOS_*`.
 - **SSL configurable** (`PAXAPOS_VERIFY_SSL`) — `false` solo en dev.
 
 ### 3.5 Compatibilidad Oracle

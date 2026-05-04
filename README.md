@@ -40,6 +40,23 @@ El origen soporta dos modos con `RAFAM_SOURCE_BACKEND`:
 - `oracle`: conecta a RAFAM productivo o entorno Oracle de integración.
 - `sqlite`: usa una base local (`state/dev_rafam.db`) para desarrollo y tests manuales.
 
+## Perfiles de uso
+
+Hay dos perfiles operativos y no necesitan completar las mismas variables:
+
+- **Operador RAFAM / CSV**: tiene acceso al Oracle RAFAM y genera snapshots CSV. Solo completa `APP_*`, `RAFAM_SOURCE_*` y, si corresponde, `ORACLE_CLIENT_DIR`. No necesita `PAXAPOS_*`.
+- **Operador Paxapos / importacion**: importa o sincroniza hacia Paxapos. Completa `RAFAM_SOURCE_*` o `RAFAM_SOURCE_SQLITE_DB_PATH`, `LOCAL_STATE_DB_PATH` y las variables `PAXAPOS_*` que correspondan al modo usado.
+
+Flujo RAFAM-only:
+
+```bash
+make setup
+make export-rafam-csv
+make export-rafam-csv MONTHS=6 TABLES=PROVEEDORES,ORDEN_PAGO
+```
+
+Ese flujo no consulta ni valida credenciales Paxapos.
+
 ## Setup rápido (desarrollo local)
 
 1. Crear entorno virtual e instalar dependencias.
@@ -54,6 +71,8 @@ python -m venv .venv
 ```bash
 cp .env.example .env
 ```
+
+Para desarrollo offline con snapshots, usar `RAFAM_SOURCE_BACKEND=sqlite`. Para exportar desde RAFAM real, usar `RAFAM_SOURCE_BACKEND=oracle` y completar las credenciales `RAFAM_SOURCE_*`.
 
 3. Cargar CSVs a SQLite local.
 
@@ -74,6 +93,7 @@ Flujo diario simplificado para el equipo:
 
 ```bash
 make setup
+make export-rafam-csv
 make load-dev
 make run-proveedores
 make status
@@ -83,6 +103,7 @@ Comandos utiles:
 
 ```bash
 make help
+make export-rafam-csv
 make run-all
 make run-orden_compra
 make run-proveedores-gateway
@@ -362,7 +383,7 @@ make run-orden_pago-migrator BATCH=500
 resuelve sus gastos vía `gasto_external_ids` buscando la traza RAFAM:{...}
 que el migrator guarda en la observación de cada gasto importado.
 
-### 3. Variables de entorno para producción
+### 3. Variables de entorno para producción con importación Paxapos
 
 ```dotenv
 APP_ENV=prod
@@ -385,6 +406,8 @@ PAXAPOS_RAFAM_DEFAULT_UNIDAD_ID=1
 PAXAPOS_RAFAM_DEFAULT_TIPO_PAGO_ID=1
 RAFAM_SYNC_BATCH_DELAY_SECONDS=2
 ```
+
+Para producción RAFAM-only que solo genera CSVs, el bloque `PAXAPOS_*` no es necesario.
 
 ### 4. Verificación post-importación
 

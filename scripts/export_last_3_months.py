@@ -5,7 +5,8 @@ Para tablas sin columna de fecha conocida hace un export completo (con aviso).
 Los CSV se escriben en output/rafam_ultimos_3_meses/ con timestamp en el nombre.
 
 Configuración via .env:
-    DB_HOST, DB_PORT, DB_SERVICE, DB_USER, DB_PASSWORD
+    RAFAM_SOURCE_HOST, RAFAM_SOURCE_PORT, RAFAM_SOURCE_SERVICE,
+    RAFAM_SOURCE_USER, RAFAM_SOURCE_PASSWORD
     ORACLE_CLIENT_DIR  (opcional, solo si se usa Oracle Instant Client)
 
 Uso:
@@ -30,11 +31,11 @@ from dotenv import load_dotenv
 REPO_ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(REPO_ROOT / ".env")
 
-DB_HOST     = os.getenv("DB_HOST", "10.10.91.241")
-DB_PORT     = int(os.getenv("DB_PORT", 1521))
-DB_SERVICE  = os.getenv("DB_SERVICE", "BDRAFAM")
-DB_USER     = os.getenv("DB_USER")
-DB_PASSWORD = os.getenv("DB_PASSWORD")
+RAFAM_SOURCE_HOST = os.getenv("RAFAM_SOURCE_HOST", "10.10.91.241")
+RAFAM_SOURCE_PORT = int(os.getenv("RAFAM_SOURCE_PORT", 1521))
+RAFAM_SOURCE_SERVICE = os.getenv("RAFAM_SOURCE_SERVICE", "BDRAFAM")
+RAFAM_SOURCE_USER = os.getenv("RAFAM_SOURCE_USER")
+RAFAM_SOURCE_PASSWORD = os.getenv("RAFAM_SOURCE_PASSWORD")
 SCHEMA      = "OWNER_RAFAM"
 
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "output" / "rafam_ultimos_3_meses"
@@ -199,9 +200,9 @@ def get_connection() -> oracledb.Connection:
     oracle_client_dir = os.getenv("ORACLE_CLIENT_DIR")
     if oracle_client_dir:
         oracledb.init_oracle_client(lib_dir=oracle_client_dir)
-    dsn  = oracledb.makedsn(DB_HOST, DB_PORT, service_name=DB_SERVICE)
-    conn = oracledb.connect(user=DB_USER, password=DB_PASSWORD, dsn=dsn)
-    print(f"✅ Conectado a [{DB_SERVICE}] en {DB_HOST}:{DB_PORT}")
+    dsn  = oracledb.makedsn(RAFAM_SOURCE_HOST, RAFAM_SOURCE_PORT, service_name=RAFAM_SOURCE_SERVICE)
+    conn = oracledb.connect(user=RAFAM_SOURCE_USER, password=RAFAM_SOURCE_PASSWORD, dsn=dsn)
+    print(f"✅ Conectado a [{RAFAM_SOURCE_SERVICE}] en {RAFAM_SOURCE_HOST}:{RAFAM_SOURCE_PORT}")
     return conn
 
 
@@ -337,8 +338,8 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     timestamp  = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    if not DB_USER or not DB_PASSWORD:
-        print("❌ Faltan DB_USER / DB_PASSWORD en .env", file=sys.stderr)
+    if not RAFAM_SOURCE_USER or not RAFAM_SOURCE_PASSWORD:
+        print("❌ Faltan RAFAM_SOURCE_USER / RAFAM_SOURCE_PASSWORD en .env", file=sys.stderr)
         sys.exit(1)
 
     conn   = get_connection()

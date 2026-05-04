@@ -40,7 +40,9 @@ python -m venv .venv
 copy .env.example .env
 ```
 
-Editar `.env` con los valores reales (nunca commitear este archivo):
+Editar `.env` con los valores reales (nunca commitear este archivo).
+
+Para el perfil **RAFAM-only** que solo genera CSVs desde Oracle, completar solo este bloque:
 
 ```
 RAFAM_SOURCE_BACKEND=oracle
@@ -49,7 +51,17 @@ RAFAM_SOURCE_PORT=1521
 RAFAM_SOURCE_SERVICE=BDRAFAM
 RAFAM_SOURCE_USER=<usuario de solo lectura>
 RAFAM_SOURCE_PASSWORD=<password>
+```
 
+Ese perfil puede ejecutar:
+
+```bash
+make export-rafam-csv
+```
+
+Para el perfil que importa o sincroniza hacia Paxapos, completar además:
+
+```
 LOCAL_STATE_DB_PATH=state/checkpoint.db
 
 PAXAPOS_URL=https://proveedores.madariaga.gob.ar
