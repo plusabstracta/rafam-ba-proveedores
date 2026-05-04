@@ -500,8 +500,6 @@ class MigratorExporter(BaseExporter):
         self._centros_costo_by_jurisdiccion = self._build_jurisdiccion_index(self._centros_costo)
         self._seed_centro_costo_from_lookups()
         self._unidades = self._lookup_list(self._lookup_payload, "unidades_de_medida")
-        self._unidades_by_name = self._build_single_index(self._unidades, "name")
-        self._default_unidad_id = self._resolve_default_unidad_id()
         self._tipos_factura = self._lookup_list(self._lookup_payload, "tipos_factura")
         self._tipos_factura_by_codename = self._build_single_index(self._tipos_factura, "codename")
         self._tipos_factura_by_name = self._build_single_index(self._tipos_factura, "name")
@@ -531,17 +529,6 @@ class MigratorExporter(BaseExporter):
             "auto_calcular_retenciones": False,
             "notificar_proveedor_pago": False,
         }
-
-    def _resolve_default_unidad_id(self) -> int:
-        configured = self._to_int(os.getenv("PAXAPOS_RAFAM_DEFAULT_UNIDAD_ID"))
-        if configured is not None:
-            return configured
-
-        unidad = self._unidades_by_name.get(self._normalize_text("Unidad"))
-        if unidad and self._to_int(unidad.get("id")) is not None:
-            return int(unidad.get("id"))
-
-        return 7
 
     def write_batch(self, entity: str, columns: list[str], rows: list[tuple]) -> None:
         if entity == "jurisdicciones":
@@ -1936,18 +1923,7 @@ class MigratorExporter(BaseExporter):
         return ""
 
     def _resolve_unidad_medida_id(self, raw: dict) -> int:
-        value = raw.get("UNI_MED")
-        if value is not None:
-            remote = self._link_store.get_remote_id("unidad_medida", str(value).strip())
-            if remote and self._to_int(remote) is not None:
-                return int(remote)
-
-        text = self._normalize_text(value)
-        if text:
-            by_name = self._unidades_by_name.get(text)
-            if by_name and self._to_int(by_name.get("id")) is not None:
-                return int(by_name.get("id"))
-        return self._default_unidad_id
+        return 5  # Unidad (id=5 en Paxapos) — hardcoded por contrato
 
     def _resolve_rubro_id(self, raw: dict, jurisdiccion_key: str = "JURISDICCION") -> int | None:
         """Resuelve rubro_id desde JURISDICCION via entity_link_store."""

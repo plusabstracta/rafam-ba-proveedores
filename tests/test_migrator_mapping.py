@@ -548,7 +548,7 @@ class TestWriteBatchOcItems:
         assert item["recibida_cantidad"] == 3.0
         assert "mercaderia_external_ref" in item
         assert item["mercaderia_external_ref"]["entity"] == "oc_items"
-        assert item["unidad_de_medida_id"] == 1  # default
+        assert item["unidad_de_medida_id"] == 5  # Unidad
 
     # ── Varias OCs en un batch ──
 
