@@ -115,10 +115,13 @@ make run-orden_pago-migrator BATCH=200   # ❌ bloqueado server-side
 - **Servidor de prueba**: dev2.paxapos.com
 - **Tenant**: prueba
 - **DB local**: state/dev_rafam.db (SQLite cargada desde CSVs)
-- **Checkpoints**: state/checkpoint.db
+- **Estado local**: state/checkpoint.db (checkpoints + links RAFAM -> Paxapos)
 - **Tests**: 24 tests pasan (`make test`) post-fixes
 - **Env vars relevantes**:
-  - `PAXAPOS_URL`, `PAXAPOS_TENANT`, `PAXAPOS_API_KEY` (requeridas)
+  - `RAFAM_SOURCE_BACKEND=sqlite` (local dev con snapshot)
+  - `LOCAL_STATE_DB_PATH=state/checkpoint.db` (estado incremental + links)
+  - `PAXAPOS_URL`, `PAXAPOS_TENANT`, `PAXAPOS_API_KEY` (solo para migrator/gateway Paxapos)
+  - `PAXAPOS_RAFAM_IMPORT_PATH`, `PAXAPOS_RAFAM_SPEC_PATH`, `PAXAPOS_RAFAM_LOOKUPS_PATH` (paths relativos migrator)
+  - `PAXAPOS_RAFAM_DEFAULT_*_ID` (defaults de catálogos Paxapos; validar con lookups)
   - `RAFAM_SYNC_BATCH_DELAY_SECONDS` (opcional, delay entre batches)
   - `PAXAPOS_VERIFY_SSL=false` (solo para desarrollo con certificados no confiables)
-  - `RAFAM_SOURCE_BACKEND=sqlite` (local dev)

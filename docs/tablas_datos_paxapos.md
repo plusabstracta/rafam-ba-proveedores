@@ -332,6 +332,8 @@ Fuente RAFAM: `ORDEN_PAGO` (con resolución de gastos vía `SG_DELEG_SOLIC`/`SG_
 | `PAXAPOS_RAFAM_DEFAULT_TIPO_FACTURA_ID` | ID de tipo de factura Paxapos por defecto (gastos) |
 | `PAXAPOS_RAFAM_DEFAULT_TIPO_PAGO_ID` | ID de tipo de pago Paxapos por defecto (órdenes de pago, default `1`) |
 
+Los IDs de catálogos son propios del tenant Paxapos. Antes de una importación real, confirmar los defaults con `make migrator-lookups` y no asumir que el mismo ID representa el mismo concepto en todos los portales.
+
 ## Mappings locales persistidos
 
 El script guarda vínculos RAFAM -> Paxapos en SQLite (`EntityLinkStore`) para no resolver IDs remotos en cada corrida:

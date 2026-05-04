@@ -111,6 +111,27 @@ src/entity_link_store.py → vínculos RAFAM_ID ↔ Paxapos_ID
 - **Perfiles operativos:** RAFAM-only completa solo `RAFAM_SOURCE_*` para generar CSVs; importación Paxapos completa además `LOCAL_STATE_DB_PATH` y `PAXAPOS_*`.
 - **SSL configurable** (`PAXAPOS_VERIFY_SSL`) — `false` solo en dev.
 
+#### Variables canónicas
+
+| Grupo | Variables | Requeridas para |
+|---|---|---|
+| App | `APP_ENV`, `LOG_LEVEL` | Todos los perfiles |
+| SOURCE RAFAM | `RAFAM_SOURCE_BACKEND`, `RAFAM_SOURCE_HOST`, `RAFAM_SOURCE_PORT`, `RAFAM_SOURCE_SERVICE`, `RAFAM_SOURCE_USER`, `RAFAM_SOURCE_PASSWORD`, `RAFAM_SOURCE_SQLITE_DB_PATH` | Export CSV desde RAFAM y sync/import |
+| LOCAL state | `LOCAL_STATE_DB_PATH` | `main.py run/status/reset`; guarda checkpoints y links RAFAM->Paxapos |
+| DESTINATION Paxapos | `PAXAPOS_URL`, `PAXAPOS_TENANT`, `PAXAPOS_VERIFY_SSL`, `PAXAPOS_TIMEOUT_SECONDS`, `PAXAPOS_JWT`, `PAXAPOS_API_KEY` | Solo gateway/migrator Paxapos |
+| RAFAM en Paxapos | `PAXAPOS_RAFAM_IMPORT_PATH`, `PAXAPOS_RAFAM_SPEC_PATH`, `PAXAPOS_RAFAM_LOOKUPS_PATH`, `PAXAPOS_RAFAM_DEFAULT_*_ID`, `RAFAM_SYNC_BATCH_DELAY_SECONDS` | Solo migrator Paxapos |
+
+No agregar aliases ni fallbacks legacy a `DB_*`, `SQLITE_DB_PATH`, `CHECKPOINT_DB_PATH`, `ENTITY_LINK_DB_PATH`, `GATEWAY_*`, `MIGRATOR_*`, `LOCAL_CHECKPOINT_DB_PATH` ni `LOCAL_ENTITY_LINK_DB_PATH`. Si aparece un nombre viejo, migrarlo al nombre canónico y actualizar documentación/tests en el mismo cambio.
+
+### 3.4.1 Invariantes de documentación
+
+- `README.md` explica uso diario y perfiles operativos.
+- `.env.example` es la plantilla única por roles y debe listar solo variables runtime vigentes.
+- `docs/deployment.md` documenta instalación/operación por perfil.
+- `docs/tablas_datos_paxapos.md` documenta mapeos RAFAM->Paxapos y debe cambiar junto con payload/mappers.
+- `.github/instructions/*.instructions.md` debe reflejar las mismas reglas que los docs para evitar drift de ingeniería.
+- Todo cambio de configuración, contrato Paxapos, orden de entidades, payload o comandos Makefile debe actualizar docs e instrucciones relacionadas en el mismo commit.
+
 ### 3.5 Compatibilidad Oracle
 
 - Oracle 11g no soporta `FETCH FIRST N ROWS` — usar reflection manual con `get_columns()` + `Table.append_column()`.
@@ -119,7 +140,7 @@ src/entity_link_store.py → vínculos RAFAM_ID ↔ Paxapos_ID
 
 ### 3.6 Contrato con Paxapos (CakePHP 2)
 
-- Tenant viaja por header `X-Tenant-Id`, no en la URL.
+- Tenant viaja duplicado por compatibilidad: en la URL construida como `{PAXAPOS_URL}/{PAXAPOS_TENANT}/{PAXAPOS_RAFAM_*_PATH}` y en el header `X-Tenant-Id`. `PAXAPOS_URL` nunca debe incluir tenant.
 - Auth por `Authorization: Bearer {JWT}` o `X-Api-Key`.
 - Payloads CakePHP 2 usan wrapper con nombre del modelo: `{"Proveedor": {...}}`.
 - Responses batch (HTTP 207): parsear `results` item por item — un error parcial no invalida todo el batch.
@@ -267,6 +288,8 @@ RAFAM_SOURCE_BACKEND=sqlite .venv/bin/python -m pytest tests/ -v
 | Full reload en cada corrida | Sobrecarga Oracle y destino, duplica datos | Checkpoints incrementales |
 | Guardar estado en archivos planos | No atómico, corrupción en crash | SQLite con transacciones |
 | Hardcodear URLs/tokens | Imposible cambiar entre ambientes | Variables de entorno |
+| Reintroducir aliases legacy de env | Configuración ambigua y difícil de operar por roles | Usar solo variables canónicas documentadas |
+| Cambiar payload/config sin docs | Drift entre código, operación y agentes | Actualizar README/docs/instructions en el mismo cambio |
 | `try/except: pass` | Oculta errores a las 3 AM | Log + `mark_error()` sin avanzar cursor |
 | Cargar todo en memoria | OOM con tablas grandes | `stream_results=True` + `fetchmany()` |
 | `requests` como dependencia | Agrega supply chain sin necesidad | `urllib` stdlib |

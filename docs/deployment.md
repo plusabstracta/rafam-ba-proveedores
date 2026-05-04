@@ -69,7 +69,18 @@ PAXAPOS_TENANT=madariaga
 PAXAPOS_JWT=<jwt de Paxapos, solo si se usa modo gateway directo>
 PAXAPOS_API_KEY=<api key del migrator RAFAM>
 PAXAPOS_PROVEEDORES_ENDPOINT=account/proveedores.json
+PAXAPOS_PROVEEDORES_UPDATE_ENDPOINT=account/proveedores/edit/{id}.json
+PAXAPOS_PROVEEDORES_LOOKUP_INDEX_ENDPOINT=account/proveedores/index.json
+PAXAPOS_RAFAM_IMPORT_PATH=rafam/migracion/importar.json
+PAXAPOS_RAFAM_SPEC_PATH=rafam/migracion/spec.json
+PAXAPOS_RAFAM_LOOKUPS_PATH=rafam/migracion/lookups.json
+PAXAPOS_RAFAM_DEFAULT_UNIDAD_ID=<id de Unidad segun lookups>
+PAXAPOS_RAFAM_DEFAULT_TIPO_FACTURA_ID=
+PAXAPOS_RAFAM_DEFAULT_TIPO_PAGO_ID=1
+RAFAM_SYNC_BATCH_DELAY_SECONDS=2
 ```
+
+`PAXAPOS_URL` no debe incluir el tenant. El script arma las URLs migrator como `{PAXAPOS_URL}/{PAXAPOS_TENANT}/{PAXAPOS_RAFAM_*_PATH}` y además envía `X-Tenant-Id`.
 
 ---
 

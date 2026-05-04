@@ -195,6 +195,7 @@ Uso estandar actualizado:
 - Ejemplo producción: `https://proveedores.madariaga.gob.ar/madariaga/rafam/migracion/spec.json`.
 - Ejemplo desarrollo: `https://dev.paxapos.com/prueba/rafam/migracion/spec.json`.
 - `PAXAPOS_RAFAM_*_PATH` siempre debe ser un path relativo, nunca una URL completa.
+- `PAXAPOS_URL` no incluye tenant; `PAXAPOS_TENANT` se usa en la URL y también en el header `X-Tenant-Id`.
 
 Uso inicial recomendado:
 
@@ -283,8 +284,9 @@ Payload enviado (CakePHP 2):
 
 Nota sobre rutas CakePHP 2:
 
-- En el flujo actual del proyecto, el tenant viaja por header `X-Tenant-Id`.
-- El script ya no depende de incluir el tenant en la URL base.
+- En endpoints directos gateway, el tenant viaja por header `X-Tenant-Id`.
+- En migrator RAFAM, el tenant viaja en la URL final y también por header `X-Tenant-Id`.
+- `PAXAPOS_URL` nunca debe incluir el tenant; el tenant vive en `PAXAPOS_TENANT`.
 - El endpoint de proveedores se consume directo como `account/proveedores.json`.
 
 ## CLI
@@ -402,12 +404,17 @@ PAXAPOS_TENANT=madariaga
 PAXAPOS_API_KEY=api_key_real
 PAXAPOS_VERIFY_SSL=true
 PAXAPOS_TIMEOUT_SECONDS=30
+PAXAPOS_RAFAM_IMPORT_PATH=rafam/migracion/importar.json
+PAXAPOS_RAFAM_SPEC_PATH=rafam/migracion/spec.json
+PAXAPOS_RAFAM_LOOKUPS_PATH=rafam/migracion/lookups.json
 PAXAPOS_RAFAM_DEFAULT_UNIDAD_ID=1
+PAXAPOS_RAFAM_DEFAULT_TIPO_FACTURA_ID=
 PAXAPOS_RAFAM_DEFAULT_TIPO_PAGO_ID=1
 RAFAM_SYNC_BATCH_DELAY_SECONDS=2
 ```
 
 Para producción RAFAM-only que solo genera CSVs, el bloque `PAXAPOS_*` no es necesario.
+Antes de una importación real, confirmar `PAXAPOS_RAFAM_DEFAULT_UNIDAD_ID` con `make migrator-lookups`, porque los IDs de catálogos pueden variar por tenant.
 
 ### 4. Verificación post-importación
 

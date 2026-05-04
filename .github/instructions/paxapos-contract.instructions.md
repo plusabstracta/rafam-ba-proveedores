@@ -1,6 +1,6 @@
 ---
-description: "Use when implementing mappers, exporters, payload construction, entity linking, or any code that sends data TO Paxapos. Covers the full RAFAM lifecycle, the Paxapos data model, API contract, authentication, validation rules, upsert behavior, and field-level mapping for every entity."
-applyTo: "src/exporter.py,src/gateway_mapper.py,src/entity_link_store.py,docs/tablas_datos_paxapos.md,tests/test_migrator_mapping.py"
+description: "Use when implementing mappers, exporters, payload construction, entity linking, docs, env templates, or any code that sends data TO Paxapos. Covers the full RAFAM lifecycle, the Paxapos data model, API contract, authentication, validation rules, upsert behavior, env contract, and field-level mapping for every entity."
+applyTo: "src/exporter.py,src/gateway_mapper.py,src/entity_link_store.py,README.md,.env.example,docs/deployment.md,docs/tablas_datos_paxapos.md,docs/field_mapping.md,tests/test_migrator_mapping.py"
 ---
 
 # Contrato Paxapos + Flujo RAFAM — Referencia Completa
@@ -109,6 +109,14 @@ El Gasto (`SOLIC_GASTOS`) es el puente entre OC y OP. La FK de `OC_ITEMS` a `SOL
 | `/{tenant}/account/proveedores/check_duplicados/{id}.json` | GET | Detección de proveedores duplicados por similitud de nombre + CUIT |
 
 > No hay Swagger/OpenAPI estático. La documentación de referencia es `RAFAM_MIGRATION_API.md` y el endpoint `spec.json`.
+
+### 3.1.1 Construcción de URL y tenant
+
+- `PAXAPOS_URL` es solo el host/base, sin tenant. Ejemplo: `https://proveedores.madariaga.gob.ar`.
+- `PAXAPOS_TENANT` se agrega al path para rutas migrator. Ejemplo: `madariaga`.
+- `PAXAPOS_RAFAM_*_PATH` son paths relativos dentro de Paxapos. Nunca deben ser URLs completas.
+- La URL final se arma como `{PAXAPOS_URL}/{PAXAPOS_TENANT}/{PAXAPOS_RAFAM_*_PATH}`.
+- El mismo tenant se envía también por header `X-Tenant-Id` porque el backend lo usa en autenticación/contexto.
 
 ### 3.2 Autenticación
 
@@ -234,7 +242,7 @@ Pedidos y Órdenes de Compra comparten la misma tabla, diferenciados por `tipo`.
 | `es_ajuste_precio` | tinyint(1) | — | default 0 |
 | `proveedor_id` | int | SÍ | hereda de cabecera |
 | `pedido_estado_id` | int | — | default 1. 1=Pendiente, 2=Completado, 3=Pedido |
-| `unidad_de_medida_id` | int | NO | default 1 (¡"Planta"! Enviar siempre 5 para "Unidad") |
+| `unidad_de_medida_id` | int | NO | Resolver por link/lookup; no asumir que el default del tenant es "Unidad" |
 | `cantidad` | decimal(10,2) | NO | Obligatorio |
 | `observacion` | text | SÍ | |
 | `recibida_unidad_de_medida_id` | int | SÍ | |
@@ -380,7 +388,7 @@ Pedidos y Órdenes de Compra comparten la misma tabla, diferenciados por `tipo`.
 | 21 | Docena |
 | 22 | Maple |
 
-> **"Unidad" es ID=5** (no ID=1 que es "Planta"). Enviar siempre `unidad_de_medida_id: 5` como default.
+> Esta tabla corresponde a seeds legacy donde `id=1` es "Planta" y `id=5` es "Unidad". No asumir que esos IDs son iguales en todos los tenants: confirmar con `GET /{tenant}/rafam/migracion/lookups.json?only=unidades_de_medida` o `make migrator-lookups` y configurar `PAXAPOS_RAFAM_DEFAULT_UNIDAD_ID`.
 
 ### 6.3 IVA condiciones
 
@@ -669,7 +677,7 @@ Filtrable con `?only=proveedores,tipos_factura` (CSV). Gastos paginados con `?pa
 | `PAXAPOS_RAFAM_IMPORT_PATH` | Path relativo del importador RAFAM dentro de Paxapos | `rafam/migracion/importar.json` |
 | `PAXAPOS_RAFAM_SPEC_PATH` | Path relativo de spec RAFAM dentro de Paxapos | `rafam/migracion/spec.json` |
 | `PAXAPOS_RAFAM_LOOKUPS_PATH` | Path relativo de lookups RAFAM dentro de Paxapos | `rafam/migracion/lookups.json` |
-| `PAXAPOS_RAFAM_DEFAULT_UNIDAD_ID` | ID unidad de medida Paxapos default | `1` (debería ser `5` para "Unidad") |
+| `PAXAPOS_RAFAM_DEFAULT_UNIDAD_ID` | ID unidad de medida Paxapos default | Verificar contra `lookups`; ejemplo `.env`: `1` |
 | `PAXAPOS_RAFAM_DEFAULT_TIPO_FACTURA_ID` | ID tipo factura Paxapos default | (vacío) |
 | `PAXAPOS_RAFAM_DEFAULT_TIPO_PAGO_ID` | ID tipo de pago Paxapos default | `1` |
 | `RAFAM_SYNC_BATCH_DELAY_SECONDS` | Delay local entre batches | `2` |
@@ -682,9 +690,9 @@ Filtrable con `?only=proveedores,tipos_factura` (CSV). Gastos paginados con `?pa
 
 Reglas que no se deducen de la documentación estándar pero causan bugs si se ignoran.
 
-### 14.1 Unidad de medida default es "Planta", no "Unidad"
+### 14.1 Unidad de medida default depende del tenant
 
-El default del controller para `unidad_de_medida_id` es `1`, pero `id=1` es **"Planta"** (seed de gastronomía). **"Unidad" es `id=5`**. Si el script no envía `unidad_de_medida_id`, todo queda como "Planta". **Siempre enviar `unidad_de_medida_id: 5` explícitamente.**
+No asumir que `id=1` es "Unidad" en todos los tenants. En seeds legacy de gastronomía, `id=1` era **"Planta"** y **"Unidad" era `id=5`**. El script resuelve primero por `link_unidad_medida`, luego por lookup remoto con nombre `Unidad`, luego usa `PAXAPOS_RAFAM_DEFAULT_UNIDAD_ID` y finalmente fallback interno. Antes de una importación real, consultar `make migrator-lookups` y configurar `PAXAPOS_RAFAM_DEFAULT_UNIDAD_ID` con el ID correcto del tenant.
 
 ### 14.2 CUIT se limpia automáticamente — dedup por dígitos
 
