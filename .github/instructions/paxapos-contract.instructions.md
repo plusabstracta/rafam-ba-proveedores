@@ -80,9 +80,19 @@ OC (compras_pedidos.gasto_id) ──HABTM──► Gasto ◄──HABTM (account
 
 ```
 OC_ITEMS ──(DELEG_SOLIC, NRO_SOLIC)──► SOLIC_GASTOS ◄──(SG_DELEG_SOLIC, SG_NRO_SOLIC)── ORDEN_PAGO
+                                              ▲
+                         ORDEN_PAGO.RECO_DEU_COMPRA ──► ORDEN_COMPRA.NRO_OC (nexo OP↔OC)
 ```
 
 El Gasto (`SOLIC_GASTOS`) es el puente entre OC y OP. La FK de `OC_ITEMS` a `SOLIC_GASTOS` permite resolver qué gastos pertenecen a cada OC.
+
+**Resolución de gasto_refs para OP** — tres niveles de fallback:
+
+1. **SG directo:** `ORDEN_PAGO.SG_DELEG_SOLIC` + `SG_NRO_SOLIC` matchea SOLIC_GASTOS (~5% de OPs).
+2. **CTA_HOJA_DE_RUTA JOIN** (solo Oracle): vista desnormalizada que consolida PE→SG→OC→OP. LEFT JOIN en `source_repository` agrega `HDR_SG_NRO`, `HDR_SG_DELEG`, `HDR_OC_NRO_OC`. No existe en SQLite dev.
+3. **RECO_DEU_COMPRA → OC link_store** (~85% de OPs): `RECO_DEU_COMPRA` = `NRO_OC` de la OC que se paga. Se buscan los `gasto_refs` ya persistidos de esa OC en `entity_link_store`. Funciona tanto en Oracle como SQLite.
+
+> `NRO_CANCE` NO es el nexo OP↔OC. Su uso principal es para RETENCIONES.
 
 ---
 

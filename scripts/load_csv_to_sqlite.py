@@ -76,6 +76,16 @@ _SCHEMA_COLUMNS: dict[str, list[str]] = {
         "FECH_CONFIRM", "FECH_ANUL", "MOTIVO_ANUL", "OBSERVACIONES", "CANT_IMP",
         "SG_DIFERIDO",
     ],
+    # Auxiliary tables used as JOIN sources (not synced as entities)
+    "CTA_HOJA_DE_RUTA": [
+        "PE_EJERCICIO", "PE_NRO", "SG_EJERCICIO", "SG_NRO", "SG_DELEG",
+        "OC_EJERCICIO", "OC_NRO_OC", "OC_COD_PROV", "OP_NRO_OP", "ESTADO_OP",
+        "OP_NRO_CANCE", "PE_JURISDICCION", "FECH_HOJA",
+    ],
+    "RG_COMP": [
+        "EJERCICIO", "NRO_REG_COMP", "NRO_OC", "COD_PROV", "JURISDICCION",
+        "FECH_REG_COMP",
+    ],
 }
 
 
@@ -90,6 +100,51 @@ def _latest_csv_by_entity(csv_dir: Path) -> dict[str, Path]:
         if current is None or path.name > current.name:
             latest[entity] = path
     return latest
+
+
+_CTA_HOJA_DE_RUTA_VIEW_SQL = """\
+CREATE VIEW IF NOT EXISTS CTA_HOJA_DE_RUTA AS
+SELECT DISTINCT
+    sg.EJERCICIO    AS SG_EJERCICIO,
+    sg.NRO_SOLIC    AS SG_NRO,
+    sg.DELEG_SOLIC  AS SG_DELEG,
+    oc.EJERCICIO    AS OC_EJERCICIO,
+    oc.NRO_OC       AS OC_NRO_OC,
+    oc.COD_PROV     AS OC_COD_PROV,
+    pe.EJERCICIO    AS PE_EJERCICIO,
+    pe.NUM_PED      AS PE_NRO,
+    pe.JURISDICCION AS PE_JURISDICCION,
+    oc.FECH_CONFIRM AS FECH_HOJA
+FROM OC_ITEMS oci
+JOIN SOLIC_GASTOS sg
+  ON sg.EJERCICIO = oci.EJERCICIO
+ AND sg.DELEG_SOLIC = oci.DELEG_SOLIC
+ AND sg.NRO_SOLIC = oci.NRO_SOLIC
+JOIN ORDEN_COMPRA oc
+  ON oc.EJERCICIO = oci.EJERCICIO
+ AND oc.UNI_COMPRA = oci.UNI_COMPRA
+ AND oc.NRO_OC = oci.NRO_OC
+LEFT JOIN PEDIDOS pe
+  ON pe.EJERCICIO = sg.EJERCICIO
+ AND pe.NUM_PED = sg.NRO_PED
+"""
+
+
+def _ensure_cta_hoja_de_ruta_view(conn) -> None:
+    """Create CTA_HOJA_DE_RUTA as a derived VIEW when no CSV was loaded for it."""
+    from sqlalchemy import text
+    # Check if a real table was already loaded from CSV
+    existing = conn.execute(
+        text("SELECT type FROM sqlite_master WHERE name = 'CTA_HOJA_DE_RUTA'")
+    ).scalar()
+    if existing == "table":
+        print("[CTA_HOJA_DE_RUTA] tabla cargada desde CSV, no se crea VIEW")
+        return
+    if existing == "view":
+        conn.execute(text("DROP VIEW CTA_HOJA_DE_RUTA"))
+    conn.execute(text(_CTA_HOJA_DE_RUTA_VIEW_SQL))
+    count = conn.execute(text("SELECT COUNT(*) FROM CTA_HOJA_DE_RUTA")).scalar()
+    print(f"[CTA_HOJA_DE_RUTA] VIEW derivada creada ({count} filas)")
 
 
 def _create_table_from_csv(metadata: MetaData, entity: str, header: list[str]) -> Table:
@@ -139,6 +194,11 @@ def load_csvs(csv_dir: Path, output_db: Path) -> None:
                 if rows:
                     conn.execute(table.insert(), rows)
                 print(f"[{entity}] {len(rows)} filas cargadas desde {path.name} ({len(header)} cols)")
+
+        # If CTA_HOJA_DE_RUTA was NOT loaded from CSV, create it as a derived
+        # VIEW from the existing tables so that source_repository JOINs work
+        # identically in dev (SQLite) and prod (Oracle).
+        _ensure_cta_hoja_de_ruta_view(conn)
 
 
 def main() -> None:

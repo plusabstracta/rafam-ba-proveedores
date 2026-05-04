@@ -181,10 +181,17 @@ OC (compras_pedidos.gasto_id) ──HABTM──► Gasto ◄──HABTM (account
 #### Cadena de vínculos en RAFAM (fuente)
 
 ```
-OC_ITEMS ──(DELEG_SOLIC, NRO_SOLIC)──► SOLIC_GASTOS ◄──(NRO_CANCE)── ORDEN_PAGO
+OC_ITEMS ──(DELEG_SOLIC, NRO_SOLIC)──► SOLIC_GASTOS ◄──(SG_DELEG_SOLIC, SG_NRO_SOLIC)── ORDEN_PAGO
+                                              ▲
+                         ORDEN_PAGO.RECO_DEU_COMPRA ──► ORDEN_COMPRA.NRO_OC (nexo OP↔OC)
 ```
 
-El Gasto (SOLIC_GASTOS) es el puente entre OC y OP. La FK de OC_ITEMS a SOLIC_GASTOS permite resolver qué gastos pertenecen a cada OC.
+El Gasto (SOLIC_GASTOS) es el puente entre OC y OP. Tres niveles de resolución:
+1. SG directo (SG_DELEG_SOLIC + SG_NRO_SOLIC) — ~5%
+2. CTA_HOJA_DE_RUTA JOIN (solo Oracle) — vista desnormalizada PE→SG→OC→OP
+3. RECO_DEU_COMPRA → OC link_store → gasto_refs — ~85%, funciona Oracle + SQLite
+
+> `NRO_CANCE` NO es el nexo OP↔OC; es para RETENCIONES.
 
 #### Colisión de columnas en JOINs
 

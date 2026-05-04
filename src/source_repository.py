@@ -249,6 +249,10 @@ class SourceRepository:
         solic_gastos = self._reflect_table("SOLIC_GASTOS")
         retenciones = self._reflect_optional_table("RETENCIONES")
         deducciones = self._reflect_optional_table("DEDUCCIONES")
+        # CTA_HOJA_DE_RUTA: denormalized view linking OC→SG (and optionally PE).
+        # In Oracle it's a pre-built VIEW; in SQLite dev it's a derived VIEW
+        # created by load_csv_to_sqlite.py.  Required in both environments.
+        cta_hdr = self._reflect_table("CTA_HOJA_DE_RUTA")
 
         select_cols = [
             orden_pago,
@@ -263,6 +267,31 @@ class SourceRepository:
                 orden_pago.c.NRO_CANCE == solic_gastos.c.NRO_SOLIC,
             ),
         )
+
+        # LEFT JOIN CTA_HOJA_DE_RUTA to resolve which OC/SG chain each OP belongs to.
+        # The nexus is NRO_CANCE (= SG.NRO_SOLIC) which identifies the solicitud
+        # being paid.  In Oracle the view is pre-built; in SQLite it's derived.
+        hdr_sg_nro_col = self._safe_column(cta_hdr, "SG_NRO")
+        hdr_sg_ej_col = self._safe_column(cta_hdr, "SG_EJERCICIO")
+        if hdr_sg_nro_col is not None and hdr_sg_ej_col is not None:
+            from_clause = from_clause.outerjoin(
+                cta_hdr,
+                and_(
+                    orden_pago.c.NRO_CANCE == hdr_sg_nro_col,
+                    orden_pago.c.EJERCICIO == hdr_sg_ej_col,
+                ),
+            )
+        # Select SG columns from the view
+        for col_name, label in [
+            ("SG_NRO", "HDR_SG_NRO"),
+            ("SG_DELEG", "HDR_SG_DELEG"),
+            ("SG_EJERCICIO", "HDR_SG_EJERCICIO"),
+            ("OC_NRO_OC", "HDR_OC_NRO_OC"),
+            ("OC_COD_PROV", "HDR_OC_COD_PROV"),
+        ]:
+            col = self._safe_column(cta_hdr, col_name)
+            if col is not None:
+                select_cols.append(col.label(label))
 
         if retenciones is not None:
             from_clause = from_clause.outerjoin(

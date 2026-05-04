@@ -266,7 +266,7 @@ Fuente RAFAM: `SOLIC_GASTOS`
 
 ## 6. Órdenes de Pago (Egresos)
 
-Fuente RAFAM: `ORDEN_PAGO` (con JOIN a `SOLIC_GASTOS` vía `NRO_CANCE`)
+Fuente RAFAM: `ORDEN_PAGO` (con resolución de gastos vía `SG_DELEG_SOLIC`/`SG_NRO_SOLIC`, `CTA_HOJA_DE_RUTA` JOIN, o `RECO_DEU_COMPRA` → OC link_store)
 
 | Campo Paxapos | Fuente RAFAM | Regla / Transformación |
 |---|---|---|
