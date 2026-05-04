@@ -131,16 +131,14 @@ LEFT JOIN PEDIDOS pe
 
 
 def _ensure_cta_hoja_de_ruta_view(conn) -> None:
-    """Create CTA_HOJA_DE_RUTA as a derived VIEW when no CSV was loaded for it."""
+    """Always create CTA_HOJA_DE_RUTA as a derived VIEW (it's a JOIN view, not a real table)."""
     from sqlalchemy import text
-    # Check if a real table was already loaded from CSV
     existing = conn.execute(
         text("SELECT type FROM sqlite_master WHERE name = 'CTA_HOJA_DE_RUTA'")
     ).scalar()
     if existing == "table":
-        print("[CTA_HOJA_DE_RUTA] tabla cargada desde CSV, no se crea VIEW")
-        return
-    if existing == "view":
+        conn.execute(text("DROP TABLE CTA_HOJA_DE_RUTA"))
+    elif existing == "view":
         conn.execute(text("DROP VIEW CTA_HOJA_DE_RUTA"))
     conn.execute(text(_CTA_HOJA_DE_RUTA_VIEW_SQL))
     count = conn.execute(text("SELECT COUNT(*) FROM CTA_HOJA_DE_RUTA")).scalar()
