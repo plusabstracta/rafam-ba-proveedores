@@ -104,39 +104,34 @@ class GatewayExporter(BaseExporter):
     """Envía los lotes traducidos a endpoints JSON de Paxapos (CakePHP 2)."""
 
     def __init__(self, force_update: bool = False):
-        self._base_url = os.getenv("GATEWAY_URL", "").rstrip("/")
-        if not self._base_url:
-            raise ValueError("Falta GATEWAY_URL en .env para modo gateway")
-
-        self._tenant = os.getenv("GATEWAY_TENANT", "").strip()
-        if not self._tenant:
-            raise ValueError("Falta GATEWAY_TENANT en .env para modo gateway")
+        self._base_url = _paxapos_url()
+        self._tenant = _paxapos_tenant()
 
         self._app_env = os.getenv("APP_ENV", "dev").strip().lower()
-        self._timeout = int(os.getenv("GATEWAY_TIMEOUT_SECONDS", "20"))
-        self._verify_ssl = os.getenv("GATEWAY_VERIFY_SSL", "true").strip().lower() in {"1", "true", "yes", "on"}
-        self._jwt = os.getenv("GATEWAY_JWT", "").strip()
+        self._timeout = int(os.getenv("PAXAPOS_TIMEOUT_SECONDS", "20"))
+        self._verify_ssl = _env_bool("PAXAPOS_VERIFY_SSL", default="true")
+        self._jwt = os.getenv("PAXAPOS_JWT", "").strip()
         if not self._jwt:
-            raise ValueError("Falta GATEWAY_JWT en .env para modo gateway")
+            raise ValueError("Falta PAXAPOS_JWT en .env para modo gateway")
 
         self._entity_endpoints = {
-            "proveedores": os.getenv("GATEWAY_ENDPOINT_PROVEEDORES", "account/proveedores.json"),
+            "proveedores": os.getenv("PAXAPOS_PROVEEDORES_ENDPOINT", "account/proveedores.json"),
         }
         self._entity_update_endpoints = {
-            "proveedores": os.getenv("GATEWAY_ENDPOINT_PROVEEDORES_UPDATE", "account/proveedores/edit/{id}.json"),
+            "proveedores": os.getenv("PAXAPOS_PROVEEDORES_UPDATE_ENDPOINT", "account/proveedores/edit/{id}.json"),
         }
         self._entity_lookup_endpoints = {
-            "proveedores": os.getenv("GATEWAY_LOOKUP_PROVEEDORES", "account/proveedores/buscar.json"),
+            "proveedores": os.getenv("PAXAPOS_PROVEEDORES_LOOKUP_ENDPOINT", "account/proveedores/buscar.json"),
         }
         self._entity_lookup_index_endpoints = {
-            "proveedores": os.getenv("GATEWAY_LOOKUP_PROVEEDORES_INDEX", "account/proveedores/index.json"),
+            "proveedores": os.getenv("PAXAPOS_PROVEEDORES_LOOKUP_INDEX_ENDPOINT", "account/proveedores/index.json"),
         }
         self._lookup_proveedores_enabled = True
         self._force_update = force_update
         self._link_store = EntityLinkStore()
 
         if not self._verify_ssl:
-            logger.warning("GATEWAY_VERIFY_SSL=false: SSL certificate verification deshabilitada para gateway")
+            logger.warning("PAXAPOS_VERIFY_SSL=false: SSL certificate verification deshabilitada para gateway")
 
     def write_batch(self, entity: str, columns: list[str], rows: list[tuple]) -> None:
         endpoint = self._entity_endpoints.get(entity)
@@ -480,40 +475,71 @@ class MigratorExporter(BaseExporter):
     """Envía lotes al importador RAFAM -> Paxapos via /rafam/migracion/importar.json."""
 
     def __init__(self, dry_run: bool = False):
-        self._base_url = os.getenv("MIGRATOR_BASE_URL", "").rstrip("/")
-        if not self._base_url:
-            raise ValueError("Falta MIGRATOR_BASE_URL en .env para modo migrator")
+        self._base_url = _paxapos_url()
+        self._tenant = _paxapos_tenant()
 
-        self._tenant = os.getenv("MIGRATOR_TENANT", "").strip()
-        if not self._tenant:
-            raise ValueError("Falta MIGRATOR_TENANT en .env para modo migrator")
-
-        self._api_key = os.getenv("MIGRATOR_API_KEY", "").strip()
+        self._api_key = os.getenv("PAXAPOS_API_KEY", "").strip()
         if not self._api_key:
-            raise ValueError("Falta MIGRATOR_API_KEY en .env para modo migrator")
+            raise ValueError("Falta PAXAPOS_API_KEY en .env para modo migrator")
 
-        self._timeout = int(os.getenv("MIGRATOR_TIMEOUT_SECONDS", os.getenv("GATEWAY_TIMEOUT_SECONDS", "20")))
-        self._verify_ssl = os.getenv("MIGRATOR_VERIFY_SSL", os.getenv("GATEWAY_VERIFY_SSL", "true")).strip().lower() in {"1", "true", "yes", "on"}
-        self._import_endpoint = os.getenv("MIGRATOR_IMPORT_ENDPOINT", "rafam/migracion/importar.json").strip().strip("/")
+        self._timeout = int(os.getenv("PAXAPOS_TIMEOUT_SECONDS", "20"))
+        self._verify_ssl = _env_bool("PAXAPOS_VERIFY_SSL", default="true")
+        self._import_endpoint = _migrator_endpoint("PAXAPOS_RAFAM_IMPORT_PATH", "rafam/migracion/importar.json")
+        self._import_url = _build_migrator_url(self._base_url, self._tenant, self._import_endpoint)
         self._dry_run = dry_run
         self._link_store = EntityLinkStore()
-        self._lookup_payload = fetch_migrator_lookups(["unidades_de_medida", "tipos_factura", "tipos_de_pago"])
+        self._lookup_payload = fetch_migrator_lookups([
+            "centros_costo",
+            "unidades_de_medida",
+            "tipos_factura",
+            "tipos_de_pago",
+            "tipos_retencion",
+        ])
+        self._centros_costo = self._lookup_list(self._lookup_payload, "centros_costo")
+        self._centros_costo_by_name = self._build_single_index(self._centros_costo, "name")
         self._unidades = self._lookup_list(self._lookup_payload, "unidades_de_medida")
         self._unidades_by_name = self._build_single_index(self._unidades, "name")
-        self._default_unidad_id = self._to_int(os.getenv("MIGRATOR_DEFAULT_UNIDAD_ID")) or 1
+        self._default_unidad_id = self._resolve_default_unidad_id()
         self._tipos_factura = self._lookup_list(self._lookup_payload, "tipos_factura")
         self._tipos_factura_by_codename = self._build_single_index(self._tipos_factura, "codename")
         self._tipos_factura_by_name = self._build_single_index(self._tipos_factura, "name")
-        self._default_tipo_factura_id = self._to_int(os.getenv("MIGRATOR_DEFAULT_TIPO_FACTURA_ID"))
+        self._default_tipo_factura_id = self._to_int(os.getenv("PAXAPOS_RAFAM_DEFAULT_TIPO_FACTURA_ID"))
         self._tipos_de_pago = self._lookup_list(self._lookup_payload, "tipos_de_pago")
         self._tipos_de_pago_by_name = self._build_single_index(self._tipos_de_pago, "name")
-        self._default_tipo_pago_id = self._to_int(os.getenv("MIGRATOR_DEFAULT_TIPO_PAGO_ID")) or 1
+        self._default_tipo_pago_id = self._to_int(os.getenv("PAXAPOS_RAFAM_DEFAULT_TIPO_PAGO_ID")) or 1
+        self._tipos_retencion = self._lookup_list(self._lookup_payload, "tipos_retencion")
+        self._tipos_retencion_by_codigo = self._build_single_index(self._tipos_retencion, "codigo")
+        self._tipos_retencion_by_codename = self._build_single_index(self._tipos_retencion, "codename")
+        self._tipos_retencion_by_name = self._build_single_index(self._tipos_retencion, "name")
         self._missing_mercaderia_matches: dict[str, int] = {}
 
         if not self._verify_ssl:
-            logger.warning("MIGRATOR_VERIFY_SSL=false: SSL certificate verification deshabilitada para migrator")
+            logger.warning("PAXAPOS_VERIFY_SSL=false: SSL certificate verification deshabilitada para migrator")
         if isinstance(self._lookup_payload, dict) and self._lookup_payload.get("_partial_errors"):
             logger.warning("Migrator lookups parciales: %s", self._lookup_payload.get("_partial_errors"))
+
+    def _payload_options(self) -> dict:
+        return {
+            "upsert": True,
+            "atomic": False,
+            "fail_fast": False,
+            "send_oc_mail": False,
+            "strict_mail": False,
+            "auto_create_mercaderia": True,
+            "auto_calcular_retenciones": False,
+            "notificar_proveedor_pago": False,
+        }
+
+    def _resolve_default_unidad_id(self) -> int:
+        configured = self._to_int(os.getenv("PAXAPOS_RAFAM_DEFAULT_UNIDAD_ID"))
+        if configured is not None:
+            return configured
+
+        unidad = self._unidades_by_name.get(self._normalize_text("Unidad"))
+        if unidad and self._to_int(unidad.get("id")) is not None:
+            return int(unidad.get("id"))
+
+        return 7
 
     def write_batch(self, entity: str, columns: list[str], rows: list[tuple]) -> None:
         if entity == "jurisdicciones":
@@ -547,6 +573,7 @@ class MigratorExporter(BaseExporter):
         raise ValueError("Modo migrator soporta por ahora: jurisdicciones, proveedores, ped_items, oc_items, orden_compra, solic_gastos, orden_pago")
 
     def _write_batch_jurisdicciones(self, columns: list[str], rows: list[tuple]) -> None:
+        centros_costo = []
         rubros = []
         clasificaciones = []
 
@@ -562,6 +589,13 @@ class MigratorExporter(BaseExporter):
             denominacion = str(raw.get("DENOMINACION") or "").strip() or jurisdiccion
             external_id = {"jurisdiccion": jurisdiccion}
 
+            centros_costo.append({
+                "external_id": external_id,
+                "CentroCosto": {
+                    "name": denominacion,
+                    "description": f"Jurisdiccion RAFAM {jurisdiccion}",
+                },
+            })
             rubros.append({
                 "external_id": external_id,
                 "Rubro": {"name": denominacion},
@@ -577,13 +611,8 @@ class MigratorExporter(BaseExporter):
 
         payload = {
             "dry_run": self._dry_run,
-            "options": {
-                "upsert": True,
-                "atomic": False,
-                "fail_fast": False,
-                "send_oc_mail": False,
-                "strict_mail": False,
-            },
+            "options": self._payload_options(),
+            "centros_costo": centros_costo,
             "rubros": rubros,
             "clasificaciones": clasificaciones,
             "proveedores": [],
@@ -593,7 +622,7 @@ class MigratorExporter(BaseExporter):
             "ordenes_pago": [],
         }
 
-        url = f"{self._base_url}/{self._import_endpoint}"
+        url = self._import_url
         logger.debug(
             "Migrator request [jurisdicciones] POST %s dry_run=%s rubros=%d clasificaciones=%d",
             url, self._dry_run, len(rubros), len(clasificaciones),
@@ -601,11 +630,13 @@ class MigratorExporter(BaseExporter):
         parsed = self._post_json(url, payload)
 
         stats = parsed.get("stats", {}) if isinstance(parsed, dict) else {}
+        centros_stats = stats.get("centros_costo", {}) if isinstance(stats, dict) else {}
         rubros_stats = stats.get("rubros", {}) if isinstance(stats, dict) else {}
         clas_stats = stats.get("clasificaciones", {}) if isinstance(stats, dict) else {}
 
         logger.info(
-            "Migrator OK [jurisdicciones]: rubros=%d/%d ok, clasificaciones=%d/%d ok, dry_run=%s",
+            "Migrator OK [jurisdicciones]: centros_costo=%d/%d ok, rubros=%d/%d ok, clasificaciones=%d/%d ok, dry_run=%s",
+            centros_stats.get("ok", 0), len(centros_costo),
             rubros_stats.get("ok", 0), len(rubros),
             clas_stats.get("ok", 0), len(clasificaciones),
             self._dry_run,
@@ -631,13 +662,7 @@ class MigratorExporter(BaseExporter):
 
         payload = {
             "dry_run": self._dry_run,
-            "options": {
-                "upsert": True,
-                "atomic": False,
-                "fail_fast": False,
-                "send_oc_mail": False,
-                "strict_mail": False,
-            },
+            "options": self._payload_options(),
             "proveedores": proveedores,
             "pedidos": [],
             "ordenes_compra": [],
@@ -645,7 +670,7 @@ class MigratorExporter(BaseExporter):
             "ordenes_pago": [],
         }
 
-        url = f"{self._base_url}/{self._import_endpoint}"
+        url = self._import_url
         logger.debug("Migrator request [proveedores] POST %s dry_run=%s items=%d", url, self._dry_run, len(proveedores))
         parsed = self._post_json(url, payload)
 
@@ -692,6 +717,9 @@ class MigratorExporter(BaseExporter):
                     "Pedido": pedido_header,
                     "items": [],
                 }
+                centro_costo_id = self._resolve_centro_costo_id(raw.get("JURISDICCION"))
+                if centro_costo_id is not None:
+                    grouped[key]["centro_costo_id"] = centro_costo_id
 
             item = self._map_ped_item(raw)
             if item is None:
@@ -710,13 +738,7 @@ class MigratorExporter(BaseExporter):
 
         payload = {
             "dry_run": self._dry_run,
-            "options": {
-                "upsert": True,
-                "atomic": False,
-                "fail_fast": False,
-                "send_oc_mail": False,
-                "strict_mail": False,
-            },
+            "options": self._payload_options(),
             "proveedores": [],
             "pedidos": pedidos,
             "ordenes_compra": [],
@@ -724,7 +746,7 @@ class MigratorExporter(BaseExporter):
             "ordenes_pago": [],
         }
 
-        url = f"{self._base_url}/{self._import_endpoint}"
+        url = self._import_url
         logger.debug(
             "Migrator request [ped_items] POST %s dry_run=%s pedidos=%d items_omitidos=%d",
             url,
@@ -791,6 +813,7 @@ class MigratorExporter(BaseExporter):
                 pedido: dict = {
                     "internal_id": f"rafam-oc-{ejercicio}-{uni_compra}-{nro_oc}",
                     "tipo": "orden_compra",
+                    "estado_aprobacion": 2,
                     "proveedor_id": remote_prov_id,
                 }
 
@@ -816,9 +839,9 @@ class MigratorExporter(BaseExporter):
 
                 # centro_costo_id desde la primera JURISDICCION disponible
                 sg_jurisdiccion = raw.get("SG_JURISDICCION")
-                if sg_jurisdiccion:
-                    from src.gateway_mapper import resolve_centro_costo_id
-                    oc_data["centro_costo_id"] = resolve_centro_costo_id(sg_jurisdiccion)
+                centro_costo_id = self._resolve_centro_costo_id(sg_jurisdiccion)
+                if centro_costo_id is not None:
+                    oc_data["centro_costo_id"] = centro_costo_id
 
                 grouped[key] = oc_data
                 # Guardar datos de cabecera OC para extras del link
@@ -846,11 +869,16 @@ class MigratorExporter(BaseExporter):
             if not gasto_refs:
                 continue
             gasto_ids = []
+            gasto_external_ids = []
             for ref in gasto_refs:
-                gasto_key = json.dumps({"rafam_ref": ref}, sort_keys=True)
-                remote_gasto = self._link_store.get_remote_id("gasto", gasto_key)
+                gasto_external_id = self._gasto_external_id_from_ref(ref)
+                if gasto_external_id is not None:
+                    gasto_external_ids.append(gasto_external_id)
+                remote_gasto = self._get_gasto_remote_id(ref)
                 if remote_gasto:
                     gasto_ids.append(int(remote_gasto))
+            if gasto_external_ids:
+                oc_data["gasto_external_ids"] = gasto_external_ids
             if gasto_ids:
                 oc_data["gasto_ids"] = gasto_ids
 
@@ -954,13 +982,7 @@ class MigratorExporter(BaseExporter):
 
         payload = {
             "dry_run": self._dry_run,
-            "options": {
-                "upsert": True,
-                "atomic": False,
-                "fail_fast": False,
-                "send_oc_mail": False,
-                "strict_mail": False,
-            },
+            "options": self._payload_options(),
             "proveedores": [],
             "pedidos": [],
             "ordenes_compra": ordenes_compra,
@@ -968,7 +990,7 @@ class MigratorExporter(BaseExporter):
             "ordenes_pago": [],
         }
 
-        url = f"{self._base_url}/{self._import_endpoint}"
+        url = self._import_url
         logger.debug(
             "Migrator request [oc_items] POST %s dry_run=%s crear=%d anular=%d items_omitidos=%d",
             url,
@@ -1052,6 +1074,7 @@ class MigratorExporter(BaseExporter):
                 pedido: dict = {
                     "internal_id": f"rafam-oc-{ejercicio}-{uni_compra}-{nro_oc}",
                     "tipo": "orden_compra",
+                    "estado_aprobacion": 2,
                     "proveedor_id": remote_prov_id,
                 }
 
@@ -1077,9 +1100,9 @@ class MigratorExporter(BaseExporter):
 
                 # centro_costo_id desde la primera JURISDICCION disponible
                 sg_jurisdiccion = raw.get("SG_JURISDICCION")
-                if sg_jurisdiccion:
-                    from src.gateway_mapper import resolve_centro_costo_id
-                    oc_data["centro_costo_id"] = resolve_centro_costo_id(sg_jurisdiccion)
+                centro_costo_id = self._resolve_centro_costo_id(sg_jurisdiccion)
+                if centro_costo_id is not None:
+                    oc_data["centro_costo_id"] = centro_costo_id
 
                 grouped[key] = oc_data
                 grouped_raw[key] = raw
@@ -1106,11 +1129,16 @@ class MigratorExporter(BaseExporter):
             if not gasto_refs:
                 continue
             gasto_ids = []
+            gasto_external_ids = []
             for ref in gasto_refs:
-                gasto_key = json.dumps({"rafam_ref": ref}, sort_keys=True)
-                remote_gasto = self._link_store.get_remote_id("gasto", gasto_key)
+                gasto_external_id = self._gasto_external_id_from_ref(ref)
+                if gasto_external_id is not None:
+                    gasto_external_ids.append(gasto_external_id)
+                remote_gasto = self._get_gasto_remote_id(ref)
                 if remote_gasto:
                     gasto_ids.append(int(remote_gasto))
+            if gasto_external_ids:
+                oc_data["gasto_external_ids"] = gasto_external_ids
             if gasto_ids:
                 oc_data["gasto_ids"] = gasto_ids
 
@@ -1201,13 +1229,7 @@ class MigratorExporter(BaseExporter):
 
         payload = {
             "dry_run": self._dry_run,
-            "options": {
-                "upsert": True,
-                "atomic": False,
-                "fail_fast": False,
-                "send_oc_mail": False,
-                "strict_mail": False,
-            },
+            "options": self._payload_options(),
             "proveedores": [],
             "pedidos": [],
             "ordenes_compra": ordenes_compra,
@@ -1215,7 +1237,7 @@ class MigratorExporter(BaseExporter):
             "ordenes_pago": [],
         }
 
-        url = f"{self._base_url}/{self._import_endpoint}"
+        url = self._import_url
         logger.debug(
             "Migrator request [orden_compra] POST %s dry_run=%s crear=%d anular=%d items_omitidos=%d",
             url,
@@ -1260,7 +1282,7 @@ class MigratorExporter(BaseExporter):
 
             # Filtrar: solo gastos cuya ref esté vinculada a una OC enviada
             ext = gasto.get("external_id", {})
-            rafam_ref = ext.get("rafam_ref", "") if ext else ""
+            rafam_ref = self._gasto_ref_from_external_id(ext) if ext else ""
             if rafam_ref not in allowed_refs:
                 skipped_no_oc += 1
                 continue
@@ -1282,13 +1304,7 @@ class MigratorExporter(BaseExporter):
 
         payload = {
             "dry_run": self._dry_run,
-            "options": {
-                "upsert": True,
-                "atomic": False,
-                "fail_fast": False,
-                "send_oc_mail": False,
-                "strict_mail": False,
-            },
+            "options": self._payload_options(),
             "proveedores": [],
             "pedidos": [],
             "ordenes_compra": [],
@@ -1296,7 +1312,7 @@ class MigratorExporter(BaseExporter):
             "ordenes_pago": [],
         }
 
-        url = f"{self._base_url}/{self._import_endpoint}"
+        url = self._import_url
         logger.debug(
             "Migrator request [solic_gastos] POST %s dry_run=%s gastos=%d",
             url, self._dry_run, len(gastos),
@@ -1346,7 +1362,6 @@ class MigratorExporter(BaseExporter):
         if str(raw.get("ESTADO_SOLIC", "")).strip().upper() == "A":
             return None
 
-        rafam_ref = f"SG-{ejercicio}-{deleg_solic}-{nro_solic}"
         gasto_data: dict = {
             "fecha": fecha,
             "importe_total": importe_total,
@@ -1395,7 +1410,7 @@ class MigratorExporter(BaseExporter):
             gasto_data["observacion"] = str(obs).strip()[:255]
 
         return {
-            "external_id": {"rafam_ref": rafam_ref},
+            "external_id": self._gasto_external_id(ejercicio, deleg_solic, nro_solic),
             "Gasto": gasto_data,
         }
 
@@ -1403,6 +1418,7 @@ class MigratorExporter(BaseExporter):
         # Agrupa por (EJERCICIO, NRO_OP) y acumula las refs de gastos del LEFT JOIN
         grouped: dict[tuple[int, int], dict] = {}
         grouped_gasto_refs: dict[tuple[int, int], list[str]] = {}
+        grouped_retenciones: dict[tuple[int, int], dict[str, dict]] = {}
         raw_by_source_key: dict[str, dict] = {}
 
         for row in rows:
@@ -1423,11 +1439,16 @@ class MigratorExporter(BaseExporter):
                 if rafam_ref not in refs:
                     refs.append(rafam_ref)
 
-            if key in grouped:
-                continue
-
             estado = str(raw.get("ESTADO_OP", "")).strip().upper()
             if estado == "A":  # Anulada: omitir
+                continue
+
+            retencion = self._map_retencion(raw, ejercicio, nro_op)
+            if retencion is not None:
+                ret_key = json.dumps(retencion.get("external_id", {}), sort_keys=True)
+                grouped_retenciones.setdefault(key, {})[ret_key] = retencion
+
+            if key in grouped:
                 continue
 
             # Guardar raw para extras en persist_links
@@ -1484,10 +1505,13 @@ class MigratorExporter(BaseExporter):
                 continue
             # Resolver gasto_ids via link_store (RAFAM rafam_ref → Paxapos gasto id)
             gasto_ids = []
+            gasto_external_ids = []
             unresolved_refs = []
             for ref in gasto_refs:
-                gasto_key = json.dumps({"rafam_ref": ref}, sort_keys=True)
-                remote_gasto = self._link_store.get_remote_id("gasto", gasto_key)
+                gasto_external_id = self._gasto_external_id_from_ref(ref)
+                if gasto_external_id is not None:
+                    gasto_external_ids.append(gasto_external_id)
+                remote_gasto = self._get_gasto_remote_id(ref)
                 if remote_gasto:
                     gasto_ids.append(int(remote_gasto))
                 else:
@@ -1508,6 +1532,11 @@ class MigratorExporter(BaseExporter):
                 )
 
             op["gasto_ids"] = gasto_ids
+            if gasto_external_ids:
+                op["gasto_external_ids"] = gasto_external_ids
+            retenciones = list(grouped_retenciones.get(key, {}).values())
+            if retenciones:
+                op["retenciones"] = retenciones
             ordenes_pago.append(op)
 
         if skipped_no_gasto:
@@ -1522,13 +1551,7 @@ class MigratorExporter(BaseExporter):
 
         payload = {
             "dry_run": self._dry_run,
-            "options": {
-                "upsert": True,
-                "atomic": False,
-                "fail_fast": False,
-                "send_oc_mail": False,
-                "strict_mail": False,
-            },
+            "options": self._payload_options(),
             "proveedores": [],
             "pedidos": [],
             "ordenes_compra": [],
@@ -1536,7 +1559,7 @@ class MigratorExporter(BaseExporter):
             "ordenes_pago": ordenes_pago,
         }
 
-        url = f"{self._base_url}/{self._import_endpoint}"
+        url = self._import_url
         logger.debug(
             "Migrator request [orden_pago] POST %s dry_run=%s ops=%d omitidas=%d",
             url, self._dry_run, len(ordenes_pago), skipped_no_gasto,
@@ -1670,6 +1693,149 @@ class MigratorExporter(BaseExporter):
     def _resolve_tipo_pago_id(self) -> int:
         return self._default_tipo_pago_id
 
+    def _map_retencion(self, raw: dict, ejercicio: int, nro_op: int) -> dict | None:
+        cod_ret = raw.get("RET_COD_RET")
+        importe = raw.get("RET_IMPORTE")
+        if cod_ret is None or importe is None:
+            return None
+
+        cod_text = str(cod_ret).strip()
+        if not cod_text:
+            return None
+
+        try:
+            monto_retenido = float(importe)
+        except (TypeError, ValueError):
+            return None
+        if monto_retenido == 0:
+            return None
+
+        descripcion = str(raw.get("RET_DESCRIPCION") or "").strip()
+        retencion: dict = {
+            "external_id": {
+                "ejercicio": ejercicio,
+                "nro_op": nro_op,
+                "cod_ret": cod_text,
+            },
+            "monto_retenido": monto_retenido,
+            "numero_certificado": f"RAFAM-RET-{ejercicio}-{nro_op}-{cod_text}",
+        }
+
+        tipo_retencion_id = self._resolve_tipo_retencion_id(cod_text, descripcion)
+        if tipo_retencion_id is not None:
+            retencion["tipo_impuesto_id"] = tipo_retencion_id
+        else:
+            alias = self._retencion_alias(descripcion or cod_text)
+            if alias:
+                retencion["tipo"] = alias
+            elif descripcion:
+                retencion["tipo_impuesto_name"] = descripcion
+
+        if descripcion:
+            retencion["observacion"] = f"Retencion RAFAM {descripcion} OP {ejercicio}/{nro_op}"
+
+        return retencion
+
+    def _resolve_tipo_retencion_id(self, cod_ret, descripcion) -> int | None:
+        cod_text = str(cod_ret).strip() if cod_ret is not None else ""
+        if cod_text:
+            remote = self._link_store.get_remote_id("tipo_retencion", cod_text)
+            if remote and self._to_int(remote) is not None:
+                return int(remote)
+
+        for value, index in (
+            (cod_text, self._tipos_retencion_by_codigo),
+            (cod_text, self._tipos_retencion_by_codename),
+            (descripcion, self._tipos_retencion_by_name),
+        ):
+            text = self._normalize_text(value)
+            if not text:
+                continue
+            row = index.get(text)
+            if row and self._to_int(row.get("id")) is not None:
+                return int(row.get("id"))
+        return None
+
+    def _resolve_centro_costo_id(self, jurisdiccion) -> int | None:
+        if jurisdiccion is None:
+            return None
+        jurisdiccion_text = str(jurisdiccion).strip()
+        if not jurisdiccion_text:
+            return None
+
+        source_key = json.dumps({"jurisdiccion": jurisdiccion_text}, sort_keys=True)
+        for key in (source_key, jurisdiccion_text):
+            remote = self._link_store.get_remote_id("centro_costo", key)
+            if remote and self._to_int(remote) is not None:
+                return int(remote)
+        return None
+
+    @staticmethod
+    def _retencion_alias(value) -> str | None:
+        text = MigratorExporter._normalize_text(value)
+        if not text:
+            return None
+        if "ganancia" in text:
+            return "ganancias"
+        if "iibb" in text or ("ingreso" in text and "bruto" in text):
+            return "iibb"
+        if "suss" in text or "seguridad social" in text or "jubil" in text:
+            return "suss"
+        if "iva" in text:
+            return "iva"
+        return None
+
+    @staticmethod
+    def _gasto_external_id(ejercicio: int, deleg_solic: int, nro_solic: int) -> dict:
+        return {
+            "ejercicio": ejercicio,
+            "deleg_solic": deleg_solic,
+            "nro_solic": nro_solic,
+        }
+
+    @staticmethod
+    def _gasto_legacy_ref(ejercicio: int, deleg_solic: int, nro_solic: int) -> str:
+        return f"SG-{ejercicio}-{deleg_solic}-{nro_solic}"
+
+    def _gasto_ref_from_external_id(self, external_id: dict) -> str:
+        if not isinstance(external_id, dict):
+            return ""
+        rafam_ref = external_id.get("rafam_ref")
+        if rafam_ref:
+            return str(rafam_ref)
+        ejercicio = self._to_int(external_id.get("ejercicio"))
+        deleg_solic = self._to_int(external_id.get("deleg_solic"))
+        nro_solic = self._to_int(external_id.get("nro_solic"))
+        if ejercicio is None or deleg_solic is None or nro_solic is None:
+            return ""
+        return self._gasto_legacy_ref(ejercicio, deleg_solic, nro_solic)
+
+    def _gasto_external_id_from_ref(self, rafam_ref: str) -> dict | None:
+        parts = str(rafam_ref).split("-")
+        if len(parts) != 4 or parts[0] != "SG":
+            return None
+        ejercicio = self._to_int(parts[1])
+        deleg_solic = self._to_int(parts[2])
+        nro_solic = self._to_int(parts[3])
+        if ejercicio is None or deleg_solic is None or nro_solic is None:
+            return None
+        return self._gasto_external_id(ejercicio, deleg_solic, nro_solic)
+
+    def _gasto_source_keys_from_ref(self, rafam_ref: str) -> list[str]:
+        keys = []
+        external_id = self._gasto_external_id_from_ref(rafam_ref)
+        if external_id is not None:
+            keys.append(json.dumps(external_id, sort_keys=True))
+        keys.append(json.dumps({"rafam_ref": rafam_ref}, sort_keys=True))
+        return keys
+
+    def _get_gasto_remote_id(self, rafam_ref: str) -> str | None:
+        for source_key in self._gasto_source_keys_from_ref(rafam_ref):
+            remote = self._link_store.get_remote_id("gasto", source_key)
+            if remote:
+                return remote
+        return None
+
     @staticmethod
     def _format_date_only(value) -> str:
         """Extrae solo YYYY-MM-DD de un string fecha (puede incluir hora)."""
@@ -1684,6 +1850,11 @@ class MigratorExporter(BaseExporter):
 
     def _resolve_unidad_medida_id(self, raw: dict) -> int:
         value = raw.get("UNI_MED")
+        if value is not None:
+            remote = self._link_store.get_remote_id("unidad_medida", str(value).strip())
+            if remote and self._to_int(remote) is not None:
+                return int(remote)
+
         text = self._normalize_text(value)
         if text:
             by_name = self._unidades_by_name.get(text)
@@ -1797,12 +1968,42 @@ class MigratorExporter(BaseExporter):
                 parsed = json.loads(body) if body else {}
                 if isinstance(parsed, dict) and parsed.get("errors"):
                     logger.debug("Migrator response errors=%s", parsed.get("errors"))
+                self._raise_on_migrator_errors(parsed)
                 return parsed
         except error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace") if exc.fp else ""
             raise RuntimeError(f"HTTP {exc.code}: {body[:500]}") from exc
         except error.URLError as exc:
             raise RuntimeError(f"URL error: {exc.reason}") from exc
+
+    @staticmethod
+    def _raise_on_migrator_errors(parsed: dict) -> None:
+        if not isinstance(parsed, dict):
+            return
+
+        errors = parsed.get("errors")
+        if isinstance(errors, list) and errors:
+            sample = json.dumps(errors[:3], ensure_ascii=False)
+            raise RuntimeError(f"Migrator devolvio errores parciales: {sample}")
+
+        stats = parsed.get("stats")
+        if not isinstance(stats, dict):
+            return
+
+        failed = []
+        for section, section_stats in stats.items():
+            if not isinstance(section_stats, dict):
+                continue
+            error_count = section_stats.get("error", 0)
+            try:
+                error_count = int(error_count)
+            except (TypeError, ValueError):
+                error_count = 0
+            if error_count > 0:
+                failed.append(f"{section}={error_count}")
+
+        if failed:
+            raise RuntimeError(f"Migrator reporto errores en stats: {', '.join(failed)}")
 
     def _persist_links(self, entity: str, parsed: dict, raw_by_source_key: dict[str, dict]) -> None:
         if self._dry_run or not isinstance(parsed, dict):
@@ -1855,7 +2056,25 @@ class MigratorExporter(BaseExporter):
             )
 
     def _persist_links_jurisdicciones(self, results: dict) -> None:
-        """Persiste entity_links para rubros y clasificaciones desde la respuesta de importar.json."""
+        """Persiste entity_links para centros de costo, rubros y clasificaciones."""
+        centros_costo = results.get("centros_costo", [])
+        if isinstance(centros_costo, list):
+            for cc in centros_costo:
+                if not isinstance(cc, dict) or not cc.get("success"):
+                    continue
+                external_id = cc.get("external_id") or {}
+                if not isinstance(external_id, dict):
+                    continue
+                jurisdiccion = external_id.get("jurisdiccion")
+                remote_id = cc.get("id")
+                if jurisdiccion is None or remote_id is None:
+                    continue
+                self._link_store.save_link(
+                    entity="centro_costo",
+                    source_key=json.dumps({"jurisdiccion": str(jurisdiccion)}, sort_keys=True),
+                    remote_id=str(remote_id),
+                )
+
         rubros = results.get("rubros", [])
         if isinstance(rubros, list):
             for r in rubros:
@@ -1966,6 +2185,20 @@ class MigratorExporter(BaseExporter):
                 importe_tot=importe_tot,
                 cod_prov=cod_prov,
             )
+
+            rafam_ref = self._gasto_ref_from_external_id(external_id)
+            alias_keys = self._gasto_source_keys_from_ref(rafam_ref) if rafam_ref else []
+            for alias_key in alias_keys:
+                if alias_key == source_key:
+                    continue
+                self._link_store.save_link(
+                    entity="gasto",
+                    source_key=alias_key,
+                    remote_id=str(remote_id),
+                    estado_solic=estado_solic,
+                    importe_tot=importe_tot,
+                    cod_prov=cod_prov,
+                )
 
     def _persist_links_orden_pago(self, results: dict, raw_by_source_key: dict[str, dict]) -> None:
         """Persiste entity_links para ordenes_pago con extras (estado_op, importe_total)."""
@@ -2126,7 +2359,7 @@ def build_exporter(mode: str, force_update: bool = False, dry_run: bool = False)
 
 
 def fetch_migrator_spec() -> dict:
-    return _fetch_migrator_json(endpoint_env="MIGRATOR_SPEC_ENDPOINT", default_endpoint="rafam/migracion/spec.json")
+    return _fetch_migrator_json(endpoint_env="PAXAPOS_RAFAM_SPEC_PATH", default_endpoint="rafam/migracion/spec.json")
 
 
 def fetch_migrator_lookups(only: list[str] | None = None) -> dict:
@@ -2136,17 +2369,19 @@ def fetch_migrator_lookups(only: list[str] | None = None) -> dict:
     if not filtered:
         try:
             return _fetch_migrator_json(
-                endpoint_env="MIGRATOR_LOOKUPS_ENDPOINT",
+                endpoint_env="PAXAPOS_RAFAM_LOOKUPS_PATH",
                 default_endpoint="rafam/migracion/lookups.json",
             )
         except Exception:
             # Fallback robusto: consultar por seccion para evitar que una seccion rota
             # bloquee todas las demas.
             filtered = [
+                "centros_costo",
                 "mercaderias",
                 "unidades_de_medida",
                 "tipos_factura",
                 "tipos_de_pago",
+                "tipos_retencion",
                 "proveedores",
                 "gastos",
             ]
@@ -2154,7 +2389,7 @@ def fetch_migrator_lookups(only: list[str] | None = None) -> dict:
     # Si hay una sola seccion, mantenemos comportamiento estricto.
     if len(filtered) == 1:
         return _fetch_migrator_json(
-            endpoint_env="MIGRATOR_LOOKUPS_ENDPOINT",
+            endpoint_env="PAXAPOS_RAFAM_LOOKUPS_PATH",
             default_endpoint="rafam/migracion/lookups.json",
             query_params={"only": filtered[0]},
         )
@@ -2164,7 +2399,7 @@ def fetch_migrator_lookups(only: list[str] | None = None) -> dict:
     for section in filtered:
         try:
             payload = _fetch_migrator_json(
-                endpoint_env="MIGRATOR_LOOKUPS_ENDPOINT",
+                endpoint_env="PAXAPOS_RAFAM_LOOKUPS_PATH",
                 default_endpoint="rafam/migracion/lookups.json",
                 query_params={"only": section},
             )
@@ -2184,21 +2419,16 @@ def fetch_migrator_lookups(only: list[str] | None = None) -> dict:
 
 
 def _fetch_migrator_json(endpoint_env: str, default_endpoint: str, query_params: dict[str, str] | None = None) -> dict:
-    base_url = os.getenv("MIGRATOR_BASE_URL", "").rstrip("/")
-    if not base_url:
-        raise ValueError("Falta MIGRATOR_BASE_URL en .env para consultar migrator")
+    base_url = _paxapos_url()
+    tenant = _paxapos_tenant()
 
-    tenant = os.getenv("MIGRATOR_TENANT", "").strip()
-    if not tenant:
-        raise ValueError("Falta MIGRATOR_TENANT en .env para consultar migrator")
-
-    api_key = os.getenv("MIGRATOR_API_KEY", "").strip()
+    api_key = os.getenv("PAXAPOS_API_KEY", "").strip()
     if not api_key:
-        raise ValueError("Falta MIGRATOR_API_KEY en .env para consultar migrator")
+        raise ValueError("Falta PAXAPOS_API_KEY en .env para consultar migrator")
 
-    timeout = int(os.getenv("MIGRATOR_TIMEOUT_SECONDS", os.getenv("GATEWAY_TIMEOUT_SECONDS", "20")))
-    verify_ssl = os.getenv("MIGRATOR_VERIFY_SSL", os.getenv("GATEWAY_VERIFY_SSL", "true")).strip().lower() in {"1", "true", "yes", "on"}
-    endpoint = os.getenv(endpoint_env, default_endpoint).strip().strip("/")
+    timeout = int(os.getenv("PAXAPOS_TIMEOUT_SECONDS", "20"))
+    verify_ssl = _env_bool("PAXAPOS_VERIFY_SSL", default="true")
+    endpoint = _migrator_endpoint(endpoint_env, default_endpoint)
 
     headers = {
         "Accept": "application/json",
@@ -2206,7 +2436,7 @@ def _fetch_migrator_json(endpoint_env: str, default_endpoint: str, query_params:
         "X-Tenant-Id": tenant,
         "User-Agent": "rafam-sync/1.0",
     }
-    url = f"{base_url}/{endpoint}"
+    url = _build_migrator_url(base_url, tenant, endpoint)
     if query_params:
         url = f"{url}?{parse.urlencode(query_params)}"
     req = request.Request(url=url, headers=headers, method="GET")
@@ -2226,3 +2456,39 @@ def _fetch_migrator_json(endpoint_env: str, default_endpoint: str, query_params:
         raise RuntimeError(f"HTTP {exc.code}: {body[:500]}") from exc
     except error.URLError as exc:
         raise RuntimeError(f"URL error: {exc.reason}") from exc
+
+
+def _env_bool(name: str, default: str = "true") -> bool:
+    value = os.getenv(name, default)
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _paxapos_url() -> str:
+    base_url = os.getenv("PAXAPOS_URL", "").strip().rstrip("/")
+    if not base_url:
+        raise ValueError("Falta PAXAPOS_URL en .env para destino Paxapos")
+    return base_url
+
+
+def _paxapos_tenant() -> str:
+    tenant = os.getenv("PAXAPOS_TENANT", "").strip().strip("/")
+    if not tenant:
+        raise ValueError("Falta PAXAPOS_TENANT en .env para destino Paxapos")
+    return tenant
+
+
+def _migrator_endpoint(endpoint_env: str, default_endpoint: str) -> str:
+    endpoint = os.getenv(endpoint_env, default_endpoint).strip()
+    parsed = parse.urlparse(endpoint)
+    if parsed.scheme or parsed.netloc:
+        raise ValueError(
+            f"{endpoint_env} debe ser un path relativo; configurar host en PAXAPOS_URL y tenant en PAXAPOS_TENANT"
+        )
+    endpoint = endpoint.strip("/")
+    if not endpoint:
+        raise ValueError(f"{endpoint_env} no puede estar vacío")
+    return endpoint
+
+
+def _build_migrator_url(base_url: str, tenant: str, endpoint: str) -> str:
+    return f"{base_url.rstrip('/')}/{tenant.strip('/')}/{endpoint.strip('/')}"

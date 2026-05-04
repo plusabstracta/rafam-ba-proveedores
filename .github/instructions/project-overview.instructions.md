@@ -26,7 +26,7 @@ a un portal de proveedores basado en **Paxapos** (CakePHP 2) a través de APIs R
 ### Flujo de datos
 
 1. **Origen:** Oracle RAFAM (schema `OWNER_RAFAM`) — solo lectura, sin escritura jamás.
-2. **Intermediario:** SQLite local para checkpoints (`state/checkpoint.db`) y vínculos RAFAM↔Paxapos (`state/entity_links.db`).
+2. **Intermediario:** SQLite local de estado (`LOCAL_STATE_DB_PATH`, default `state/checkpoint.db`) para checkpoints y vínculos RAFAM↔Paxapos.
 3. **Destino:** API REST Paxapos — endpoint migrator (`/rafam/migracion/importar.json`) o gateway directo.
 4. **Dev local:** SQLite (`state/dev_rafam.db`) cargada desde snapshots CSV — reemplaza Oracle sin cambiar lógica.
 
@@ -73,7 +73,7 @@ No modificar sin justificación explícita del usuario:
 
 ### 3.1 Resiliencia ante fallos
 
-- **Timeout configurable** en cada llamada HTTP (`MIGRATOR_TIMEOUT_SECONDS`).
+- **Timeout configurable** en cada llamada HTTP (`PAXAPOS_TIMEOUT_SECONDS`).
 - **Reintentos seguros:** el diseño checkpoint-first garantiza que un crash no pierde progreso ni duplica datos.
 - **Logging estructurado** en cada punto de decisión — si algo falla a las 3 AM en la VM, los logs deben bastar para diagnosticar sin reproducir.
 - **Validación de datos en frontera:** sanitizar y validar ANTES de enviar. Nunca confiar en que Oracle devuelve datos limpios (campos NULL, strings vacíos donde se espera int, decimales desbordados).
@@ -83,7 +83,7 @@ No modificar sin justificación explícita del usuario:
 - **Tamaño de batch configurable** (`--batch-size`, default 500).
 - **Límite opcional** (`--limit`) para pruebas controladas.
 - **Stream results** en SQLAlchemy (`stream_results=True`) — no cargar todas las filas en memoria.
-- **Delay entre batches** (`MIGRATOR_BATCH_DELAY_SECONDS`) para no saturar el destino.
+- **Delay entre batches** (`RAFAM_SYNC_BATCH_DELAY_SECONDS`) para no saturar el destino.
 - **Dry-run real:** `--dry-run` envía al endpoint con `dry_run=true` pero NO avanza checkpoints.
 
 ### 3.3 Separación de responsabilidades
@@ -107,8 +107,8 @@ src/entity_link_store.py → vínculos RAFAM_ID ↔ Paxapos_ID
 
 - **Variables de entorno** (`.env` vía `python-dotenv`) como única fuente de configuración runtime.
 - **`APP_ENV`** controla defaults: `dev` → `LOG_LEVEL=DEBUG`, `prod` → `LOG_LEVEL=INFO`.
-- **`DB_BACKEND`** permite intercambiar Oracle ↔ SQLite sin cambiar código.
-- **SSL configurable** (`GATEWAY_VERIFY_SSL`, `MIGRATOR_VERIFY_SSL`) — `false` solo en dev.
+- **`RAFAM_SOURCE_BACKEND`** permite intercambiar Oracle ↔ SQLite sin cambiar código.
+- **SSL configurable** (`PAXAPOS_VERIFY_SSL`) — `false` solo en dev.
 
 ### 3.5 Compatibilidad Oracle
 
@@ -236,10 +236,10 @@ Ejecutar tests **siempre** que se modifique `src/exporter.py`, `src/gateway_mapp
 .venv/bin/python -m pytest tests/test_migrator_mapping.py tests/test_sync_engine.py -v
 
 # Integración con datos reales (requiere state/dev_rafam.db)
-DB_BACKEND=sqlite .venv/bin/python -m pytest tests/test_oc_integration.py -v
+RAFAM_SOURCE_BACKEND=sqlite .venv/bin/python -m pytest tests/test_oc_integration.py -v
 
 # Todo junto
-DB_BACKEND=sqlite .venv/bin/python -m pytest tests/ -v
+RAFAM_SOURCE_BACKEND=sqlite .venv/bin/python -m pytest tests/ -v
 ```
 
 #### Suites de test

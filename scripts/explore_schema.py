@@ -18,11 +18,11 @@ OUTPUT_MD  = DOCS_DIR / "rafam_schema.md"
 # ─── Entorno ─────────────────────────────────────────────────────────────────
 load_dotenv(REPO_ROOT / ".env")
 
-DB_HOST     = os.getenv("DB_HOST", "10.10.91.241")
-DB_PORT     = int(os.getenv("DB_PORT", 1521))
-DB_SERVICE  = os.getenv("DB_SERVICE", "BDRAFAM")
-DB_USER     = os.getenv("DB_USER")
-DB_PASSWORD = os.getenv("DB_PASSWORD")
+DB_HOST     = os.getenv("RAFAM_SOURCE_HOST", "10.10.91.241")
+DB_PORT     = int(os.getenv("RAFAM_SOURCE_PORT", "1521"))
+DB_SERVICE  = os.getenv("RAFAM_SOURCE_SERVICE", "BDRAFAM")
+DB_USER     = os.getenv("RAFAM_SOURCE_USER")
+DB_PASSWORD = os.getenv("RAFAM_SOURCE_PASSWORD")
 SCHEMA      = "OWNER_RAFAM"
 
 # Tablas de interés (vacío = todas las del schema)

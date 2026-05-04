@@ -5,7 +5,7 @@ Usa la DB en state/dev_rafam.db (cargada desde CSVs de output/).
 Pre-linkea proveedores y jurisdicciones para simular un sync previo,
 luego procesa oc_items y valida que los payloads sean correctos.
 
-Requiere: DB_BACKEND=sqlite (pytest.ini lo setea).
+Requiere: RAFAM_SOURCE_BACKEND=sqlite.
 """
 import json
 from pathlib import Path
@@ -41,11 +41,12 @@ def exporter_with_links(dev_engine):
             "tipos_de_pago": [{"id": "4", "name": "Transferencia"}],
         }
         with patch.dict("os.environ", {
-            "MIGRATOR_BASE_URL": "https://test.example.com",
-            "MIGRATOR_TENANT": "test",
-            "MIGRATOR_API_KEY": "key",
-            "MIGRATOR_DEFAULT_UNIDAD_ID": "1",
-            "MIGRATOR_DEFAULT_TIPO_PAGO_ID": "4",
+            "PAXAPOS_URL": "https://test.example.com",
+            "PAXAPOS_TENANT": "test",
+            "PAXAPOS_API_KEY": "key",
+            "PAXAPOS_RAFAM_DEFAULT_UNIDAD_ID": "1",
+            "PAXAPOS_RAFAM_DEFAULT_TIPO_PAGO_ID": "4",
+            "LOCAL_STATE_DB_PATH": ":memory:",
         }):
             exp = MigratorExporter(dry_run=True)
 
@@ -59,10 +60,15 @@ def exporter_with_links(dev_engine):
             )
         # Pre-linkear rubros (jurisdicciones)
         for (j,) in conn.execute(text("SELECT JURISDICCION FROM JURISDICCIONES")).fetchall():
-            rubro_key = json.dumps({"jurisdiccion": str(j)}, sort_keys=True)
+            jurisdiccion_key = json.dumps({"jurisdiccion": str(j)}, sort_keys=True)
             exp._link_store.save_link(
                 entity="rubro",
-                source_key=rubro_key,
+                source_key=jurisdiccion_key,
+                remote_id=str(abs(hash(j)) % 1000 + 1),
+            )
+            exp._link_store.save_link(
+                entity="centro_costo",
+                source_key=jurisdiccion_key,
                 remote_id=str(abs(hash(j)) % 1000 + 1),
             )
     return exp
@@ -164,9 +170,22 @@ class TestOcIntegration:
         # Prácticamente todos los items RAFAM tienen DESCRIPCION
         assert items_con_name > total_items * 0.95
 
-    def test_centro_costo_id_presente(self, oc_payloads):
+    def test_centro_costo_id_presente(self, oc_payloads, dev_engine):
         """Las OCs con jurisdicción deben tener centro_costo_id."""
         _, all_ocs = oc_payloads
+        with dev_engine.connect() as conn:
+            sg_count = conn.execute(text("""
+                SELECT COUNT(*)
+                FROM OC_ITEMS oi
+                LEFT JOIN SOLIC_GASTOS sg
+                  ON oi.EJERCICIO = sg.EJERCICIO
+                 AND oi.DELEG_SOLIC = sg.DELEG_SOLIC
+                 AND oi.NRO_SOLIC = sg.NRO_SOLIC
+                WHERE sg.JURISDICCION IS NOT NULL
+            """)).scalar()
+        if not sg_count:
+            pytest.skip("El snapshot local no trae jurisdicción de SOLIC_GASTOS para OC_ITEMS")
+
         con_cc = [oc for oc in all_ocs if "centro_costo_id" in oc]
         # La mayoría debería tenerlo (solo 29 items de 5176 no tienen jurisdicción)
         assert len(con_cc) > len(all_ocs) * 0.9

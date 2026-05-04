@@ -9,8 +9,13 @@ _TABLE_PREFIX = "link_"
 # Override via the ``schemas`` parameter in EntityLinkStore.__init__().
 DEFAULT_LINK_SCHEMAS: dict[str, list[str]] = {
     "proveedores": ["cuit", "cod_estado"],
+    "centro_costo": [],
     "clasificacion": [],
     "rubro": [],
+    "unidad_medida": ["name", "codigo"],
+    "tipo_factura": ["name", "codigo"],
+    "tipo_pago": ["name", "codigo"],
+    "tipo_retencion": ["name", "codigo"],
     "pedido": [],
     "orden_compra": ["fech_confirm", "estado_oc", "cod_prov", "importe_tot", "gasto_refs"],
     "gasto": ["estado_solic", "importe_tot", "cod_prov"],
@@ -31,7 +36,7 @@ class EntityLinkStore:
         schemas: dict[str, list[str]] | None = None,
     ):
         if not db_path:
-            db_path = os.getenv("ENTITY_LINK_DB_PATH") or os.getenv("CHECKPOINT_DB_PATH") or "state/checkpoint.db"
+            db_path = os.getenv("LOCAL_STATE_DB_PATH", "state/checkpoint.db")
         self._db_path = Path(db_path)
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(str(self._db_path))

@@ -106,7 +106,7 @@ def _sync_entity(
     cp  = engine.get_checkpoint(entity)
     cfg = ENTITY_CONFIGS[entity]
     mode = "FULL LOAD" if (cp.is_fresh or cfg.full_load) else "INCREMENTAL"
-    batch_delay = float(os.getenv("MIGRATOR_BATCH_DELAY_SECONDS", "0"))
+    batch_delay = float(os.getenv("RAFAM_SYNC_BATCH_DELAY_SECONDS", "0"))
 
     try:
         stmt = source_repo.build_statement(entity, cp)

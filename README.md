@@ -15,7 +15,7 @@ checkpoints persistentes y modo de desarrollo offline usando snapshots CSV.
 - Python 3.11+
 - SQLAlchemy 2.x
 - Driver Oracle: `oracledb` (vía `oracle+oracledb://`)
-- SQLite para checkpoints y modo dev local
+- SQLite para estado local del sync y modo dev local
 - Pytest
 
 ## Arquitectura
@@ -23,13 +23,19 @@ checkpoints persistentes y modo de desarrollo offline usando snapshots CSV.
 - `main.py`: CLI (`status`, `run`, `reset`) y orquestación.
 - `src/source_repository.py`: construcción de consultas SQLAlchemy por entidad.
 - `src/sync_engine.py`: lógica incremental y avance de cursores.
-- `src/checkpoint_store.py`: persistencia ORM de checkpoints (`state/checkpoint.db`).
+- `src/checkpoint_store.py`: persistencia ORM de checkpoints en la SQLite local de estado.
 - `src/exporter.py`: destinos de salida (`csv`, `noop`).
 - `scripts/load_csv_to_sqlite.py`: carga snapshots CSV a SQLite para desarrollo.
 
-## Modos de base origen
+## Arquitectura de entornos
 
-El proyecto soporta dos modos con la variable `DB_BACKEND`:
+El flujo tiene tres lugares claramente separados:
+
+- **SOURCE RAFAM**: Oracle RAFAM real, o un snapshot SQLite para desarrollo.
+- **LOCAL**: este servidor/script, con una SQLite de estado para checkpoints y links RAFAM->Paxapos.
+- **DESTINATION Paxapos**: portal de proveedores/CakePHP 2 donde se exporta la información procesada.
+
+El origen soporta dos modos con `RAFAM_SOURCE_BACKEND`:
 
 - `oracle`: conecta a RAFAM productivo o entorno Oracle de integración.
 - `sqlite`: usa una base local (`state/dev_rafam.db`) para desarrollo y tests manuales.
@@ -102,11 +108,11 @@ Para enviar datos traducidos a Paxapos desde este script:
 make run-proveedores-gateway
 ```
 
-El exporter `gateway` arma la URL usando `GATEWAY_URL` + endpoint por entidad.
+El exporter `gateway` es el endpoint directo legacy de Paxapos para proveedores. Usa el mismo destino `PAXAPOS_URL`/`PAXAPOS_TENANT` que el migrator, pero llama endpoints JSON específicos.
 Para `proveedores` usa por defecto:
 
 ```text
-{GATEWAY_URL}/account/proveedores.json
+{PAXAPOS_URL}/account/proveedores.json
 ```
 
 Headers enviados:
@@ -114,8 +120,8 @@ Headers enviados:
 ```text
 Content-Type: application/json
 Accept: application/json
-X-Tenant-Id: {GATEWAY_TENANT}
-Authorization: Bearer {GATEWAY_JWT}
+X-Tenant-Id: {PAXAPOS_TENANT}
+Authorization: Bearer {PAXAPOS_JWT}
 ```
 
 Configuracion recomendada en `.env`:
@@ -123,22 +129,22 @@ Configuracion recomendada en `.env`:
 ```dotenv
 APP_ENV=dev
 LOG_LEVEL=DEBUG
-GATEWAY_URL=https://proveedores.paxapos.com
-GATEWAY_TENANT=prueba
-GATEWAY_JWT=...
-GATEWAY_VERIFY_SSL=false
-GATEWAY_ENDPOINT_PROVEEDORES=account/proveedores.json
-GATEWAY_ENDPOINT_PROVEEDORES_UPDATE=account/proveedores/edit/{id}.json
+PAXAPOS_URL=https://proveedores.madariaga.gob.ar
+PAXAPOS_TENANT=madariaga
+PAXAPOS_JWT=...
+PAXAPOS_VERIFY_SSL=true
+PAXAPOS_PROVEEDORES_ENDPOINT=account/proveedores.json
+PAXAPOS_PROVEEDORES_UPDATE_ENDPOINT=account/proveedores/edit/{id}.json
 ```
 
 Contrato actual del gateway:
 
-- `GATEWAY_URL`: dominio base de Paxapos
-- `GATEWAY_TENANT`: tenant enviado en header `X-Tenant-Id`
-- `GATEWAY_JWT`: token JWT enviado como `Authorization: Bearer ...`
-- `GATEWAY_VERIFY_SSL`: `false` solo para desarrollo con certificados no confiables
-- `GATEWAY_ENDPOINT_PROVEEDORES`: path del endpoint JSON
-- `GATEWAY_ENDPOINT_PROVEEDORES_UPDATE`: path para update cuando se usa `--force-update` (`{id}` = id remoto)
+- `PAXAPOS_URL`: dominio base del portal de proveedores.
+- `PAXAPOS_TENANT`: tenant enviado en header `X-Tenant-Id` y usado en paths del migrator RAFAM.
+- `PAXAPOS_JWT`: token JWT enviado como `Authorization: Bearer ...` para endpoints directos.
+- `PAXAPOS_VERIFY_SSL`: `false` solo para desarrollo con certificados no confiables.
+- `PAXAPOS_PROVEEDORES_ENDPOINT`: path del endpoint JSON directo.
+- `PAXAPOS_PROVEEDORES_UPDATE_ENDPOINT`: path para update cuando se usa `--force-update` (`{id}` = id remoto).
 
 Modo de operacion (gateway):
 
@@ -147,23 +153,27 @@ Modo de operacion (gateway):
 
 ## RAFAM Migrator API
 
+El modo `migrator` es el importador batch RAFAM que vive dentro del mismo Paxapos/Portal configurado por `PAXAPOS_URL` y `PAXAPOS_TENANT`. Por eso sus rutas se configuran como paths relativos `PAXAPOS_RAFAM_*_PATH`, no como otra URL base.
+
 Para usar el importador batch oficial de Paxapos en vez del endpoint directo de proveedores:
 
 ```dotenv
-MIGRATOR_BASE_URL=https://dev2.paxapos.com
-MIGRATOR_TENANT=prueba
-MIGRATOR_API_KEY=...
-MIGRATOR_VERIFY_SSL=false
-MIGRATOR_TIMEOUT_SECONDS=20
-MIGRATOR_IMPORT_ENDPOINT=rafam/migracion/importar.json
-MIGRATOR_SPEC_ENDPOINT=rafam/migracion/spec.json
-MIGRATOR_LOOKUPS_ENDPOINT=rafam/migracion/lookups.json
+PAXAPOS_URL=https://proveedores.madariaga.gob.ar
+PAXAPOS_TENANT=madariaga
+PAXAPOS_API_KEY=...
+PAXAPOS_VERIFY_SSL=true
+PAXAPOS_TIMEOUT_SECONDS=20
+PAXAPOS_RAFAM_IMPORT_PATH=rafam/migracion/importar.json
+PAXAPOS_RAFAM_SPEC_PATH=rafam/migracion/spec.json
+PAXAPOS_RAFAM_LOOKUPS_PATH=rafam/migracion/lookups.json
 ```
 
 Uso estandar actualizado:
 
-- URL sin tenant en path: `https://dev2.paxapos.com/rafam/migracion/importar.json`
-- tenant por header: `X-Tenant-Id: prueba`
+- URL formada como `{PAXAPOS_URL}/{PAXAPOS_TENANT}/{PAXAPOS_RAFAM_*_PATH}`.
+- Ejemplo producción: `https://proveedores.madariaga.gob.ar/madariaga/rafam/migracion/spec.json`.
+- Ejemplo desarrollo: `https://dev.paxapos.com/prueba/rafam/migracion/spec.json`.
+- `PAXAPOS_RAFAM_*_PATH` siempre debe ser un path relativo, nunca una URL completa.
 
 Uso inicial recomendado:
 
@@ -179,11 +189,15 @@ make run-oc_items-migrator-dry LIMIT=50 BATCH=50
 Comportamiento actual del modo `migrator`:
 
 - Soporta `proveedores`.
+- Soporta `jurisdicciones` como `centros_costo` + `rubros` + `clasificaciones`, y guarda los IDs remotos en SQLite para resolver FKs.
 - Soporta `ped_items` (genera bloque `pedidos` con items para migrator).
 - Soporta `oc_items` (genera bloque `ordenes_compra` con items para migrator).
 - Soporta `solic_gastos` (genera bloque `gastos` — facturas del proveedor).
-- Soporta `orden_pago` (genera bloque `ordenes_pago` — vinculadas a gastos vía `gasto_external_ids`).
+- Soporta `orden_pago` (genera bloque `ordenes_pago` — vinculadas a gastos vía `gasto_ids` y fallback `gasto_external_ids`).
+- Si existen tablas RAFAM `RETENCIONES`/`DEDUCCIONES`, agrega retenciones al payload de `ordenes_pago`.
 - Envía payload batch al endpoint `/rafam/migracion/importar.json`.
+- Si Paxapos devuelve errores parciales (`errors` o `stats.*.error > 0`), la corrida falla y no avanza checkpoint.
+- Las opciones batch del migrator activan `auto_create_mercaderia=true` y desactivan el cálculo/notificación automática de retenciones/pagos.
 - `--dry-run` manda `dry_run=true` y no avanza checkpoints.
 - En modo real, persiste el vínculo RAFAM -> Paxapos usando `results.proveedores[].id`.
 
@@ -196,20 +210,23 @@ Catálogos remotos del migrator:
 Notas de mapeo `ped_items` -> `pedidos` y `oc_items` -> `ordenes_compra`:
 
 - `mercaderia_external_ref`: se envía referencia determinística RAFAM para resolución server-side en migrator.
-- `unidad_de_medida_id`: match por `name` normalizado de `unidades_de_medida`; fallback `MIGRATOR_DEFAULT_UNIDAD_ID` (default `1`).
+- `unidad_de_medida_id`: primero busca override local `link_unidad_medida` por `UNI_MED` RAFAM; luego match por `name` normalizado de `unidades_de_medida`; fallback `PAXAPOS_RAFAM_DEFAULT_UNIDAD_ID`, luego lookup `Unidad`, y finalmente `7`.
+- `centro_costo_id`: se resuelve desde `link_centro_costo` generado al importar `jurisdicciones`.
 - Si un item no puede construir referencia externa mínima, se omite y se informa en logs.
 - El matching textual de mercaderías ya no es responsabilidad del script Python.
 
 Notas de mapeo `solic_gastos` -> `gastos`:
 
-- `external_id.rafam_ref`: formato `SG-{ejercicio}-{deleg_solic}-{nro_solic}` — el migrator guarda traza `RAFAM:{...}` en observación del gasto.
-- `tipo_factura_id`: match por `codename` o `name` de `tipos_factura`; fallback `MIGRATOR_DEFAULT_TIPO_FACTURA_ID`.
+- `external_id`: `{ejercicio, deleg_solic, nro_solic}` según spec beta; el link store conserva también el alias legacy `SG-{ejercicio}-{deleg_solic}-{nro_solic}`.
+- `tipo_factura_id`: match por `codename` o `name` de `tipos_factura`; fallback `PAXAPOS_RAFAM_DEFAULT_TIPO_FACTURA_ID`.
 - Excluye solicitudes con `ESTADO_SOLIC=A` (anuladas).
 - `factura_nro`: formateado a 8 dígitos (zfill) desde `NRO_DOC` de RAFAM.
 
 Notas de mapeo `orden_pago` -> `ordenes_pago`:
 
-- `gasto_external_ids`: referencia string `SG-{ejercicio}-{deleg_solic}-{nro_solic}` que el migrator busca en `Gasto.observacion` con LIKE.
+- `gasto_ids`: IDs internos de Paxapos resueltos desde `link_gasto`.
+- `gasto_external_ids`: referencia estructurada `{ejercicio, deleg_solic, nro_solic}` que el migrator puede resolver como fallback.
+- `retenciones`: si el origen tiene `RETENCIONES`, se mapean por `COD_RET`/`IMPORTE`; el tipo se resuelve desde `link_tipo_retencion`, lookup `tipos_retencion`, o alias (`ganancias`, `iva`, `iibb`, `suss`).
 - Requiere que los gastos (solic_gastos) estén importados previamente.
 - `identificador_pago`: formato `RAFAM-OP-{ejercicio}-{nro_op}` para upsert.
 - `fecha`: solo se envía si `ESTADO_OP=C` (confirmada/pagada).
@@ -220,8 +237,8 @@ Comportamiento por entorno:
 
 - `APP_ENV=dev`: si no definis `LOG_LEVEL`, usa `DEBUG`
 - `APP_ENV=prod`: si no definis `LOG_LEVEL`, usa `INFO`
-- `GATEWAY_VERIFY_SSL=false`: desactiva validacion SSL del gateway, util para `dev2`
-- `GATEWAY_VERIFY_SSL=true`: requerido en produccion
+- `PAXAPOS_VERIFY_SSL=false`: desactiva validacion SSL del destino, util solo en desarrollo.
+- `PAXAPOS_VERIFY_SSL=true`: requerido en produccion.
 
 Payload enviado (CakePHP 2):
 
@@ -266,7 +283,7 @@ Nota sobre rutas CakePHP 2:
 
 ## Checkpoints incrementales
 
-Cada entidad guarda en `state/checkpoint.db`:
+Cada entidad guarda checkpoints en la SQLite configurada por `LOCAL_STATE_DB_PATH`:
 
 - `last_id`
 - `last_ts`
@@ -295,9 +312,9 @@ Notas:
 
 ## Recomendación de flujo profesional
 
-1. Desarrollo diario: `DB_BACKEND=sqlite` con snapshots CSV.
+1. Desarrollo diario: `RAFAM_SOURCE_BACKEND=sqlite` con snapshots CSV.
 2. QA técnico: correr pruebas de integración con Oracle en contenedor.
-3. Producción: `DB_BACKEND=oracle` desde Debian con acceso a RAFAM real.
+3. Producción: `RAFAM_SOURCE_BACKEND=oracle` desde Debian con acceso a RAFAM real.
 
 ## Ejecución en producción (Migrator API)
 
@@ -350,20 +367,23 @@ que el migrator guarda en la observación de cada gasto importado.
 ```dotenv
 APP_ENV=prod
 LOG_LEVEL=INFO
-DB_BACKEND=oracle
-DB_HOST=ip.del.servidor.rafam
-DB_PORT=1521
-DB_SERVICE=BDRAFAM
-DB_USER=usuario_lectura
-DB_PASSWORD=secreto
+RAFAM_SOURCE_BACKEND=oracle
+RAFAM_SOURCE_HOST=ip.del.servidor.rafam
+RAFAM_SOURCE_PORT=1521
+RAFAM_SOURCE_SERVICE=BDRAFAM
+RAFAM_SOURCE_USER=usuario_lectura
+RAFAM_SOURCE_PASSWORD=secreto
 
-MIGRATOR_BASE_URL=https://paxapos.dominio.gob.ar
-MIGRATOR_TENANT=nombre_tenant_real
-MIGRATOR_API_KEY=api_key_real
-MIGRATOR_VERIFY_SSL=true
-MIGRATOR_TIMEOUT_SECONDS=30
-MIGRATOR_DEFAULT_UNIDAD_ID=1
-MIGRATOR_DEFAULT_TIPO_PAGO_ID=1
+LOCAL_STATE_DB_PATH=state/checkpoint.db
+
+PAXAPOS_URL=https://proveedores.madariaga.gob.ar
+PAXAPOS_TENANT=madariaga
+PAXAPOS_API_KEY=api_key_real
+PAXAPOS_VERIFY_SSL=true
+PAXAPOS_TIMEOUT_SECONDS=30
+PAXAPOS_RAFAM_DEFAULT_UNIDAD_ID=1
+PAXAPOS_RAFAM_DEFAULT_TIPO_PAGO_ID=1
+RAFAM_SYNC_BATCH_DELAY_SECONDS=2
 ```
 
 ### 4. Verificación post-importación

@@ -118,7 +118,7 @@ make run-orden_pago-migrator BATCH=200   # ❌ bloqueado server-side
 - **Checkpoints**: state/checkpoint.db
 - **Tests**: 24 tests pasan (`make test`) post-fixes
 - **Env vars relevantes**:
-  - `MIGRATOR_BASE_URL`, `MIGRATOR_TENANT`, `MIGRATOR_API_KEY` (requeridas)
-  - `MIGRATOR_BATCH_DELAY_SECONDS` (opcional, delay entre batches)
-  - `MIGRATOR_VERIFY_SSL=false` (para dev2)
-  - `DB_BACKEND=sqlite` (local dev)
+  - `PAXAPOS_URL`, `PAXAPOS_TENANT`, `PAXAPOS_API_KEY` (requeridas)
+  - `RAFAM_SYNC_BATCH_DELAY_SECONDS` (opcional, delay entre batches)
+  - `PAXAPOS_VERIFY_SSL=false` (solo para desarrollo con certificados no confiables)
+  - `RAFAM_SOURCE_BACKEND=sqlite` (local dev)

@@ -43,16 +43,20 @@ copy .env.example .env
 Editar `.env` con los valores reales (nunca commitear este archivo):
 
 ```
-DB_HOST=<IP del servidor Oracle>
-DB_PORT=1521
-DB_SERVICE=BDRAFAM
-DB_USER=<usuario de solo lectura>
-DB_PASSWORD=<password>
+RAFAM_SOURCE_BACKEND=oracle
+RAFAM_SOURCE_HOST=<IP del servidor Oracle>
+RAFAM_SOURCE_PORT=1521
+RAFAM_SOURCE_SERVICE=BDRAFAM
+RAFAM_SOURCE_USER=<usuario de solo lectura>
+RAFAM_SOURCE_PASSWORD=<password>
 
-GATEWAY_URL=https://proveedores.paxapos.com
-GATEWAY_TENANT=<tenant destino>
-GATEWAY_JWT=<jwt de Paxapos>
-GATEWAY_ENDPOINT_PROVEEDORES=account/proveedores.json
+LOCAL_STATE_DB_PATH=state/checkpoint.db
+
+PAXAPOS_URL=https://proveedores.madariaga.gob.ar
+PAXAPOS_TENANT=madariaga
+PAXAPOS_JWT=<jwt de Paxapos, solo si se usa modo gateway directo>
+PAXAPOS_API_KEY=<api key del migrator RAFAM>
+PAXAPOS_PROVEEDORES_ENDPOINT=account/proveedores.json
 ```
 
 ---
@@ -167,7 +171,7 @@ pytest tests/ -v
 
 | Ruta | Descripción |
 |------|-------------|
-| `state/checkpoint.db` | SQLite con el estado de cada checkpoint. **No commitear.** |
+| `state/checkpoint.db` | SQLite local de estado: checkpoints y vínculos RAFAM -> Paxapos. **No commitear.** |
 | `output/<entidad>_<timestamp>.csv` | CSVs exportados por cada run. **No commitear.** |
 
 ---
@@ -177,7 +181,7 @@ pytest tests/ -v
 | Error | Causa probable | Solución |
 |-------|---------------|----------|
 | `ORA-12170: TCP connect timeout` | Sin acceso de red al servidor Oracle | Conectarse a VPN / red interna |
-| `ORA-01017: invalid username/password` | Credenciales incorrectas en `.env` | Verificar `DB_USER` y `DB_PASSWORD` |
+| `ORA-01017: invalid username/password` | Credenciales incorrectas en `.env` | Verificar `RAFAM_SOURCE_USER` y `RAFAM_SOURCE_PASSWORD` |
 | `ORA-00904: invalid identifier` | Nombre de columna incorrecto en `sync_engine.py` | Correr `explore_schema.py` y actualizar el `ts_field` correspondiente |
 | `DPI-1047: Cannot locate a 64-bit Oracle Client` | Instant Client no instalado o path incorrecto | Verificar que `oci.dll` exista en `C:\oracle\instantclient` |
 | Checkpoint no avanza | Error registrado en la última ejecución | Correr `python main.py status` para ver el error, corregir y volver a correr |

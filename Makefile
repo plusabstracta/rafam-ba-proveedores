@@ -75,10 +75,10 @@ load-dev:
 	$(PY) scripts/load_csv_to_sqlite.py --csv-dir $(CSV_DIR) --output-db $(DEV_DB)
 
 update-mapping:
-	SQLITE_DB_PATH=$(DEV_DB) DB_BACKEND=sqlite $(PY) scripts/update_field_mapping.py
+	RAFAM_SOURCE_SQLITE_DB_PATH=$(DEV_DB) RAFAM_SOURCE_BACKEND=sqlite $(PY) scripts/update_field_mapping.py
 
 update-mapping-oracle:
-	DB_BACKEND=oracle $(PY) scripts/update_field_mapping.py
+	RAFAM_SOURCE_BACKEND=oracle $(PY) scripts/update_field_mapping.py
 
 explore-schema:
 	$(PY) scripts/explore_schema.py

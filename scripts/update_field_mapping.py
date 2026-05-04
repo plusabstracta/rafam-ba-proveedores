@@ -8,8 +8,8 @@ Columnas presentes en la DB pero **ausentes** en PAXAPOS_MAPPINGS aparecen
 como *(completar)* en la tabla generada, facilitando la detección de gaps.
 
 Configurar el backend via variables de entorno (o .env):
-    DB_BACKEND=sqlite   # default — usa state/dev_rafam.db (cargar antes con load_csv_to_sqlite.py)
-    DB_BACKEND=oracle   # usa Oracle RAFAM (requiere DB_HOST, DB_USER, DB_PASSWORD)
+    RAFAM_SOURCE_BACKEND=sqlite   # default — usa state/dev_rafam.db (cargar antes con load_csv_to_sqlite.py)
+    RAFAM_SOURCE_BACKEND=oracle   # usa Oracle RAFAM (requiere RAFAM_SOURCE_HOST, RAFAM_SOURCE_USER, RAFAM_SOURCE_PASSWORD)
 
 Uso:
     python scripts/update_field_mapping.py
@@ -50,17 +50,17 @@ def _create_engine(backend: str, db_path: str | None) -> Engine:
         return create_engine(f"sqlite+pysqlite:///{path}", future=True)
 
     if backend != "oracle":
-        raise ValueError(f"DB_BACKEND no soportado: '{backend}'. Usar oracle|sqlite")
+        raise ValueError(f"RAFAM_SOURCE_BACKEND no soportado: '{backend}'. Usar oracle|sqlite")
 
     import oracledb  # noqa: PLC0415 — intentional lazy import
 
-    host = os.getenv("DB_HOST", "10.10.91.241")
-    port = int(os.getenv("DB_PORT", 1521))
-    service = os.getenv("DB_SERVICE", "BDRAFAM")
-    user = os.getenv("DB_USER")
-    password = os.getenv("DB_PASSWORD")
+    host = os.getenv("RAFAM_SOURCE_HOST", "10.10.91.241")
+    port = int(os.getenv("RAFAM_SOURCE_PORT", "1521"))
+    service = os.getenv("RAFAM_SOURCE_SERVICE", "BDRAFAM")
+    user = os.getenv("RAFAM_SOURCE_USER")
+    password = os.getenv("RAFAM_SOURCE_PASSWORD")
     if not user or not password:
-        raise ValueError("Faltan DB_USER / DB_PASSWORD para Oracle")
+        raise ValueError("Faltan RAFAM_SOURCE_USER / RAFAM_SOURCE_PASSWORD para Oracle")
     oracle_client_dir = os.getenv("ORACLE_CLIENT_DIR")
     oracledb.init_oracle_client(lib_dir=oracle_client_dir or None)
     url = f"oracle+oracledb://{user}:{password}@{host}:{port}/?service_name={service}"
@@ -354,7 +354,7 @@ def _available_tables(inspector: Any, backend: str, engine: Any = None) -> set[s
 
     print(
         f"[ERROR] No se encontraron tablas. Usuario='{current_user}', schema='{SCHEMA}'.\n"
-        "        Verificar que DB_USER tenga SELECT sobre las tablas de OWNER_RAFAM.",
+        "        Verificar que RAFAM_SOURCE_USER tenga SELECT sobre las tablas de OWNER_RAFAM.",
         file=sys.stderr,
     )
     sys.exit(1)
@@ -931,7 +931,7 @@ def main() -> None:
     parser.add_argument(
         "--db",
         metavar="PATH",
-        help="Ruta al SQLite (sobreescribe SQLITE_DB_PATH). Solo para DB_BACKEND=sqlite.",
+        help="Ruta al SQLite (sobreescribe RAFAM_SOURCE_SQLITE_DB_PATH). Solo para RAFAM_SOURCE_BACKEND=sqlite.",
     )
     parser.add_argument(
         "--no-samples",
@@ -941,10 +941,10 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.db:
-        os.environ["SQLITE_DB_PATH"] = str(Path(args.db).resolve())
+        os.environ["RAFAM_SOURCE_SQLITE_DB_PATH"] = str(Path(args.db).resolve())
 
-    backend = os.getenv("DB_BACKEND", "sqlite").lower()
-    db_path = os.getenv("SQLITE_DB_PATH") if backend == "sqlite" else None
+    backend = os.getenv("RAFAM_SOURCE_BACKEND", "sqlite").lower()
+    db_path = os.getenv("RAFAM_SOURCE_SQLITE_DB_PATH") if backend == "sqlite" else None
     print(f"[INFO] Leyendo esquema desde {backend.upper()}...")
 
     engine = _create_engine(backend, db_path)

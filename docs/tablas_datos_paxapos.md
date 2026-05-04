@@ -17,8 +17,12 @@ Inventario completo de todas las entidades que el script exporta hacia el sistem
     "atomic": false,
     "fail_fast": false,
     "send_oc_mail": false,
-    "strict_mail": false
+    "strict_mail": false,
+    "auto_create_mercaderia": true,
+    "auto_calcular_retenciones": false,
+    "notificar_proveedor_pago": false
   },
+  "centros_costo": [],
   "rubros": [],
   "clasificaciones": [],
   "proveedores": [],
@@ -78,9 +82,9 @@ Fuente RAFAM: `PROVEEDORES` · Referencia: [src/gateway_mapper.py](../src/gatewa
 
 ---
 
-## 2. Rubros y Clasificaciones (Jurisdicciones)
+## 2. Centros de costo, Rubros y Clasificaciones (Jurisdicciones)
 
-Fuente RAFAM: `JURISDICCIONES` · Genera **dos** colecciones en el mismo payload: `rubros` y `clasificaciones`.
+Fuente RAFAM: `JURISDICCIONES` · Genera **tres** colecciones en el mismo payload: `centros_costo`, `rubros` y `clasificaciones`.
 
 | Campo Paxapos | Fuente RAFAM | Regla / Transformación |
 |---|---|---|
@@ -90,6 +94,12 @@ Fuente RAFAM: `JURISDICCIONES` · Genera **dos** colecciones en el mismo payload
 **Payload de ejemplo:**
 ```json
 {
+  "centros_costo": [
+    {
+      "external_id": { "jurisdiccion": "1110100000" },
+      "CentroCosto": { "name": "DEPARTAMENTO EJECUTIVO", "description": "Jurisdiccion RAFAM 1110100000" }
+    }
+  ],
   "rubros": [
     {
       "external_id": { "jurisdiccion": "1110100000" },
@@ -116,11 +126,12 @@ Fuente RAFAM: `PEDIDOS` (cabecera) + `PED_ITEMS` (ítems)
 | `internal_id` | `EJERCICIO`, `NUM_PED` | `"rafam-ped-{ejercicio}-{num_ped}"` |
 | `tipo` | — | Fijo: `"solicitud"` |
 | `monto_presupuestado` | `PED_COSTO_TOT` | Float, de la cabecera |
+| `centro_costo_id` | `JURISDICCION` | ID Paxapos resuelto desde `link_centro_costo` |
 | `observacion` | — | `"Migrado RAFAM PED {ejercicio}-{num_ped}"` |
 | `items[].mercaderia_external_ref` | `EJERCICIO`, `NUM_PED`, `ORDEN`, claves contables | Referencia compuesta (clase, tipo, inciso, etc.) |
 | `items[].cantidad` | `CANTIDAD` | Float, obligatorio |
 | `items[].precio` | `COSTO_UNI` | Float, opcional |
-| `items[].unidad_de_medida_id` | `UNI_MED` | Lookup remoto por nombre; default: `MIGRATOR_DEFAULT_UNIDAD_ID` |
+| `items[].unidad_de_medida_id` | `UNI_MED` | Lookup remoto por nombre; default: `PAXAPOS_RAFAM_DEFAULT_UNIDAD_ID` |
 | `items[].descripcion` | `DESCRIP_BIE` | Máx. 255 caracteres |
 | `items[].observacion` | `DESCRIP_BIE` | Mismo valor que `descripcion` |
 
@@ -168,6 +179,10 @@ Fuente RAFAM: `ORDEN_COMPRA` (cabecera) + `OC_ITEMS` (ítems)
 | `internal_id` | `EJERCICIO`, `UNI_COMPRA`, `NRO_OC` | `"rafam-oc-{ejercicio}-{uni_compra}-{nro_oc}"` |
 | `tipo` | — | Fijo: `"orden_compra"` |
 | `proveedor_id` | `COD_PROV` | ID externo del proveedor (ya migrado) |
+| `estado_aprobacion` | — | `2` (aprobado) para OC RAFAM; `4` si se anula |
+| `centro_costo_id` | `SOLIC_GASTOS.JURISDICCION` | ID Paxapos resuelto desde `link_centro_costo` |
+| `gasto_ids` | `OC_ITEMS.DELEG_SOLIC`, `OC_ITEMS.NRO_SOLIC` | IDs internos de gastos ya importados |
+| `gasto_external_ids` | `OC_ITEMS.DELEG_SOLIC`, `OC_ITEMS.NRO_SOLIC` | Refs estructuradas `{ejercicio, deleg_solic, nro_solic}` para fallback del backend |
 | `items[].mercaderia_external_ref` | `EJERCICIO`, `UNI_COMPRA`, `NRO_OC`, `ITEM_OC` | Referencia al ítem de la OC |
 | `items[].cantidad` | `CANTIDAD` | Float, obligatorio |
 | `items[].precio` | `IMP_UNITARIO` | Precio unitario |
@@ -215,12 +230,12 @@ Fuente RAFAM: `SOLIC_GASTOS`
 
 | Campo Paxapos | Fuente RAFAM | Regla / Transformación |
 |---|---|---|
-| `external_id` | `EJERCICIO`, `DELEG_SOLIC`, `NRO_SOLIC` | `{"rafam_ref": "SG-{ejercicio}-{deleg_solic}-{nro_solic}"}` |
+| `external_id` | `EJERCICIO`, `DELEG_SOLIC`, `NRO_SOLIC` | `{"ejercicio": int, "deleg_solic": int, "nro_solic": int}` |
 | `fecha` | `FECH_SOLIC` | Formato `YYYY-MM-DD` |
 | `importe_total` | `IMPORTE_TOT` | Float |
 | `importe_neto` | `IMPORTE_TOT` | Mismo valor (sin discriminar IVA) |
 | `punto_de_venta` | — | Fijo: `"RAFAM"` |
-| `tipo_factura_id` | `TIPO_DOC` | Lookup por codename/name; default: `MIGRATOR_DEFAULT_TIPO_FACTURA_ID` |
+| `tipo_factura_id` | `TIPO_DOC` | Lookup por codename/name; default: `PAXAPOS_RAFAM_DEFAULT_TIPO_FACTURA_ID` |
 | `factura_nro` | `NRO_DOC` | Cero-padding a 8 dígitos |
 | `clasificacion_id` | `JURISDICCION` | Lookup local en `EntityLinkStore` |
 | `fecha_vencimiento` | `FECH_NECESIDAD` / `FECH_ENTREGA` | Prioriza `FECH_NECESIDAD` |
@@ -231,7 +246,7 @@ Fuente RAFAM: `SOLIC_GASTOS`
 {
   "gastos": [
     {
-      "external_id": { "rafam_ref": "SG-2024-1-789" },
+      "external_id": { "ejercicio": 2024, "deleg_solic": 1, "nro_solic": 789 },
       "Gasto": {
         "fecha": "2024-03-28",
         "importe_total": 50000.0,
@@ -260,9 +275,11 @@ Fuente RAFAM: `ORDEN_PAGO` (con JOIN a `SOLIC_GASTOS` vía `NRO_CANCE`)
 | `total` | `IMPORTE_TOTAL` | Float |
 | `estado` | `ESTADO_OP` | `3` (Pagado) si `'C'`; `0` (Pendiente) si no; `'A'` (Anulada) → omitida |
 | `fecha` | `FECH_CONFIRM` / `FECH_OP` | Solo para OPs con estado `'C'` (confirmadas) |
-| `tipo_de_pago_id` | — | Fijo: env `MIGRATOR_DEFAULT_TIPO_PAGO_ID` (default `1`) |
+| `tipo_de_pago_id` | — | Fijo: env `PAXAPOS_RAFAM_DEFAULT_TIPO_PAGO_ID` (default `1`) |
 | `observacion` | — | Opcional |
-| `gasto_external_ids` | `SG_DELEG_SOLIC`, `SG_NRO_SOLIC` | Lista de refs `"SG-{ej}-{deleg}-{nro}"` del gasto cancelado |
+| `gasto_ids` | Link local de gastos | IDs internos de gastos importados en Paxapos |
+| `gasto_external_ids` | `SG_DELEG_SOLIC`, `SG_NRO_SOLIC` | Lista de refs `{ejercicio, deleg_solic, nro_solic}` del gasto cancelado |
+| `retenciones` | `RETENCIONES`, `DEDUCCIONES` | Retenciones RAFAM vinculadas a la OP por `EJERCICIO + NRO_CANCE` |
 
 **Payload de ejemplo:**
 ```json
@@ -277,7 +294,16 @@ Fuente RAFAM: `ORDEN_PAGO` (con JOIN a `SOLIC_GASTOS` vía `NRO_CANCE`)
         "estado": 3,
         "fecha": "2024-03-31"
       },
-      "gasto_external_ids": ["SG-2024-1-789"]
+      "gasto_ids": [501],
+      "gasto_external_ids": [{ "ejercicio": 2024, "deleg_solic": 1, "nro_solic": 789 }],
+      "retenciones": [
+        {
+          "external_id": { "ejercicio": 2024, "nro_op": 321, "cod_ret": "GAN" },
+          "tipo": "ganancias",
+          "monto_retenido": 50.0,
+          "numero_certificado": "RAFAM-RET-2024-321-GAN"
+        }
+      ]
     }
   ]
 }
@@ -302,6 +328,19 @@ Fuente RAFAM: `ORDEN_PAGO` (con JOIN a `SOLIC_GASTOS` vía `NRO_CANCE`)
 
 | Variable | Uso |
 |---|---|
-| `MIGRATOR_DEFAULT_UNIDAD_ID` | ID de unidad de medida por defecto (pedidos) |
-| `MIGRATOR_DEFAULT_TIPO_FACTURA_ID` | ID de tipo de factura por defecto (gastos) |
-| `MIGRATOR_DEFAULT_TIPO_PAGO_ID` | ID de tipo de pago por defecto (órdenes de pago, default `1`) |
+| `PAXAPOS_RAFAM_DEFAULT_UNIDAD_ID` | ID de unidad de medida Paxapos por defecto (pedidos) |
+| `PAXAPOS_RAFAM_DEFAULT_TIPO_FACTURA_ID` | ID de tipo de factura Paxapos por defecto (gastos) |
+| `PAXAPOS_RAFAM_DEFAULT_TIPO_PAGO_ID` | ID de tipo de pago Paxapos por defecto (órdenes de pago, default `1`) |
+
+## Mappings locales persistidos
+
+El script guarda vínculos RAFAM -> Paxapos en SQLite (`EntityLinkStore`) para no resolver IDs remotos en cada corrida:
+
+| Link local | Source key | Uso |
+|---|---|---|
+| `link_centro_costo` | `{"jurisdiccion": "..."}` | `centro_costo_id` en pedidos y OCs |
+| `link_rubro` | `{"jurisdiccion": "..."}` | `rubro_id` de ítems |
+| `link_clasificacion` | `{"jurisdiccion": "..."}` | `clasificacion_id` de gastos |
+| `link_unidad_medida` | `UNI_MED` RAFAM | Override RAFAM -> Paxapos para unidades |
+| `link_tipo_retencion` | `COD_RET` RAFAM | Override RAFAM -> Paxapos para tipos de retención |
+| `link_gasto` | external_id estructurado y alias legacy `rafam_ref` | Vínculo OC/Gasto/OP |

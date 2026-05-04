@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import Column, MetaData, Table, and_, func, or_, select
 from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.engine import Connection
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.sql import Select
 
 from .config import ENTITY_CONFIGS, SCHEMA
@@ -40,6 +41,12 @@ class SourceRepository:
             self._tables[key] = table
             self._tables[table_name] = table
         return table
+
+    def _reflect_optional_table(self, table_name: str):
+        try:
+            return self._reflect_table(table_name)
+        except SQLAlchemyError:
+            return None
 
     def build_statement(self, entity: str, checkpoint: Checkpoint) -> Select:
         cfg = ENTITY_CONFIGS[entity]
@@ -240,23 +247,51 @@ class SourceRepository:
     ) -> Select:
         orden_pago = self._reflect_table("ORDEN_PAGO")
         solic_gastos = self._reflect_table("SOLIC_GASTOS")
+        retenciones = self._reflect_optional_table("RETENCIONES")
+        deducciones = self._reflect_optional_table("DEDUCCIONES")
 
-        stmt = (
-            select(
-                orden_pago,
-                solic_gastos.c.DELEG_SOLIC.label("SG_DELEG_SOLIC"),
-                solic_gastos.c.NRO_SOLIC.label("SG_NRO_SOLIC"),
-            )
-            .select_from(
-                orden_pago.outerjoin(
-                    solic_gastos,
-                    and_(
-                        orden_pago.c.EJERCICIO == solic_gastos.c.EJERCICIO,
-                        orden_pago.c.NRO_CANCE == solic_gastos.c.NRO_SOLIC,
-                    ),
-                )
-            )
+        select_cols = [
+            orden_pago,
+            solic_gastos.c.DELEG_SOLIC.label("SG_DELEG_SOLIC"),
+            solic_gastos.c.NRO_SOLIC.label("SG_NRO_SOLIC"),
+        ]
+
+        from_clause = orden_pago.outerjoin(
+            solic_gastos,
+            and_(
+                orden_pago.c.EJERCICIO == solic_gastos.c.EJERCICIO,
+                orden_pago.c.NRO_CANCE == solic_gastos.c.NRO_SOLIC,
+            ),
         )
+
+        if retenciones is not None:
+            from_clause = from_clause.outerjoin(
+                retenciones,
+                and_(
+                    orden_pago.c.EJERCICIO == retenciones.c.EJERCICIO,
+                    orden_pago.c.NRO_CANCE == retenciones.c.NRO_CANCE,
+                ),
+            )
+            ret_cod = self._safe_column(retenciones, "COD_RET")
+            ret_importe = self._safe_column(retenciones, "IMPORTE")
+            if ret_cod is not None:
+                select_cols.append(ret_cod.label("RET_COD_RET"))
+            if ret_importe is not None:
+                select_cols.append(ret_importe.label("RET_IMPORTE"))
+
+            if deducciones is not None:
+                ded_codigo = self._safe_column(deducciones, "CODIGO")
+                ded_desc = self._safe_column(deducciones, "DESCRIPCION")
+                if ded_codigo is not None and ret_cod is not None:
+                    join_conditions = [ret_cod == ded_codigo]
+                    ded_ejercicio = self._safe_column(deducciones, "EJERCICIO")
+                    if ded_ejercicio is not None:
+                        join_conditions.append(orden_pago.c.EJERCICIO == ded_ejercicio)
+                    from_clause = from_clause.outerjoin(deducciones, and_(*join_conditions))
+                    if ded_desc is not None:
+                        select_cols.append(ded_desc.label("RET_DESCRIPCION"))
+
+        stmt = select(*select_cols).select_from(from_clause)
         return self._apply_incremental_filters(stmt, orden_pago, cfg, checkpoint)
 
     def _apply_incremental_filters(self, stmt: Select, table, cfg: EntityConfig, cp: Checkpoint) -> Select:

@@ -4,11 +4,12 @@ Tests de mapeo para MigratorExporter — sin llamadas HTTP reales.
 Validan que _map_solic_gasto, _map_ped_item, _map_oc_item y
 _write_batch_orden_pago construyen los payloads correctos.
 """
+import json
 from unittest.mock import patch
 
 import pytest
 
-from src.exporter import MigratorExporter
+from src.exporter import MigratorExporter, _build_migrator_url, _migrator_endpoint, _paxapos_url
 
 
 # ─── Fixture: MigratorExporter sin HTTP ──────────────────────────────────────
@@ -28,11 +29,12 @@ def exporter():
             ],
         }
         with patch.dict("os.environ", {
-            "MIGRATOR_BASE_URL": "https://example.com",
-            "MIGRATOR_TENANT": "test",
-            "MIGRATOR_API_KEY": "key",
-            "MIGRATOR_DEFAULT_UNIDAD_ID": "1",
-            "MIGRATOR_DEFAULT_TIPO_PAGO_ID": "4",
+            "PAXAPOS_URL": "https://example.com",
+            "PAXAPOS_TENANT": "test",
+            "PAXAPOS_API_KEY": "key",
+            "PAXAPOS_RAFAM_DEFAULT_UNIDAD_ID": "1",
+            "PAXAPOS_RAFAM_DEFAULT_TIPO_PAGO_ID": "4",
+            "LOCAL_STATE_DB_PATH": ":memory:",
         }):
             exp = MigratorExporter(dry_run=True)
     return exp
@@ -54,7 +56,7 @@ class TestMapSolicGasto:
         }
         result = exporter._map_solic_gasto(raw)
         assert result is not None
-        assert result["external_id"] == {"rafam_ref": "SG-2026-1-500"}
+        assert result["external_id"] == {"ejercicio": 2026, "deleg_solic": 1, "nro_solic": 500}
         assert result["Gasto"]["fecha"] == "2026-03-10"
         assert result["Gasto"]["importe_total"] == 1210.50
         assert result["Gasto"]["tipo_factura_id"] == 2
@@ -90,7 +92,7 @@ class TestMapSolicGasto:
             "ESTADO_SOLIC": "C", "TIPO_DOC": "DESCONOCIDO",
         }
         result = exporter._map_solic_gasto(raw)
-        # default es None cuando MIGRATOR_DEFAULT_TIPO_FACTURA_ID no está seteado
+        # default es None cuando PAXAPOS_RAFAM_DEFAULT_TIPO_FACTURA_ID no está seteado
         assert result is not None
         assert "tipo_factura_id" not in result["Gasto"]
 
@@ -132,10 +134,11 @@ class TestWriteBatchOrdenPago:
                 "tipos_de_pago": [{"id": "4", "name": "Transferencia"}],
             }
             with patch.dict("os.environ", {
-                "MIGRATOR_BASE_URL": "https://example.com",
-                "MIGRATOR_TENANT": "test",
-                "MIGRATOR_API_KEY": "key",
-                "MIGRATOR_DEFAULT_TIPO_PAGO_ID": "4",
+                "PAXAPOS_URL": "https://example.com",
+                "PAXAPOS_TENANT": "test",
+                "PAXAPOS_API_KEY": "key",
+                "PAXAPOS_RAFAM_DEFAULT_TIPO_PAGO_ID": "4",
+                "LOCAL_STATE_DB_PATH": ":memory:",
             }):
                 return MigratorExporter(dry_run=True)
 
@@ -249,11 +252,64 @@ class TestResolveTipoFacturaId:
         assert exporter._resolve_tipo_factura_id("Factura B") == 3
 
     def test_sin_match_retorna_default(self, exporter):
-        # default es None cuando MIGRATOR_DEFAULT_TIPO_FACTURA_ID no está seteado
+        # default es None cuando PAXAPOS_RAFAM_DEFAULT_TIPO_FACTURA_ID no está seteado
         assert exporter._resolve_tipo_factura_id("ORDSE") is None
 
     def test_none_retorna_default(self, exporter):
         assert exporter._resolve_tipo_factura_id(None) is None
+
+
+class TestMapRetencion:
+
+    def test_mapea_retencion_con_alias(self, exporter):
+        raw = {
+            "RET_COD_RET": "GAN",
+            "RET_IMPORTE": "50.25",
+            "RET_DESCRIPCION": "Retencion Ganancias",
+        }
+        result = exporter._map_retencion(raw, 2026, 8001)
+
+        assert result is not None
+        assert result["external_id"] == {"ejercicio": 2026, "nro_op": 8001, "cod_ret": "GAN"}
+        assert result["monto_retenido"] == 50.25
+        assert result["tipo"] == "ganancias"
+        assert result["numero_certificado"] == "RAFAM-RET-2026-8001-GAN"
+
+    def test_sin_importe_no_mapea(self, exporter):
+        assert exporter._map_retencion({"RET_COD_RET": "GAN"}, 2026, 8001) is None
+
+
+class TestMigratorErrors:
+
+    def test_stats_con_error_falla(self):
+        with pytest.raises(RuntimeError):
+            MigratorExporter._raise_on_migrator_errors({"stats": {"proveedores": {"error": 1}}})
+
+    def test_errors_array_falla(self):
+        with pytest.raises(RuntimeError):
+            MigratorExporter._raise_on_migrator_errors({"errors": [{"message": "fallo"}]})
+
+
+class TestMigratorUrl:
+
+    def test_arma_url_con_paxapos_tenant_y_path(self):
+        url = _build_migrator_url(
+            "https://proveedores.madariaga.gob.ar/",
+            "madariaga",
+            "/rafam/migracion/spec.json",
+        )
+
+        assert url == "https://proveedores.madariaga.gob.ar/madariaga/rafam/migracion/spec.json"
+
+    def test_endpoint_rechaza_url_completa(self):
+        with patch.dict("os.environ", {"PAXAPOS_RAFAM_SPEC_PATH": "https://example.com/spec.json"}):
+            with pytest.raises(ValueError):
+                _migrator_endpoint("PAXAPOS_RAFAM_SPEC_PATH", "rafam/migracion/spec.json")
+
+    def test_no_acepta_gateway_url_como_alias(self):
+        with patch.dict("os.environ", {"GATEWAY_URL": "https://legacy.example.com"}, clear=True):
+            with pytest.raises(ValueError):
+                _paxapos_url()
 
 
 # ─── OC items (orden de compra con items) ─────────────────────────────────────
@@ -307,11 +363,12 @@ class TestWriteBatchOcItems:
                 "tipos_de_pago": [],
             }
             with patch.dict("os.environ", {
-                "MIGRATOR_BASE_URL": "https://example.com",
-                "MIGRATOR_TENANT": "test",
-                "MIGRATOR_API_KEY": "key",
-                "MIGRATOR_DEFAULT_UNIDAD_ID": "1",
-                "MIGRATOR_DEFAULT_TIPO_PAGO_ID": "4",
+                "PAXAPOS_URL": "https://example.com",
+                "PAXAPOS_TENANT": "test",
+                "PAXAPOS_API_KEY": "key",
+                "PAXAPOS_RAFAM_DEFAULT_UNIDAD_ID": "1",
+                "PAXAPOS_RAFAM_DEFAULT_TIPO_PAGO_ID": "4",
+                "LOCAL_STATE_DB_PATH": ":memory:",
             }):
                 exp = MigratorExporter(dry_run=True)
         if cod_prov and remote_prov_id:
@@ -320,6 +377,11 @@ class TestWriteBatchOcItems:
                 source_key=cod_prov,
                 remote_id=remote_prov_id,
             )
+        exp._link_store.save_link(
+            entity="centro_costo",
+            source_key=json.dumps({"jurisdiccion": "1110104000"}, sort_keys=True),
+            remote_id="1",
+        )
         return exp
 
     # ── OC con proveedor válido: se envía correctamente ──

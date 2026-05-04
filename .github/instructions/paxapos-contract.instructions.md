@@ -637,7 +637,7 @@ Filtrable con `?only=proveedores,tipos_factura` (CSV). Gastos paginados con `?pa
   "Egreso": {
     "identificador_pago": "RAFAM-OP-{ejercicio}-{nro_op}",
     "total": float(IMPORTE_TOTAL),
-    "tipo_de_pago_id": int(MIGRATOR_DEFAULT_TIPO_PAGO_ID),
+    "tipo_de_pago_id": int(PAXAPOS_RAFAM_DEFAULT_TIPO_PAGO_ID),
     "estado": 3,
     "fecha": "FECH_CONFIRM o FECH_OP (solo si ESTADO_OP='C')"
   },
@@ -653,18 +653,18 @@ Filtrable con `?only=proveedores,tipos_factura` (CSV). Gastos paginados con `?pa
 
 | Variable | Uso | Default |
 |----------|-----|---------|
-| `MIGRATOR_BASE_URL` | URL base del server Paxapos | (requerida) |
-| `MIGRATOR_TENANT` | Tenant ID | (requerida) |
-| `MIGRATOR_API_KEY` | API key para auth | (requerida) |
-| `MIGRATOR_IMPORT_ENDPOINT` | Ruta del endpoint importar | `rafam/migracion/importar.json` |
-| `MIGRATOR_SPEC_ENDPOINT` | Ruta del endpoint spec | `rafam/migracion/spec.json` |
-| `MIGRATOR_LOOKUPS_ENDPOINT` | Ruta del endpoint lookups | `rafam/migracion/lookups.json` |
-| `MIGRATOR_DEFAULT_UNIDAD_ID` | ID unidad de medida default | `1` (debería ser `5` para "Unidad") |
-| `MIGRATOR_DEFAULT_TIPO_FACTURA_ID` | ID tipo factura default | (vacío) |
-| `MIGRATOR_DEFAULT_TIPO_PAGO_ID` | ID tipo de pago default | `1` |
-| `MIGRATOR_BATCH_DELAY_SECONDS` | Delay entre batches | `2` |
-| `MIGRATOR_VERIFY_SSL` | Verificación SSL | `false` en dev |
-| `MIGRATOR_TIMEOUT_SECONDS` | Timeout HTTP | `20` |
+| `PAXAPOS_URL` | URL base del server Paxapos | (requerida) |
+| `PAXAPOS_TENANT` | Tenant ID | (requerida) |
+| `PAXAPOS_API_KEY` | API key para auth | (requerida) |
+| `PAXAPOS_RAFAM_IMPORT_PATH` | Path relativo del importador RAFAM dentro de Paxapos | `rafam/migracion/importar.json` |
+| `PAXAPOS_RAFAM_SPEC_PATH` | Path relativo de spec RAFAM dentro de Paxapos | `rafam/migracion/spec.json` |
+| `PAXAPOS_RAFAM_LOOKUPS_PATH` | Path relativo de lookups RAFAM dentro de Paxapos | `rafam/migracion/lookups.json` |
+| `PAXAPOS_RAFAM_DEFAULT_UNIDAD_ID` | ID unidad de medida Paxapos default | `1` (debería ser `5` para "Unidad") |
+| `PAXAPOS_RAFAM_DEFAULT_TIPO_FACTURA_ID` | ID tipo factura Paxapos default | (vacío) |
+| `PAXAPOS_RAFAM_DEFAULT_TIPO_PAGO_ID` | ID tipo de pago Paxapos default | `1` |
+| `RAFAM_SYNC_BATCH_DELAY_SECONDS` | Delay local entre batches | `2` |
+| `PAXAPOS_VERIFY_SSL` | Verificación SSL | `false` en dev |
+| `PAXAPOS_TIMEOUT_SECONDS` | Timeout HTTP | `20` |
 
 ---
 
