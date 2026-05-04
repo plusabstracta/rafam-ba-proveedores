@@ -29,16 +29,6 @@ ENTITY_CONFIGS: dict[str, EntityConfig] = {
         table_name="PED_ITEMS",
         full_load=True,  # no reliable cursor column yet — confirm with explore_schema.py
     ),
-    "solic_gastos": EntityConfig(
-        name="solic_gastos",
-        table_name="SOLIC_GASTOS",
-        ts_field="FECH_SOLIC",
-        # Re-process confirmed gastos from recent days to catch those
-        # whose linked OC was sent after the gasto was first processed.
-        pending_state_field="ESTADO_SOLIC",
-        pending_state_value="C",
-        pending_reprocess_days=30,
-    ),
     "orden_compra": EntityConfig(
         name="orden_compra",
         table_name="ORDEN_COMPRA",
@@ -52,6 +42,16 @@ ENTITY_CONFIGS: dict[str, EntityConfig] = {
         name="oc_items",
         table_name="OC_ITEMS",
         full_load=True,  # no date/timestamp column in table
+    ),
+    "solic_gastos": EntityConfig(
+        name="solic_gastos",
+        table_name="SOLIC_GASTOS",
+        ts_field="FECH_SOLIC",
+        # Re-process confirmed gastos from recent days to catch those
+        # whose linked OC was sent after the gasto was first processed.
+        pending_state_field="ESTADO_SOLIC",
+        pending_state_value="C",
+        pending_reprocess_days=30,
     ),
     "orden_pago": EntityConfig(
         name="orden_pago",

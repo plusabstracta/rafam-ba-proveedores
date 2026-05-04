@@ -1343,16 +1343,8 @@ class MigratorExporter(BaseExporter):
         if importe_str is None:
             return None
         try:
-            importe_total = float(importe_str)
+            importe_total = round(float(importe_str), 2)
         except (TypeError, ValueError):
-            return None
-
-        # Paxapos usa DECIMAL(10,2): máximo 99.999.999,99
-        if importe_total > 99_999_999.99:
-            logger.warning(
-                "Migrator [solic_gastos] SG %s-%s-%s: importe_total=%s excede DECIMAL(10,2), omitido",
-                ejercicio, deleg_solic, nro_solic, importe_total,
-            )
             return None
 
         fecha_raw = raw.get("FECH_SOLIC")
@@ -1505,17 +1497,9 @@ class MigratorExporter(BaseExporter):
 
             importe = raw.get("IMPORTE_TOTAL")
             try:
-                total = float(importe) if importe is not None else 0.0
+                total = round(float(importe), 2) if importe is not None else 0.0
             except (TypeError, ValueError):
                 total = 0.0
-
-            # Paxapos usa DECIMAL(10,2): máximo 99.999.999,99
-            if total > 99_999_999.99:
-                logger.warning(
-                    "Migrator [orden_pago] OP %s-%s: total=%s excede DECIMAL(10,2), omitido",
-                    ejercicio, nro_op, total,
-                )
-                continue
 
             egreso: dict = {
                 "identificador_pago": f"RAFAM-OP-{ejercicio}-{nro_op}",
@@ -1657,7 +1641,7 @@ class MigratorExporter(BaseExporter):
         }
 
         if raw.get("COSTO_UNI") is not None:
-            item["precio"] = float(raw.get("COSTO_UNI"))
+            item["precio"] = round(float(raw.get("COSTO_UNI")), 2)
 
         descripcion = raw.get("DESCRIP_BIE")
         if descripcion:
@@ -1719,7 +1703,7 @@ class MigratorExporter(BaseExporter):
         }
 
         if raw.get("IMP_UNITARIO") is not None:
-            item["precio"] = float(raw.get("IMP_UNITARIO"))
+            item["precio"] = round(float(raw.get("IMP_UNITARIO")), 2)
 
         if raw.get("CANT_RECIB") is not None:
             item["recibida_cantidad"] = float(raw.get("CANT_RECIB"))
