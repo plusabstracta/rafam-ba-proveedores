@@ -55,7 +55,7 @@ help:
 	@echo "  make test               Corre tests"
 	@echo ""
 	@echo "Variables opcionales:"
-	@echo "  BATCH=500 LIMIT=1000 EXPORT=csv CSV_DIR=output DEV_DB=state/dev_rafam.db"
+	@echo "  BATCH=500 LIMIT=1000 EXPORT=csv CSV_DIR=output DEV_DB=state/dev_rafam.db RAFAM_CONTEXT_ARGS='--years 1'"
 
 setup:
 	python -m venv .venv
@@ -81,7 +81,7 @@ explore-schema:
 	$(PY) scripts/explore_schema.py
 
 rafam-context:
-	$(PY) scripts/generate_rafam_context.py
+	$(PY) scripts/generate_rafam_context.py $(RAFAM_CONTEXT_ARGS)
 
 status:
 	$(PY) main.py status

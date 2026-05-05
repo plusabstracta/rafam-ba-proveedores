@@ -24,21 +24,27 @@ DEFAULT_OUTPUT_DIR = REPO_ROOT / "output" / "rafam_context"
 DEFAULT_SCHEMA = "OWNER_RAFAM"
 DECIMAL_10_2_MAX = 99_999_999.99
 
+# Tablas estrictamente relevantes para el circuito RAFAM -> Paxapos.
+# Se incluyen REG_COMP, RG_COMP y CTA_COMPROB porque la corrida real debe
+# resolver con evidencia cual es registro/puente y cual contiene comprobantes.
 CORE_TABLES = [
     "JURISDICCIONES",
     "PROVEEDORES",
     "PEDIDOS",
     "PED_ITEMS",
     "SOLIC_GASTOS",
-    "SOLIC_GASTOS_ITEMS",
     "ORDEN_COMPRA",
     "OC_ITEMS",
     "ORDEN_PAGO",
+    "REG_COMP",
+    "RG_COMP",
+    "CTA_COMPROB",
     "CTA_HOJA_DE_RUTA",
     "RETENCIONES",
     "DEDUCCIONES",
-    "RG_COMP",
 ]
+
+REG_COMP_FOCUS_TABLES = ["REG_COMP", "RG_COMP", "CTA_COMPROB"]
 
 DATE_COLUMNS = {
     "PROVEEDORES": ["FECHA_ULT_COMP", "FECHA_ALTA"],
@@ -46,6 +52,8 @@ DATE_COLUMNS = {
     "SOLIC_GASTOS": ["FECH_SOLIC", "FECH_CONFIRM", "FECH_ANUL"],
     "ORDEN_COMPRA": ["FECH_OC", "FECH_CONFIRM", "FECH_ANUL"],
     "ORDEN_PAGO": ["FECH_OP", "FECH_CONFIRM", "FECH_ANUL"],
+    "REG_COMP": ["FECH_REG_COMP", "FECH_CONFIRM", "FECH_ANUL"],
+    "CTA_COMPROB": ["FECH_COMPROB", "FECH_MOVIM", "FECH_VENCIM"],
     "CTA_HOJA_DE_RUTA": ["FECH_HOJA"],
     "RETENCIONES": ["FECH_RETEN"],
     "DEDUCCIONES": ["FECH_DEDUC"],
@@ -64,6 +72,9 @@ DOMAIN_FIELDS = [
     ("ORDEN_PAGO", "CONFIRMADO"),
     ("PED_ITEMS", "UNI_MED"),
     ("OC_ITEMS", "UNI_MED"),
+    ("REG_COMP", "TIPO_REGIS"),
+    ("REG_COMP", "ESTADO_REG_COMP"),
+    ("CTA_COMPROB", "TIPO"),
     ("RETENCIONES", "COD_RET"),
     ("JURISDICCIONES", "JURISDICCION"),
 ]
@@ -104,6 +115,32 @@ CRITICAL_FIELDS = {
         "ESTADO_OP",
         "IMPORTE_TOTAL",
     ],
+    "REG_COMP": [
+        "EJERCICIO",
+        "NRO_REG_COMP",
+        "FECH_REG_COMP",
+        "UNI_COMPRA",
+        "NRO_OC",
+        "DELEG_SOLIC",
+        "NRO_SOLIC",
+        "TIPO_DOC",
+        "NRO_DOC",
+        "COD_PROV",
+        "IMPORTE_TOT",
+        "ESTADO_REG_COMP",
+    ],
+    "CTA_COMPROB": [
+        "EJERCICIO",
+        "TIPO",
+        "NRO_COMPROB",
+        "COD_PROV",
+        "COD_PROV_REAL",
+        "NRO_REG_COMP",
+        "FECH_COMPROB",
+        "FECH_VENCIM",
+        "IMPORTE_COMPR",
+        "IMPORTE_PAGADO",
+    ],
 }
 
 NUMERIC_FIELDS = [
@@ -114,8 +151,10 @@ NUMERIC_FIELDS = [
     ("PEDIDOS", "COSTO_TOT"),
     ("PED_ITEMS", "COSTO_UNI"),
     ("OC_ITEMS", "IMP_UNITARIO"),
+    ("REG_COMP", "IMPORTE_TOT"),
+    ("CTA_COMPROB", "IMPORTE_COMPR"),
+    ("CTA_COMPROB", "IMPORTE_PAGADO"),
 ]
-
 
 @dataclass(frozen=True)
 class RelationSpec:
@@ -139,6 +178,89 @@ class OpResolutionSpec:
     right_key_expr: str
     right_present_expr: str
     required_columns: tuple[tuple[str, str], ...]
+
+
+REG_COMP_RELATIONS = [
+    RelationSpec(
+        name="reg_comp_to_cta_comprob",
+        description="Candidato de join REG_COMP -> CTA_COMPROB por EJERCICIO + NRO_REG_COMP.",
+        left_table="REG_COMP",
+        right_table="CTA_COMPROB",
+        left_key_expr="l.EJERCICIO || '-' || l.NRO_REG_COMP",
+        right_key_expr="r.EJERCICIO || '-' || r.TIPO || '-' || r.NRO_COMPROB || '-' || r.COD_PROV",
+        join_condition="l.EJERCICIO = r.EJERCICIO AND l.NRO_REG_COMP = r.NRO_REG_COMP",
+        right_present_expr="r.NRO_REG_COMP",
+        expected="1:N",
+        required_columns=(
+            ("REG_COMP", "EJERCICIO"),
+            ("REG_COMP", "NRO_REG_COMP"),
+            ("CTA_COMPROB", "EJERCICIO"),
+            ("CTA_COMPROB", "NRO_REG_COMP"),
+            ("CTA_COMPROB", "TIPO"),
+            ("CTA_COMPROB", "NRO_COMPROB"),
+            ("CTA_COMPROB", "COD_PROV"),
+        ),
+    ),
+    RelationSpec(
+        name="reg_comp_to_orden_compra",
+        description="Candidato de join REG_COMP -> ORDEN_COMPRA por EJERCICIO + UNI_COMPRA + NRO_OC.",
+        left_table="REG_COMP",
+        right_table="ORDEN_COMPRA",
+        left_key_expr="l.EJERCICIO || '-' || l.NRO_REG_COMP",
+        right_key_expr="r.EJERCICIO || '-' || r.UNI_COMPRA || '-' || r.NRO_OC",
+        join_condition="l.EJERCICIO = r.EJERCICIO AND l.UNI_COMPRA = r.UNI_COMPRA AND l.NRO_OC = r.NRO_OC",
+        right_present_expr="r.EJERCICIO",
+        expected="N:1",
+        required_columns=(
+            ("REG_COMP", "EJERCICIO"),
+            ("REG_COMP", "NRO_REG_COMP"),
+            ("REG_COMP", "UNI_COMPRA"),
+            ("REG_COMP", "NRO_OC"),
+            ("ORDEN_COMPRA", "EJERCICIO"),
+            ("ORDEN_COMPRA", "UNI_COMPRA"),
+            ("ORDEN_COMPRA", "NRO_OC"),
+        ),
+    ),
+    RelationSpec(
+        name="rg_comp_to_cta_comprob",
+        description="Candidato de join RG_COMP -> CTA_COMPROB por EJERCICIO + NRO_REG_COMP.",
+        left_table="RG_COMP",
+        right_table="CTA_COMPROB",
+        left_key_expr="l.EJERCICIO || '-' || l.NRO_REG_COMP",
+        right_key_expr="r.EJERCICIO || '-' || r.TIPO || '-' || r.NRO_COMPROB || '-' || r.COD_PROV",
+        join_condition="l.EJERCICIO = r.EJERCICIO AND l.NRO_REG_COMP = r.NRO_REG_COMP",
+        right_present_expr="r.NRO_REG_COMP",
+        expected="1:N candidato",
+        required_columns=(
+            ("RG_COMP", "EJERCICIO"),
+            ("RG_COMP", "NRO_REG_COMP"),
+            ("CTA_COMPROB", "EJERCICIO"),
+            ("CTA_COMPROB", "NRO_REG_COMP"),
+            ("CTA_COMPROB", "TIPO"),
+            ("CTA_COMPROB", "NRO_COMPROB"),
+            ("CTA_COMPROB", "COD_PROV"),
+        ),
+    ),
+    RelationSpec(
+        name="rg_comp_to_orden_compra_by_nro_oc",
+        description="Candidato RG_COMP -> ORDEN_COMPRA sin UNI_COMPRA; mide si NRO_OC solo es ambiguo.",
+        left_table="RG_COMP",
+        right_table="ORDEN_COMPRA",
+        left_key_expr="l.EJERCICIO || '-' || l.NRO_REG_COMP",
+        right_key_expr="r.EJERCICIO || '-' || r.UNI_COMPRA || '-' || r.NRO_OC",
+        join_condition="l.EJERCICIO = r.EJERCICIO AND l.NRO_OC = r.NRO_OC",
+        right_present_expr="r.EJERCICIO",
+        expected="candidato ambiguo",
+        required_columns=(
+            ("RG_COMP", "EJERCICIO"),
+            ("RG_COMP", "NRO_REG_COMP"),
+            ("RG_COMP", "NRO_OC"),
+            ("ORDEN_COMPRA", "EJERCICIO"),
+            ("ORDEN_COMPRA", "UNI_COMPRA"),
+            ("ORDEN_COMPRA", "NRO_OC"),
+        ),
+    ),
+]
 
 
 RELATIONS = [
@@ -335,31 +457,71 @@ OP_RESOLUTION_SPECS = [
 
 
 class RafamContextCollector:
-    def __init__(self, conn, backend: str, schema: str, years: int | None, sample_limit: int):
+    def __init__(
+        self,
+        conn,
+        backend: str,
+        schema: str,
+        years: int | None,
+        sample_limit: int,
+        progress: bool = False,
+        skip_completeness: bool = False,
+    ):
         self.conn = conn
         self.backend = backend
         self.schema = schema
         self.years = years
         self.sample_limit = sample_limit
+        self.progress = progress
+        self.skip_completeness = skip_completeness
         self.period_start_year = datetime.now().year - years + 1 if years else None
         self.columns_by_table: dict[str, list[dict[str, Any]]] = {}
         self.constraints_by_table: dict[str, dict[str, Any]] = {}
 
     def collect(self) -> dict[str, Any]:
+        self.log_progress("leyendo columnas core")
         self.columns_by_table = self.collect_columns()
+        self.log_progress("leyendo constraints")
         self.constraints_by_table = self.collect_constraints()
+        self.log_progress("perfilando tablas")
+        table_profiles = self.collect_table_profiles()
+        self.log_progress("resumiendo modelo")
+        schema_summary = self.collect_schema_summary()
+        self.log_progress("midiendo relaciones RAFAM")
+        relations = self.collect_relations()
+        self.log_progress("comparando estrategias OP-SG-OC")
+        op_resolution = self.collect_op_resolution()
+        self.log_progress("analizando REG_COMP/RG_COMP/CTA_COMPROB")
+        reg_comp_analysis = self.collect_reg_comp_analysis()
+        self.log_progress("leyendo dominios")
+        domains = self.collect_domains()
+        if self.skip_completeness:
+            self.log_progress("saltando completitud por --skip-completeness")
+            completeness = []
+        else:
+            self.log_progress("midiendo completitud por tabla")
+            completeness = self.collect_completeness()
+        self.log_progress("midiendo calidad numerica")
+        numeric_quality = self.collect_numeric_quality()
+        self.log_progress("tomando muestras de borde")
+        edge_samples = self.collect_edge_samples()
         return {
             "metadata": self.collect_metadata(),
             "entity_contracts": self.collect_entity_contracts(),
-            "table_profiles": self.collect_table_profiles(),
-            "schema": self.collect_schema_summary(),
-            "relations": self.collect_relations(),
-            "op_resolution": self.collect_op_resolution(),
-            "domains": self.collect_domains(),
-            "completeness": self.collect_completeness(),
-            "numeric_quality": self.collect_numeric_quality(),
-            "edge_samples": self.collect_edge_samples(),
+            "table_profiles": table_profiles,
+            "schema": schema_summary,
+            "relations": relations,
+            "op_resolution": op_resolution,
+            "reg_comp_analysis": reg_comp_analysis,
+            "domains": domains,
+            "completeness": completeness,
+            "numeric_quality": numeric_quality,
+            "edge_samples": edge_samples,
         }
+
+    def log_progress(self, message: str) -> None:
+        if self.progress:
+            print(f"[rafam-context] {message}", file=sys.stderr, flush=True)
 
     def collect_metadata(self) -> dict[str, Any]:
         return {
@@ -458,6 +620,151 @@ class RafamContextCollector:
             metrics.append(self.measure_op_resolution(spec))
         return metrics
 
+    def collect_reg_comp_analysis(self) -> dict[str, Any]:
+        table_signals = [self.reg_comp_table_signal(table) for table in REG_COMP_FOCUS_TABLES]
+        relation_metrics = []
+        for spec in REG_COMP_RELATIONS:
+            if not self.require_columns(spec.required_columns):
+                relation_metrics.append(self.skipped_metric(spec.name, spec.description, "faltan columnas o tablas"))
+                continue
+            relation_metrics.append(self.measure_relation(spec))
+        return {
+            "summary": self.reg_comp_summary(table_signals, relation_metrics),
+            "table_signals": table_signals,
+            "relation_metrics": relation_metrics,
+            "samples": self.collect_reg_comp_samples(),
+        }
+
+    def reg_comp_table_signal(self, table: str) -> dict[str, Any]:
+        columns = {row.get("name") for row in self.columns_by_table.get(table, [])}
+        constraints = self.constraints_by_table.get(table, {"pk": [], "fk": []})
+        signal = {
+            "table": table,
+            "exists": self.has_table(table),
+            "pk": ", ".join(constraints.get("pk", [])),
+            "has_nro_reg_comp": "NRO_REG_COMP" in columns,
+            "has_nro_comprob": "NRO_COMPROB" in columns,
+            "has_oc_link": "NRO_OC" in columns,
+            "has_uni_compra": "UNI_COMPRA" in columns,
+            "has_sg_link": {"DELEG_SOLIC", "NRO_SOLIC"}.issubset(columns),
+            "doc_columns": ", ".join(col for col in ["TIPO", "NRO_COMPROB", "TIPO_DOC", "NRO_DOC"] if col in columns),
+            "date_columns": ", ".join(col for col in ["FECH_COMPROB", "FECH_REG_COMP", "FECH_MOVIM", "FECH_VENCIM"] if col in columns),
+            "amount_columns": ", ".join(col for col in ["IMPORTE_COMPR", "IMPORTE_TOT", "IMPORTE_PAGADO"] if col in columns),
+        }
+        signal["inferred_role"] = self.infer_reg_comp_role(signal)
+        return signal
+
+    @staticmethod
+    def infer_reg_comp_role(signal: dict[str, Any]) -> str:
+        if not signal["exists"]:
+            return "ausente"
+        if signal["has_nro_comprob"]:
+            return "comprobante_fiscal_por_columnas"
+        if signal["has_nro_reg_comp"] and (signal["has_oc_link"] or signal["has_sg_link"]):
+            return "registro_o_puente_por_columnas"
+        if signal["has_nro_reg_comp"]:
+            return "registro_por_columnas"
+        return "pendiente_validacion"
+
+    @staticmethod
+    def reg_comp_summary(table_signals: list[dict[str, Any]], relation_metrics: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        signals_by_table = {row["table"]: row for row in table_signals}
+        metrics_by_name = {row["name"]: row for row in relation_metrics if row.get("status") == "measured"}
+        cta_signal = signals_by_table.get("CTA_COMPROB", {})
+        reg_signal = signals_by_table.get("REG_COMP", {})
+        rg_signal = signals_by_table.get("RG_COMP", {})
+        return [
+            {
+                "question": "Donde esta el numero fiscal del comprobante?",
+                "evidence": "CTA_COMPROB tiene NRO_COMPROB" if cta_signal.get("has_nro_comprob") else "No se detecto NRO_COMPROB en CTA_COMPROB",
+                "status": "confirmado_por_schema" if cta_signal.get("has_nro_comprob") else "pendiente_validacion",
+            },
+            {
+                "question": "REG_COMP parece comprobante o registro?",
+                "evidence": f"rol={reg_signal.get('inferred_role', 'ausente')}; doc_columns={reg_signal.get('doc_columns', '')}",
+                "status": "inferido_por_schema",
+            },
+            {
+                "question": "RG_COMP parece comprobante o registro?",
+                "evidence": f"rol={rg_signal.get('inferred_role', 'ausente')}; doc_columns={rg_signal.get('doc_columns', '')}",
+                "status": "inferido_por_schema",
+            },
+            {
+                "question": "REG_COMP conecta con CTA_COMPROB?",
+                "evidence": metrics_by_name.get("reg_comp_to_cta_comprob", {}).get("resolved_pct", "sin medicion"),
+                "status": "medido" if "reg_comp_to_cta_comprob" in metrics_by_name else "pendiente_validacion",
+            },
+            {
+                "question": "REG_COMP conecta con ORDEN_COMPRA?",
+                "evidence": metrics_by_name.get("reg_comp_to_orden_compra", {}).get("resolved_pct", "sin medicion"),
+                "status": "medido" if "reg_comp_to_orden_compra" in metrics_by_name else "pendiente_validacion",
+            },
+        ]
+
+    def collect_reg_comp_samples(self) -> dict[str, list[dict[str, Any]]]:
+        return {
+            "reg_comp_cta_comprob": self.sample_two_table_join(
+                left_table="REG_COMP",
+                left_alias="rc",
+                right_table="CTA_COMPROB",
+                right_alias="cc",
+                join_condition="rc.EJERCICIO = cc.EJERCICIO AND rc.NRO_REG_COMP = cc.NRO_REG_COMP",
+                left_columns=["EJERCICIO", "NRO_REG_COMP", "UNI_COMPRA", "NRO_OC", "DELEG_SOLIC", "NRO_SOLIC", "TIPO_DOC", "NRO_DOC", "COD_PROV", "IMPORTE_TOT"],
+                right_columns=["TIPO", "NRO_COMPROB", "COD_PROV", "COD_PROV_REAL", "FECH_COMPROB", "IMPORTE_COMPR"],
+            ),
+            "reg_comp_orden_compra": self.sample_two_table_join(
+                left_table="REG_COMP",
+                left_alias="rc",
+                right_table="ORDEN_COMPRA",
+                right_alias="oc",
+                join_condition="rc.EJERCICIO = oc.EJERCICIO AND rc.UNI_COMPRA = oc.UNI_COMPRA AND rc.NRO_OC = oc.NRO_OC",
+                left_columns=["EJERCICIO", "NRO_REG_COMP", "UNI_COMPRA", "NRO_OC", "COD_PROV", "IMPORTE_TOT"],
+                right_columns=["UNI_COMPRA", "NRO_OC", "COD_PROV", "FECH_OC", "IMPORTE_TOT"],
+            ),
+            "rg_comp_cta_comprob": self.sample_two_table_join(
+                left_table="RG_COMP",
+                left_alias="rg",
+                right_table="CTA_COMPROB",
+                right_alias="cc",
+                join_condition="rg.EJERCICIO = cc.EJERCICIO AND rg.NRO_REG_COMP = cc.NRO_REG_COMP",
+                left_columns=["EJERCICIO", "NRO_REG_COMP", "NRO_OC", "COD_PROV", "JURISDICCION", "FECH_REG_COMP"],
+                right_columns=["TIPO", "NRO_COMPROB", "COD_PROV", "COD_PROV_REAL", "FECH_COMPROB", "IMPORTE_COMPR"],
+            ),
+        }
+
+    def sample_two_table_join(
+        self,
+        left_table: str,
+        left_alias: str,
+        right_table: str,
+        right_alias: str,
+        join_condition: str,
+        left_columns: list[str],
+        right_columns: list[str],
+    ) -> list[dict[str, Any]]:
+        if not self.has_table(left_table) or not self.has_table(right_table):
+            return []
+        select_cols = []
+        for column in left_columns:
+            if self.has_column(left_table, column):
+                select_cols.append(f"{left_alias}.{column} AS {left_alias}_{column}")
+        for column in right_columns:
+            if self.has_column(right_table, column):
+                select_cols.append(f"{right_alias}.{column} AS {right_alias}_{column}")
+        if not select_cols:
+            return []
+        sql = f"""
+            SELECT {", ".join(select_cols)}
+            FROM {self.table_ref(left_table)} {left_alias}
+            JOIN {self.table_ref(right_table)} {right_alias}
+              ON {join_condition}
+            {self.period_where(left_alias, left_table)}
+        """
+        try:
+            return self.fetch_dicts(self.limit_sql(sql))
+        except Exception as exc:
+            return [{"error": str(exc)}]
+
     def collect_domains(self) -> list[dict[str, Any]]:
         rows = []
         for table, column in DOMAIN_FIELDS:
@@ -486,20 +793,25 @@ class RafamContextCollector:
         for table, columns in CRITICAL_FIELDS.items():
             if not self.has_table(table):
                 continue
-            for column in columns:
-                if not self.has_column(table, column):
-                    continue
-                blank = self.blank_expression("t", column)
-                sql = f"""
-                    SELECT
-                        COUNT(*) AS total,
-                        SUM(CASE WHEN {blank} THEN 1 ELSE 0 END) AS missing
-                    FROM {self.table_ref(table)} t
-                    {self.period_where('t', table)}
-                """
-                data = self.fetch_one(sql)
-                total = to_int(data.get("total"))
-                missing = to_int(data.get("missing"))
+            available_columns = [column for column in columns if self.has_column(table, column)]
+            if not available_columns:
+                continue
+
+            missing_exprs = [
+                f"SUM(CASE WHEN {self.blank_expression('t', table, column)} THEN 1 ELSE 0 END) AS missing_{index}"
+                for index, column in enumerate(available_columns)
+            ]
+            sql = f"""
+                SELECT
+                    COUNT(*) AS total,
+                    {", ".join(missing_exprs)}
+                FROM {self.table_ref(table)} t
+                {self.period_where('t', table)}
+            """
+            data = self.fetch_one(sql)
+            total = to_int(data.get("total"))
+            for index, column in enumerate(available_columns):
+                missing = to_int(data.get(f"missing_{index}"))
                 rows.append(
                     {
                         "table": table,
@@ -878,10 +1190,22 @@ class RafamContextCollector:
             return ""
         return f"AND {alias}.EJERCICIO >= {self.period_start_year}"
 
-    def blank_expression(self, alias: str, column: str) -> str:
+    def blank_expression(self, alias: str, table: str, column: str) -> str:
         value = f"{alias}.{column}"
-        text_value = f"TO_CHAR({value})" if self.backend == "oracle" else f"CAST({value} AS TEXT)"
+        if self.backend == "oracle" and not self.is_text_column(table, column):
+            return f"{value} IS NULL"
+        text_value = value if self.backend == "oracle" else f"CAST({value} AS TEXT)"
         return f"{value} IS NULL OR TRIM({text_value}) = ''"
+
+    def is_text_column(self, table: str, column: str) -> bool:
+        column_type = self.column_type(table, column).upper()
+        return any(token in column_type for token in ("CHAR", "CLOB", "TEXT"))
+
+    def column_type(self, table: str, column: str) -> str:
+        for row in self.columns_by_table.get(table, []):
+            if row.get("name") == column:
+                return str(row.get("type") or "")
+        return ""
 
     def limit_sql(self, sql: str) -> str:
         if self.backend == "oracle":
@@ -952,6 +1276,14 @@ def render_markdown(report: dict[str, Any]) -> str:
         ]
     )
     lines.extend(render_schema(report["schema"]))
+    lines.extend(
+        [
+            "",
+            "## Apartado especial REG_COMP, RG_COMP y comprobantes",
+            "",
+        ]
+    )
+    lines.extend(render_reg_comp_analysis(report.get("reg_comp_analysis", {})))
     lines.extend(
         [
             "",
@@ -1046,6 +1378,48 @@ def render_schema(schema: dict[str, Any]) -> list[str]:
                 "",
             ]
         )
+    return lines
+
+
+def render_reg_comp_analysis(analysis: dict[str, Any]) -> list[str]:
+    if not analysis:
+        return ["_Sin analisis REG_COMP/RG_COMP._"]
+    lines = [
+        "Este apartado no usa la semantica asumida por el codigo. Se basa en columnas, PK/FK y joins medidos contra RAFAM.",
+        "",
+        "### Preguntas a resolver",
+        "",
+        markdown_table(analysis.get("summary", []), ["question", "evidence", "status"]),
+        "",
+        "### Señales por tabla",
+        "",
+        markdown_table(
+            analysis.get("table_signals", []),
+            [
+                "table",
+                "exists",
+                "pk",
+                "has_nro_reg_comp",
+                "has_nro_comprob",
+                "has_oc_link",
+                "has_uni_compra",
+                "has_sg_link",
+                "doc_columns",
+                "date_columns",
+                "amount_columns",
+                "inferred_role",
+            ],
+        ),
+        "",
+        "### Joins candidatos medidos",
+        "",
+        render_metrics(analysis.get("relation_metrics", [])),
+        "",
+        "### Muestras de joins candidatos",
+        "",
+    ]
+    for name, rows in analysis.get("samples", {}).items():
+        lines.extend([f"#### {name}", "", markdown_table_auto(rows), ""])
     return lines
 
 
@@ -1251,6 +1625,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sample-limit", type=int, default=20)
     parser.add_argument("--sqlite-db", default="")
     parser.add_argument("--output", default="")
+    parser.add_argument("--skip-completeness", action="store_true", help="Salta la auditoria de NULL/vacios si Oracle tarda demasiado")
+    parser.add_argument("--quiet", action="store_true", help="No imprime progreso por seccion")
     return parser.parse_args()
 
 
@@ -1266,6 +1642,8 @@ def main() -> None:
             schema=args.schema,
             years=years,
             sample_limit=args.sample_limit,
+            progress=not args.quiet,
+            skip_completeness=args.skip_completeness,
         )
         report = collector.collect()
         markdown = render_markdown(report)
