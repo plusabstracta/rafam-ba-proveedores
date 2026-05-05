@@ -79,20 +79,18 @@ OC (compras_pedidos.gasto_id) ──HABTM──► Gasto ◄──HABTM (account
 ### 2.2 Cadena de vínculos en RAFAM (fuente)
 
 ```
-OC_ITEMS ──(DELEG_SOLIC, NRO_SOLIC)──► SOLIC_GASTOS ◄──(SG_DELEG_SOLIC, SG_NRO_SOLIC)── ORDEN_PAGO
-                                              ▲
-                         ORDEN_PAGO.RECO_DEU_COMPRA ──► ORDEN_COMPRA.NRO_OC (nexo OP↔OC)
+OC_ITEMS ──(DELEG_SOLIC, NRO_SOLIC)──► SOLIC_GASTOS ◄── ORDEN_PAGO.NRO_CANCE
 ```
 
 El Gasto (`SOLIC_GASTOS`) es el puente entre OC y OP. La FK de `OC_ITEMS` a `SOLIC_GASTOS` permite resolver qué gastos pertenecen a cada OC.
 
 **Resolución de gasto_refs para OP** — tres niveles de fallback:
 
-1. **SG directo:** `ORDEN_PAGO.SG_DELEG_SOLIC` + `SG_NRO_SOLIC` matchea SOLIC_GASTOS (~5% de OPs).
-2. **CTA_HOJA_DE_RUTA JOIN** (solo Oracle): vista desnormalizada que consolida PE→SG→OC→OP. LEFT JOIN en `source_repository` agrega `HDR_SG_NRO`, `HDR_SG_DELEG`, `HDR_OC_NRO_OC`. No existe en SQLite dev.
-3. **RECO_DEU_COMPRA → OC link_store** (~85% de OPs): `RECO_DEU_COMPRA` = `NRO_OC` de la OC que se paga. Se buscan los `gasto_refs` ya persistidos de esa OC en `entity_link_store`. Funciona tanto en Oracle como SQLite.
+1. **SG directo:** `ORDEN_PAGO.NRO_CANCE -> SOLIC_GASTOS.NRO_SOLIC` con mismo `EJERCICIO` cubre 92,71% en la evidencia 2024+.
+2. **CTA_HOJA_DE_RUTA JOIN:** vista desnormalizada PE→SG→OC→OP. Usar columnas reales (`OP_NRO`, `SG_DELEG_SOLIC`, `OC_NRO`); SQLite dev debe preservar el CSV real si existe.
+3. **RECO_DEU_COMPRA → OC link_store:** fallback residual. En la evidencia 2024+ vino 100% vacío; no usar como camino principal.
 
-> `NRO_CANCE` NO es el nexo OP↔OC. Su uso principal es para RETENCIONES.
+> `NRO_CANCE` no es nexo OP↔OC; en esta evidencia sirve como camino OP→SOLIC_GASTOS. Para retenciones se usa `RETENCIONES.EJERCICIO + NRO_CANCE`.
 
 ---
 
@@ -242,7 +240,7 @@ Pedidos y Órdenes de Compra comparten la misma tabla, diferenciados por `tipo`.
 | `es_ajuste_precio` | tinyint(1) | — | default 0 |
 | `proveedor_id` | int | SÍ | hereda de cabecera |
 | `pedido_estado_id` | int | — | default 1. 1=Pendiente, 2=Completado, 3=Pedido |
-| `unidad_de_medida_id` | int | NO | Resolver por link/lookup; no asumir que el default del tenant es "Unidad" |
+| `unidad_de_medida_id` | int | NO | Decision del tenant: enviar fijo `5`, que en Paxapos representa `Unidad` para todos los items OC |
 | `cantidad` | decimal(10,2) | NO | Obligatorio |
 | `observacion` | text | SÍ | |
 | `recibida_unidad_de_medida_id` | int | SÍ | |
@@ -327,7 +325,7 @@ Pedidos y Órdenes de Compra comparten la misma tabla, diferenciados por `tipo`.
 
 **Feature flag**: `Site.ordenes_de_pago` debe estar en `true`. Si no → HTTP 400. Verificar llamando con bloque `ordenes_pago` vacío en `dry_run`.
 
-**Omitir OPs con `ESTADO_OP=A`** del envío — no existe estado "Anulado" en Paxapos.
+**Omitir OPs con `ESTADO_OP=A`, `ESTADO_OP=C`, `CONFIRMADO<>S` o sin `FECH_CONFIRM`**. Enviar solo normales confirmadas.
 
 **Validaciones server-side**:
 - `total`: numérico, requerido
@@ -638,10 +636,10 @@ Filtrable con `?only=proveedores,tipos_factura` (CSV). Gastos paginados con `?pa
     "importe_total": float(IMPORTE_TOT),
     "importe_neto": float(IMPORTE_TOT),
     "punto_de_venta": "RAFAM",
-    "tipo_factura_id": int(lookup TIPO_DOC),
-    "factura_nro": "NRO_DOC (zero-pad 8)",
+    "tipo_factura_id": int(lookup CTA_COMPROB.TIPO, fallback TIPO_DOC),
+    "factura_nro": "CTA_COMPROB.NRO_COMPROB",
     "clasificacion_id": int(lookup JURISDICCION en entity_link_store),
-    "fecha_vencimiento": "FECH_NECESIDAD o FECH_ENTREGA",
+    "fecha_vencimiento": "CTA_COMPROB.FECH_VENCIM o FECH_NECESIDAD o FECH_ENTREGA",
     "observacion": "opcional"
   }
 }
@@ -657,13 +655,13 @@ Filtrable con `?only=proveedores,tipos_factura` (CSV). Gastos paginados con `?pa
     "total": float(IMPORTE_TOTAL),
     "tipo_de_pago_id": int(PAXAPOS_RAFAM_DEFAULT_TIPO_PAGO_ID),
     "estado": 3,
-    "fecha": "FECH_CONFIRM o FECH_OP (solo si ESTADO_OP='C')"
+    "fecha": "FECH_CONFIRM"
   },
   "gasto_external_ids": ["SG-{ej}-{deleg}-{nro}"]
 }
 ```
 
-> OPs con `ESTADO_OP='A'` (anuladas) se omiten completamente del envío.
+> Solo enviar OPs con `ESTADO_OP='N'`, `CONFIRMADO='S'` y `FECH_CONFIRM` presente. En Paxapos se crean con `fecha=FECH_CONFIRM` y `estado=3`. OPs con `ESTADO_OP='A'`, `ESTADO_OP='C'`, no confirmadas o sin `FECH_CONFIRM` se omiten completamente del envío.
 
 ---
 

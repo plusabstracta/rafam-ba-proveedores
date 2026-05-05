@@ -10,6 +10,7 @@ from unittest.mock import patch
 import pytest
 
 from src.exporter import MigratorExporter, _build_migrator_url, _migrator_endpoint, _paxapos_url
+from src.gateway_mapper import map_proveedor_migrator_row
 
 
 # ─── Fixture: MigratorExporter sin HTTP ──────────────────────────────────────
@@ -42,6 +43,19 @@ def exporter():
 
 # ─── solic_gastos ─────────────────────────────────────────────────────────────
 
+
+def test_proveedor_rnis_mapea_iva_condicion():
+    result = map_proveedor_migrator_row({
+        "COD_PROV": "7",
+        "FANTASIA": "Proveedor RNIS",
+        "RAZON_SOCIAL": "Proveedor RNIS SA",
+        "CUIT": "30-12345678-9",
+        "COD_IVA": "RNIS",
+    })
+
+    assert result is not None
+    assert result["Proveedor"]["iva_condicion_id"] == 6
+
 class TestMapSolicGasto:
 
     def test_mapea_campos_basicos(self, exporter):
@@ -50,8 +64,11 @@ class TestMapSolicGasto:
             "FECH_SOLIC": "2026-03-10 00:00:00",
             "IMPORTE_TOT": "1210.50",
             "ESTADO_SOLIC": "C",
-            "TIPO_DOC": "factura_a",
+            "TIPO_DOC": "doc_legacy_ignorado",
             "NRO_DOC": "42",
+            "CTA_COMPROB_COUNT": "1",
+            "CTA_TIPO_COMPROB": "factura_a",
+            "CTA_NRO_COMPROB": "0001-00000042",
             "OBSERVACIONES": "Factura de papelería",
         }
         result = exporter._map_solic_gasto(raw)
@@ -60,7 +77,7 @@ class TestMapSolicGasto:
         assert result["Gasto"]["fecha"] == "2026-03-10"
         assert result["Gasto"]["importe_total"] == 1210.50
         assert result["Gasto"]["tipo_factura_id"] == 2
-        assert result["Gasto"]["factura_nro"] == "00000042"
+        assert result["Gasto"]["factura_nro"] == "0001-00000042"
         assert result["Gasto"]["observacion"] == "Factura de papelería"
 
     def test_excluye_anuladas(self, exporter):
@@ -90,21 +107,21 @@ class TestMapSolicGasto:
             "EJERCICIO": "2026", "DELEG_SOLIC": "1", "NRO_SOLIC": "504",
             "FECH_SOLIC": "2026-03-10", "IMPORTE_TOT": "50",
             "ESTADO_SOLIC": "C", "TIPO_DOC": "DESCONOCIDO",
+            "CTA_COMPROB_COUNT": "1", "CTA_NRO_COMPROB": "0001-00000050",
+            "CTA_TIPO_COMPROB": "DESCONOCIDO",
         }
         result = exporter._map_solic_gasto(raw)
         # default es None cuando PAXAPOS_RAFAM_DEFAULT_TIPO_FACTURA_ID no está seteado
         assert result is not None
         assert "tipo_factura_id" not in result["Gasto"]
 
-    def test_nro_doc_cero_no_se_incluye(self, exporter):
+    def test_sin_cta_comprob_no_mapea(self, exporter):
         raw = {
             "EJERCICIO": "2026", "DELEG_SOLIC": "1", "NRO_SOLIC": "505",
             "FECH_SOLIC": "2026-03-10", "IMPORTE_TOT": "50",
-            "ESTADO_SOLIC": "C", "NRO_DOC": "0",
+            "ESTADO_SOLIC": "C", "NRO_DOC": "42",
         }
-        result = exporter._map_solic_gasto(raw)
-        assert result is not None
-        assert "factura_nro" not in result["Gasto"]
+        assert exporter._map_solic_gasto(raw) is None
 
 
 # ─── _format_date_only ────────────────────────────────────────────────────────
@@ -173,21 +190,24 @@ class TestWriteBatchOrdenPago:
             "RECO_DEU_COMPRA_EJER", "F931", "SICORE",
         ]
 
-        def row(nro_op, sg_deleg, sg_nro, estado="C", importe="500"):
+        def row(nro_op, sg_deleg, sg_nro, estado="N", importe="500", confirmado="S", fech_confirm="2026-03-11 00:00:00"):
             vals = {
                 "EJERCICIO": "2026", "NRO_OP": str(nro_op),
                 "FECH_OP": "2026-03-10 00:00:00",
                 "ESTADO_OP": estado, "IMPORTE_TOTAL": importe,
                 "CONCEPTO": "Pago servicios", "NRO_CANCE": str(sg_nro),
                 "SG_DELEG_SOLIC": str(sg_deleg), "SG_NRO_SOLIC": str(sg_nro),
-                "FECH_CONFIRM": "2026-03-11 00:00:00",
+                "CONFIRMADO": confirmado, "FECH_CONFIRM": fech_confirm,
             }
             return tuple(vals.get(c, "") for c in columns)
 
         rows = [
             row(1001, 1, 100),
             row(1002, 1, 200),
-            row(1003, None, None, estado="N"),  # sin gasto → omitida
+            row(1003, None, None),  # sin gasto -> omitida
+            row(1004, 1, 100, estado="C"),  # cancelada -> omitida
+            row(1005, 1, 100, confirmado="N"),  # no confirmada -> omitida
+            row(1006, 1, 100, fech_confirm=""),  # sin FECH_CONFIRM -> omitida
         ]
 
         sent_payloads = []
@@ -209,6 +229,8 @@ class TestWriteBatchOrdenPago:
         for op in ops:
             assert len(op["gasto_ids"]) == 1
             assert isinstance(op["gasto_ids"][0], int)
+            assert op["Egreso"]["estado"] == 3
+            assert op["Egreso"]["fecha"] == "2026-03-11"
 
     def test_op_anulada_no_se_envia(self):
         exp = self._make_exporter()
@@ -239,6 +261,41 @@ class TestWriteBatchOrdenPago:
         exp._post_json = lambda url, p: sent.append(p) or {"stats": {"ordenes_pago": {"ok": 0}}}
         exp.write_batch("orden_pago", columns, rows)
         assert sent == []  # no se envió nada
+
+    def test_op_cancelada_no_se_envia(self):
+        exp = self._make_exporter()
+        exp._link_store.save_link(
+            entity="gasto",
+            source_key=json.dumps({"rafam_ref": "SG-2026-1-50"}, sort_keys=True),
+            remote_id="501",
+        )
+        columns = [
+            "EJERCICIO", "NRO_OP", "FECH_OP", "ESTADO_OP",
+            "IMPORTE_TOTAL", "CONCEPTO", "NRO_CANCE",
+            "SG_DELEG_SOLIC", "SG_NRO_SOLIC",
+            "FECH_CONFIRM", "LUG_EMI", "CODIGO_FF", "JURISDICCION",
+            "CODIGO_UE", "COD_PROV", "TIPO_OP", "TIPO_DOC", "NRO_DOC",
+            "ANIO_DOC", "CONFIRMADO", "CANT_IMPRES", "FECH_ANUL",
+            "MOTIVO_ANUL", "OBSERVACIONES", "COD_EMP",
+            "IMPORTE_BONIFICACION", "IMPORTE_DEDUCCIONES", "ASIENTO",
+            "ASIENTO_ANUL", "MONTO_SIN_IVA", "DEUDA", "BLOQUEADA",
+            "RECURSO", "PERCIBIDO", "NO_PAGADO", "PAGADO",
+            "RECO_DEU_ORDEN", "RECO_DEU_EJERCICIO", "RECO_DEU_COMPRA",
+            "RECO_DEU_COMPRA_EJER", "F931", "SICORE",
+        ]
+        vals = {
+            "EJERCICIO": "2026", "NRO_OP": "999",
+            "FECH_OP": "2026-03-10", "ESTADO_OP": "C",
+            "IMPORTE_TOTAL": "100", "NRO_CANCE": "50",
+            "SG_DELEG_SOLIC": "1", "SG_NRO_SOLIC": "50",
+            "CONFIRMADO": "S", "FECH_CONFIRM": "2026-03-11",
+        }
+        rows = [tuple(vals.get(c, "") for c in columns)]
+
+        sent = []
+        exp._post_json = lambda url, p: sent.append(p) or {"stats": {"ordenes_pago": {"ok": 0}}}
+        exp.write_batch("orden_pago", columns, rows)
+        assert sent == []
 
 
 # ─── tipo_factura lookup ──────────────────────────────────────────────────────

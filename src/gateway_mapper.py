@@ -9,6 +9,7 @@ _IVA_MAP = {
     "CF": 4,     # Consumidor final
     "NGAN": 5,   # No responsable
     "RNI": 6,    # Responsable no inscripto
+    "RNIS": 6,   # Responsable no inscripto
 }
 
 # Mapeo RAFAM JURISDICCION → Paxapos CentroCosto.id

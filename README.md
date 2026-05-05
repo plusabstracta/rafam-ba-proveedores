@@ -255,8 +255,9 @@ Notas de mapeo `orden_pago` -> `ordenes_pago`:
 - `retenciones`: si el origen tiene `RETENCIONES`, se mapean por `COD_RET`/`IMPORTE`; el tipo se resuelve desde `link_tipo_retencion`, lookup `tipos_retencion`, o alias (`ganancias`, `iva`, `iibb`, `suss`).
 - Requiere que los gastos (solic_gastos) estén importados previamente.
 - `identificador_pago`: formato `RAFAM-OP-{ejercicio}-{nro_op}` para upsert.
-- `fecha`: solo se envía si `ESTADO_OP=C` (confirmada/pagada).
-- Excluye OPs con `ESTADO_OP=A` (anuladas).
+- `estado`: se envía `3` solo para OPs con `ESTADO_OP=N`, `CONFIRMADO=S` y `FECH_CONFIRM` presente.
+- `fecha`: se envía desde `FECH_CONFIRM`.
+- Excluye OPs con `ESTADO_OP=A` (anuladas), `ESTADO_OP=C` (canceladas), no confirmadas o sin `FECH_CONFIRM`.
 - OPs sin gasto vinculado vía JOIN `NRO_CANCE=NRO_SOLIC` se omiten con warning.
 
 Comportamiento por entorno:

@@ -31,6 +31,14 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 
+_GROUPED_BATCH_FIELDS = {
+    "ped_items": ["EJERCICIO", "NUM_PED"],
+    "oc_items": ["EJERCICIO", "UNI_COMPRA", "NRO_OC"],
+    "orden_compra": ["EJERCICIO", "UNI_COMPRA", "NRO_OC"],
+    "orden_pago": ["EJERCICIO", "NRO_OP"],
+}
+
+
 def _build_engine() -> SyncEngine:
     return SyncEngine(CheckpointStore())
 
@@ -119,17 +127,9 @@ def _sync_entity(
         _warn_missing_cursor_fields(cfg, columns, entity)
 
         batch_count = 0
-        while True:
-            fetch_n = batch_size if limit is None else min(batch_size, limit - total)
-            if fetch_n <= 0:
-                break
 
-            raw_rows = result.fetchmany(fetch_n)
-            if not raw_rows:
-                break
-
-            batch = [tuple(row) for row in raw_rows]
-
+        def process_batch(batch: list[tuple]) -> None:
+            nonlocal last_id, last_ts, total, batch_count
             bid, bts = engine.extract_cursor_values(columns, batch, entity)
             if bid is not None:
                 last_id = max(last_id, bid) if last_id is not None else bid
@@ -143,8 +143,26 @@ def _sync_entity(
             total += len(batch)
             batch_count += 1
 
-            if limit is not None and total >= limit:
-                break
+        group_fields = _GROUPED_BATCH_FIELDS.get(entity)
+        if group_fields:
+            for batch in _iter_grouped_batches(result, columns, group_fields, batch_size):
+                if limit is not None and total >= limit:
+                    break
+                process_batch(batch)
+                if limit is not None and total >= limit:
+                    break
+        else:
+            while True:
+                fetch_n = batch_size if limit is None else min(batch_size, limit - total)
+                if fetch_n <= 0:
+                    break
+
+                raw_rows = result.fetchmany(fetch_n)
+                if not raw_rows:
+                    break
+
+                process_batch([tuple(row) for row in raw_rows])
+
 
         if dry_run:
             logger.info("[DRY RUN   ] %s — %d registros (sin avanzar checkpoint)", entity, total)
@@ -172,6 +190,50 @@ def _warn_missing_cursor_fields(cfg, columns: list[str], entity: str) -> None:
             "→ Actualiza ts_field en ENTITY_CONFIGS para habilitar modo incremental.",
             cfg.ts_field, entity, ", ".join(columns),
         )
+
+
+def _iter_grouped_batches(result, columns: list[str], group_fields: list[str], batch_size: int):
+    """Yield batches without splitting rows that share the same business key."""
+    col_idx = {name.upper(): i for i, name in enumerate(columns)}
+    group_indexes = [col_idx.get(field.upper()) for field in group_fields]
+    if any(index is None for index in group_indexes):
+        while True:
+            rows = result.fetchmany(batch_size)
+            if not rows:
+                break
+            yield [tuple(row) for row in rows]
+        return
+
+    pending: list[tuple] = []
+    current_group: list[tuple] = []
+    current_key = None
+
+    while True:
+        rows = result.fetchmany(batch_size)
+        if not rows:
+            break
+
+        for raw_row in rows:
+            row = tuple(raw_row)
+            key = tuple(row[index] for index in group_indexes if index is not None)
+            if current_group and key != current_key:
+                if pending and len(pending) + len(current_group) > batch_size:
+                    yield pending
+                    pending = []
+                pending.extend(current_group)
+                current_group = []
+
+            current_key = key
+            current_group.append(row)
+
+    if current_group:
+        if pending and len(pending) + len(current_group) > batch_size:
+            yield pending
+            pending = []
+        pending.extend(current_group)
+
+    if pending:
+        yield pending
 
 
 def cmd_run(args) -> None:

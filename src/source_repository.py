@@ -115,7 +115,16 @@ class SourceRepository:
                 )
             )
         )
-        return self._apply_incremental_filters(stmt, oc, cfg, checkpoint)
+        extra_filters = []
+        if not (cfg.full_load or checkpoint.is_fresh):
+            fech_anul_col = self._safe_column(oc, "FECH_ANUL")
+            estado_col = self._safe_column(oc, "ESTADO_OC")
+            if fech_anul_col is not None and estado_col is not None:
+                window_start = datetime.now(timezone.utc) - timedelta(days=cfg.pending_reprocess_days or 30)
+                extra_filters.append(and_(estado_col == "A", fech_anul_col > window_start))
+
+        stmt = self._apply_incremental_filters(stmt, oc, cfg, checkpoint, extra_filters=extra_filters)
+        return stmt.order_by(oc.c.EJERCICIO, oc.c.UNI_COMPRA, oc.c.NRO_OC, oc_items.c.ITEM_OC)
 
     def _build_ped_items_statement(
         self,
@@ -143,7 +152,8 @@ class SourceRepository:
                 )
             )
         )
-        return self._apply_incremental_filters(stmt, ped_items, cfg, checkpoint)
+        stmt = self._apply_incremental_filters(stmt, ped_items, cfg, checkpoint)
+        return stmt.order_by(ped_items.c.EJERCICIO, ped_items.c.NUM_PED, ped_items.c.ORDEN)
 
     def _build_oc_items_statement(
         self,
@@ -183,7 +193,8 @@ class SourceRepository:
                 )
             )
         )
-        return self._apply_incremental_filters(stmt, oc_items, cfg, checkpoint)
+        stmt = self._apply_incremental_filters(stmt, oc_items, cfg, checkpoint)
+        return stmt.order_by(oc_items.c.EJERCICIO, oc_items.c.UNI_COMPRA, oc_items.c.NRO_OC, oc_items.c.ITEM_OC)
 
     def _build_solic_gastos_statement(
         self,
@@ -193,6 +204,8 @@ class SourceRepository:
         solic_gastos = self._reflect_table("SOLIC_GASTOS")
         oc_items = self._reflect_table("OC_ITEMS")
         orden_compra = self._reflect_table("ORDEN_COMPRA")
+        reg_comp = self._reflect_optional_table("REG_COMP")
+        cta_comprob = self._reflect_optional_table("CTA_COMPROB")
 
         # Subquery: one COD_PROV per (EJERCICIO, DELEG_SOLIC, NRO_SOLIC)
         # via OC_ITEMS → ORDEN_COMPRA.  MIN() is a deterministic tie-breaker
@@ -222,23 +235,92 @@ class SourceRepository:
             .subquery("oc_prov")
         )
 
-        stmt = (
+        select_cols = [solic_gastos, oc_prov.c.OC_COD_PROV]
+        from_clause = solic_gastos.outerjoin(
+            oc_prov,
+            and_(
+                solic_gastos.c.EJERCICIO == oc_prov.c.EJERCICIO,
+                solic_gastos.c.DELEG_SOLIC == oc_prov.c.DELEG_SOLIC,
+                solic_gastos.c.NRO_SOLIC == oc_prov.c.NRO_SOLIC,
+            ),
+        )
+
+        comprobantes = self._build_solic_gastos_comprobantes_subquery(reg_comp, cta_comprob)
+        if comprobantes is not None:
+            select_cols.extend(
+                [
+                    comprobantes.c.CTA_NRO_COMPROB,
+                    comprobantes.c.CTA_TIPO_COMPROB,
+                    comprobantes.c.CTA_FECH_COMPROB,
+                    comprobantes.c.CTA_FECH_VENCIM,
+                    comprobantes.c.CTA_COMPROB_COUNT,
+                ]
+            )
+            from_clause = from_clause.outerjoin(
+                comprobantes,
+                and_(
+                    solic_gastos.c.EJERCICIO == comprobantes.c.EJERCICIO,
+                    solic_gastos.c.DELEG_SOLIC == comprobantes.c.DELEG_SOLIC,
+                    solic_gastos.c.NRO_SOLIC == comprobantes.c.NRO_SOLIC,
+                ),
+            )
+
+        stmt = select(*select_cols).select_from(from_clause)
+        stmt = self._apply_incremental_filters(stmt, solic_gastos, cfg, checkpoint)
+        return stmt.order_by(solic_gastos.c.EJERCICIO, solic_gastos.c.DELEG_SOLIC, solic_gastos.c.NRO_SOLIC)
+
+    def _build_solic_gastos_comprobantes_subquery(self, reg_comp, cta_comprob):
+        if reg_comp is None or cta_comprob is None:
+            return None
+
+        required_cols = {
+            "reg_ejercicio": self._safe_column(reg_comp, "EJERCICIO"),
+            "reg_nro_reg_comp": self._safe_column(reg_comp, "NRO_REG_COMP"),
+            "reg_deleg_solic": self._safe_column(reg_comp, "DELEG_SOLIC"),
+            "reg_nro_solic": self._safe_column(reg_comp, "NRO_SOLIC"),
+            "cta_ejercicio": self._safe_column(cta_comprob, "EJERCICIO"),
+            "cta_nro_reg_comp": self._safe_column(cta_comprob, "NRO_REG_COMP"),
+            "cta_tipo": self._safe_column(cta_comprob, "TIPO"),
+            "cta_nro_comprob": self._safe_column(cta_comprob, "NRO_COMPROB"),
+            "cta_fech_comprob": self._safe_column(cta_comprob, "FECH_COMPROB"),
+            "cta_fech_vencim": self._safe_column(cta_comprob, "FECH_VENCIM"),
+        }
+        if any(col is None for col in required_cols.values()):
+            return None
+
+        return (
             select(
-                solic_gastos,
-                oc_prov.c.OC_COD_PROV,
+                required_cols["reg_ejercicio"].label("EJERCICIO"),
+                required_cols["reg_deleg_solic"].label("DELEG_SOLIC"),
+                required_cols["reg_nro_solic"].label("NRO_SOLIC"),
+                func.min(required_cols["cta_nro_comprob"]).label("CTA_NRO_COMPROB"),
+                func.min(required_cols["cta_tipo"]).label("CTA_TIPO_COMPROB"),
+                func.min(required_cols["cta_fech_comprob"]).label("CTA_FECH_COMPROB"),
+                func.min(required_cols["cta_fech_vencim"]).label("CTA_FECH_VENCIM"),
+                func.count(required_cols["cta_nro_comprob"]).label("CTA_COMPROB_COUNT"),
             )
             .select_from(
-                solic_gastos.outerjoin(
-                    oc_prov,
+                reg_comp.join(
+                    cta_comprob,
                     and_(
-                        solic_gastos.c.EJERCICIO == oc_prov.c.EJERCICIO,
-                        solic_gastos.c.DELEG_SOLIC == oc_prov.c.DELEG_SOLIC,
-                        solic_gastos.c.NRO_SOLIC == oc_prov.c.NRO_SOLIC,
+                        required_cols["reg_ejercicio"] == required_cols["cta_ejercicio"],
+                        required_cols["reg_nro_reg_comp"] == required_cols["cta_nro_reg_comp"],
                     ),
                 )
             )
+            .where(
+                and_(
+                    required_cols["reg_deleg_solic"].is_not(None),
+                    required_cols["reg_nro_solic"].is_not(None),
+                )
+            )
+            .group_by(
+                required_cols["reg_ejercicio"],
+                required_cols["reg_deleg_solic"],
+                required_cols["reg_nro_solic"],
+            )
+            .subquery("sg_comprobantes")
         )
-        return self._apply_incremental_filters(stmt, solic_gastos, cfg, checkpoint)
 
     def _build_orden_pago_statement(
         self,
@@ -252,7 +334,7 @@ class SourceRepository:
         # CTA_HOJA_DE_RUTA: denormalized view linking OC→SG (and optionally PE).
         # In Oracle it's a pre-built VIEW; in SQLite dev it's a derived VIEW
         # created by load_csv_to_sqlite.py.  Required in both environments.
-        cta_hdr = self._reflect_table("CTA_HOJA_DE_RUTA")
+        cta_hdr = self._reflect_optional_table("CTA_HOJA_DE_RUTA")
 
         select_cols = [
             orden_pago,
@@ -271,25 +353,29 @@ class SourceRepository:
         # LEFT JOIN CTA_HOJA_DE_RUTA to resolve which OC/SG chain each OP belongs to.
         # The nexus is NRO_CANCE (= SG.NRO_SOLIC) which identifies the solicitud
         # being paid.  In Oracle the view is pre-built; in SQLite it's derived.
-        hdr_sg_nro_col = self._safe_column(cta_hdr, "SG_NRO")
-        hdr_sg_ej_col = self._safe_column(cta_hdr, "SG_EJERCICIO")
-        if hdr_sg_nro_col is not None and hdr_sg_ej_col is not None:
+        if cta_hdr is not None:
+            hdr_op_nro_col = self._safe_column(cta_hdr, "OP_NRO")
+            hdr_op_ej_col = self._safe_column(cta_hdr, "OP_EJERCICIO")
+        else:
+            hdr_op_nro_col = None
+            hdr_op_ej_col = None
+        if hdr_op_nro_col is not None and hdr_op_ej_col is not None:
             from_clause = from_clause.outerjoin(
                 cta_hdr,
                 and_(
-                    orden_pago.c.NRO_CANCE == hdr_sg_nro_col,
-                    orden_pago.c.EJERCICIO == hdr_sg_ej_col,
+                    orden_pago.c.NRO_OP == hdr_op_nro_col,
+                    orden_pago.c.EJERCICIO == hdr_op_ej_col,
                 ),
             )
         # Select SG columns from the view
         for col_name, label in [
             ("SG_NRO", "HDR_SG_NRO"),
-            ("SG_DELEG", "HDR_SG_DELEG"),
+            ("SG_DELEG_SOLIC", "HDR_SG_DELEG"),
             ("SG_EJERCICIO", "HDR_SG_EJERCICIO"),
-            ("OC_NRO_OC", "HDR_OC_NRO_OC"),
+            ("OC_NRO", "HDR_OC_NRO_OC"),
             ("OC_COD_PROV", "HDR_OC_COD_PROV"),
         ]:
-            col = self._safe_column(cta_hdr, col_name)
+            col = self._safe_column(cta_hdr, col_name) if cta_hdr is not None else None
             if col is not None:
                 select_cols.append(col.label(label))
 
@@ -321,9 +407,29 @@ class SourceRepository:
                         select_cols.append(ded_desc.label("RET_DESCRIPCION"))
 
         stmt = select(*select_cols).select_from(from_clause)
-        return self._apply_incremental_filters(stmt, orden_pago, cfg, checkpoint)
+        stmt = self._apply_incremental_filters(stmt, orden_pago, cfg, checkpoint)
+        base_filters = []
+        estado_col = self._safe_column(orden_pago, "ESTADO_OP")
+        confirmado_col = self._safe_column(orden_pago, "CONFIRMADO")
+        fech_confirm_col = self._safe_column(orden_pago, "FECH_CONFIRM")
+        if estado_col is not None:
+            base_filters.append(estado_col == "N")
+        if confirmado_col is not None:
+            base_filters.append(confirmado_col == "S")
+        if fech_confirm_col is not None:
+            base_filters.append(fech_confirm_col.is_not(None))
+        if base_filters:
+            stmt = stmt.where(and_(*base_filters))
+        return stmt.order_by(orden_pago.c.EJERCICIO, orden_pago.c.NRO_OP)
 
-    def _apply_incremental_filters(self, stmt: Select, table, cfg: EntityConfig, cp: Checkpoint) -> Select:
+    def _apply_incremental_filters(
+        self,
+        stmt: Select,
+        table,
+        cfg: EntityConfig,
+        cp: Checkpoint,
+        extra_filters: list | None = None,
+    ) -> Select:
         if cfg.full_load or cp.is_fresh:
             return stmt
 
@@ -349,6 +455,9 @@ class SourceRepository:
                 filters.append(
                     and_(state_col == cfg.pending_state_value, ts_col > window_start)
                 )
+
+        if extra_filters:
+            filters.extend(extra_filters)
 
         if filters:
             stmt = stmt.where(or_(*filters))

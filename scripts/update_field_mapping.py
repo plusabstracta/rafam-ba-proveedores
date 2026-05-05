@@ -174,10 +174,10 @@ PAXAPOS_MAPPINGS: dict[str, list[tuple[str, str, str, str]]] = {
         ("SG_NRO_SOLIC",        "ordenes_pago", "solic_gasto_id",         "lookup por clave compuesta (FK → SOLIC_GASTOS)"),
         ("RECO_DEU_COMPRA_EJER","ordenes_pago", "orden_compra_ejercicio", "parte de FK → ORDEN_COMPRA"),
         ("RECO_DEU_COMPRA",     "ordenes_pago", "orden_compra_id",        "lookup por clave compuesta (FK → ORDEN_COMPRA; confirmar UNI_COMPRA)"),
-        ("FECH_OP",             "ordenes_pago", "fecha",                  "ninguna"),
+        ("FECH_CONFIRM",        "ordenes_pago", "fecha",                  "solo si ESTADO_OP=N y CONFIRMADO=S"),
         ("IMPORTE_TOTAL",       "ordenes_pago", "importe",                "ninguna"),
         ("IMPORTE_LIQUIDO",     "ordenes_pago", "importe_liquido",        "ninguna"),
-        ("ESTADO_OP",           "ordenes_pago", "estado",                 "C→pagada, A→anulada, N→pendiente"),
+        ("ESTADO_OP",           "ordenes_pago", "estado",                 "N + CONFIRMADO=S + FECH_CONFIRM→pagada; A/C omitidas"),
     ],
 }
 

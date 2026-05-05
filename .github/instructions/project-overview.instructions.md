@@ -184,8 +184,8 @@ Se pueden enviar todas las entidades en un solo payload y el endpoint respeta el
 - Requiere mínimo 1 gasto resoluble — falla explícitamente si `gastoIds` está vacío.
 - `gasto_ids` (IDs numéricos) tiene prioridad. `gasto_external_ids` es fallback automático.
 - Feature flag: `Site.ordenes_de_pago` debe estar en `true` — si no, devuelve HTTP 400 inmediatamente.
-- Estados del Egreso: `0=Pendiente, 1=Aprobado, 2=Rechazado, 3=Pagado`. No existe "Anulado" — omitir OPs con `ESTADO_OP=A` del envío.
-- Si no se envía `estado`: con `fecha` → auto `PAGADO(3)`, sin `fecha` → auto `PENDIENTE(0)`.
+- Estados del Egreso: `0=Pendiente, 1=Aprobado, 2=Rechazado, 3=Pagado`. Enviar solo OPs RAFAM con `ESTADO_OP=N`, `CONFIRMADO=S` y `FECH_CONFIRM` presente como `estado=3`; omitir `ESTADO_OP=A`, `ESTADO_OP=C`, no confirmadas o sin fecha de confirmacion.
+- Si no se envía `estado`: con `fecha` → auto `PAGADO(3)`, sin `fecha` → auto `PENDIENTE(0)`. Para OPs confirmadas RAFAM, enviar `fecha=FECH_CONFIRM`.
 - `allowedFields` del save: `identificador_pago, fecha, tipo_de_pago_id, total, observacion, estado, fecha_programada, cuenta_bancaria_id, numero_operacion`. Notar que `proveedor_id` NO está.
 - Respuesta: `{success, id, mode: create|skip_existing, external_id, gasto_ids}`.
 
@@ -202,17 +202,15 @@ OC (compras_pedidos.gasto_id) ──HABTM──► Gasto ◄──HABTM (account
 #### Cadena de vínculos en RAFAM (fuente)
 
 ```
-OC_ITEMS ──(DELEG_SOLIC, NRO_SOLIC)──► SOLIC_GASTOS ◄──(SG_DELEG_SOLIC, SG_NRO_SOLIC)── ORDEN_PAGO
-                                              ▲
-                         ORDEN_PAGO.RECO_DEU_COMPRA ──► ORDEN_COMPRA.NRO_OC (nexo OP↔OC)
+OC_ITEMS ──(DELEG_SOLIC, NRO_SOLIC)──► SOLIC_GASTOS ◄── ORDEN_PAGO.NRO_CANCE
 ```
 
 El Gasto (SOLIC_GASTOS) es el puente entre OC y OP. Tres niveles de resolución:
-1. SG directo (SG_DELEG_SOLIC + SG_NRO_SOLIC) — ~5%
-2. CTA_HOJA_DE_RUTA JOIN (solo Oracle) — vista desnormalizada PE→SG→OC→OP
-3. RECO_DEU_COMPRA → OC link_store → gasto_refs — ~85%, funciona Oracle + SQLite
+1. SG directo: `ORDEN_PAGO.NRO_CANCE -> SOLIC_GASTOS.NRO_SOLIC` con mismo `EJERCICIO` — 92,71% en evidencia 2024+.
+2. CTA_HOJA_DE_RUTA JOIN — vista desnormalizada PE→SG→OC→OP con nombres reales (`OP_NRO`, `SG_DELEG_SOLIC`, `OC_NRO`).
+3. RECO_DEU_COMPRA → OC link_store → gasto_refs — fallback residual; en evidencia 2024+ vino 100% vacío.
 
-> `NRO_CANCE` NO es el nexo OP↔OC; es para RETENCIONES.
+> `NRO_CANCE` no es nexo OP↔OC; en esta evidencia sirve como camino OP→SOLIC_GASTOS. Para retenciones se usa `RETENCIONES.EJERCICIO + NRO_CANCE`.
 
 #### Colisión de columnas en JOINs
 
@@ -232,9 +230,9 @@ Cada entidad tiene una tabla `link_<entity>` en SQLite con columnas base (`sourc
 | `clasificacion` | — | `json({"jurisdiccion": "..."}`) |
 | `rubro` | — | `json({"jurisdiccion": "..."})` |
 | `pedido` | — | `json({"ejercicio": N, "num_ped": N})` |
-| `orden_compra` | `fech_confirm`, `estado_oc`, `cod_prov`, `importe_tot` | `json({"ejercicio": N, "nro_oc": N, "uni_compra": N})` |
+| `orden_compra` | `fech_confirm`, `estado_oc`, `cod_prov`, `importe_tot`, `gasto_refs`, `gasto_linked_refs` | `json({"ejercicio": N, "nro_oc": N, "uni_compra": N})` |
 | `gasto` | `estado_solic`, `importe_tot`, `cod_prov` | `json({"rafam_ref": "SG-ej-deleg-nro"})` |
-| `orden_pago` | `estado_op`, `importe_total` | `json({"ejercicio": N, "nro_op": N})` |
+| `orden_pago` | `estado_op`, `confirmado`, `fech_confirm`, `importe_total` | `json({"ejercicio": N, "nro_op": N})` |
 
 Los extras permiten detectar cambios de estado entre corridas (ej: `estado_oc` guardado vs actual).
 

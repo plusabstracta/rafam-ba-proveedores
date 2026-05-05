@@ -17,9 +17,9 @@ DEFAULT_LINK_SCHEMAS: dict[str, list[str]] = {
     "tipo_pago": ["name", "codigo"],
     "tipo_retencion": ["name", "codigo"],
     "pedido": [],
-    "orden_compra": ["fech_confirm", "estado_oc", "cod_prov", "importe_tot", "gasto_refs"],
+    "orden_compra": ["fech_confirm", "estado_oc", "cod_prov", "importe_tot", "gasto_refs", "gasto_linked_refs"],
     "gasto": ["estado_solic", "importe_tot", "cod_prov"],
-    "orden_pago": ["estado_op", "importe_total"],
+    "orden_pago": ["estado_op", "confirmado", "fech_confirm", "importe_total"],
 }
 
 

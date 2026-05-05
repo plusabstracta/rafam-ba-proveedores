@@ -81,7 +81,7 @@ Fuente: `src/config.py` y reporte Oracle.
 | `orden_compra` | `ORDEN_COMPRA` | `FECH_OC` | no | `ESTADO_OC = N`, 30 dias |
 | `oc_items` | `OC_ITEMS` | ninguno | si | no |
 | `solic_gastos` | `SOLIC_GASTOS` | `FECH_SOLIC` | no | `ESTADO_SOLIC = C`, 30 dias |
-| `orden_pago` | `ORDEN_PAGO` | `FECH_OP` | no | `ESTADO_OP = N`, 30 dias |
+| `orden_pago` | `ORDEN_PAGO` | `FECH_CONFIRM` | no | `ESTADO_OP = N`, `CONFIRMADO = S`, 30 dias |
 
 Estado real del migrator actual:
 
@@ -209,7 +209,8 @@ Estado operativo:
 
 - Sirve para auditoria y para explicar el circuito completo.
 - No debe ser unica fuente para factura si se puede usar `REG_COMP -> CTA_COMPROB` directo.
-- El script actual intenta usarla para enriquecer OP con `HDR_*`, pero las metricas del generador quedaron `skipped`; antes de depender de ella hay que ajustar y medir los joins con los nombres reales (`OP_NRO`, `SG_DELEG_SOLIC`, etc.).
+- Para OP, el join operativo debe usar los nombres reales `OP_EJERCICIO + OP_NRO`; no usar nombres viejos/inventados como `OP_NRO_OP`, `SG_DELEG` u `OC_NRO_OC`.
+- La SQLite dev se carga desde los CSV de `output/rafam_ultimos_3_meses`. El CSV real `cta_hoja_de_ruta_*.csv` trae columnas reales (`SG_DELEG_SOLIC`, `OC_NRO`, `OP_NRO`). El loader local debe preservar esa tabla CSV; solo puede crear una vista derivada si el CSV no existe.
 
 ## Dominios verificados
 
@@ -230,11 +231,27 @@ Estados y codigos en `EJERCICIO >= 2024`:
 | `PROVEEDORES.COD_IVA` | `MONOT=1751`, `RINS=1696`, `EXEN=830`, `M.SOC=50`, `RNIS=10`, `NGAN=3`, `CF=1` |
 | `PROVEEDORES.COD_ESTADO` | `0=4313`, `2=27`, `1=1` |
 
-No asumir significado funcional completo de cada letra si no esta confirmado por RAFAM o Paxapos. Para el script actual, las reglas implementadas son:
+Significado funcional confirmado hasta ahora:
+
+| Tabla | Campo | Valores | Significado conocido |
+| --- | --- | --- | --- |
+| `PEDIDOS` | `PED_ESTADO` | `G`, `N` | `N=normal`; `G` pendiente de confirmar. |
+| `ORDEN_COMPRA` | `ESTADO_OC` | `R`, `A`, `N` | `R=registrado`, `A=anulado`, `N=normal`. |
+| `SOLIC_GASTOS` | `ESTADO_SOLIC` | `C`, `N`, `A` | `C=cancelado`, `N=normal`, `A=anulado`. |
+| `SOLIC_GASTOS` | `TIPO_REGIS` | `S`, `A`, `M` | `A=anulado`; `S` y `M` pendientes de confirmar. |
+| `REG_COMP` | `ESTADO_REG_COMP` | `D`, `N`, `A` | `D=devengado`, `N=normal`, `A=anulado`. |
+| `REG_COMP` | `TIPO_REGIS` | `R`, `A`, `D`, `C` | `R=registrado`, `A=anulado`, `D=devengado`, `C=cancelado`. |
+| `DEDUCCIONES` | `TIPO_DEDUC` | `I`, `O` | `I` y `O` pendientes de confirmar. |
+| `ORDEN_PAGO` | `ESTADO_OP` | `C`, `A`, `N` | `C=cancelado`, `A=anulado`, `N=normal`. Solo `N` confirmado (`CONFIRMADO=S` y `FECH_CONFIRM`) se envia a Paxapos. |
+| `ORDEN_PAGO` | `TIPO_OP` | `N`, `P` | `N=normal`, `P=pagado`. |
+
+Pendientes de confirmar en campos de estado/tipo: `S`, `G`, `I`, `O` y `M`. No aplicar esa regla a campos `CONFIRMADO`, donde `S` significa confirmado.
+
+Para el script actual, las reglas implementadas son:
 
 - `ORDEN_COMPRA`: se envia a Paxapos cuando `ESTADO_OC = R`; si pasa a `A` y ya tenia link remoto, se anula como `estado_aprobacion=4`.
 - `SOLIC_GASTOS`: se omite si `ESTADO_SOLIC = A`.
-- `ORDEN_PAGO`: se omite si `ESTADO_OP = A`; si `ESTADO_OP = C`, se envia como pagada (`estado=3`); si no, pendiente (`estado=0`).
+- `ORDEN_PAGO`: se envia solo si `ESTADO_OP = N`, `CONFIRMADO = S` y `FECH_CONFIRM` existe. Se crea en Paxapos con `fecha=FECH_CONFIRM` y `estado=3`. `A`, `C`, no confirmadas o sin fecha de confirmacion se omiten.
 
 ## Calidad de datos verificada
 
@@ -349,7 +366,7 @@ Campos enviados por `map_proveedor_migrator_row`:
 | `Proveedor.codigo_postal` | `COD_LEGAL`, fallback `COD_POSTAL` | primer no vacio. |
 | `Proveedor.cuit` | `CUIT` | solo si normaliza a 11 digitos. |
 | `Proveedor.tipo_documento_id` | `CUIT` | `1` si hay CUIT valido. |
-| `Proveedor.iva_condicion_id` | `COD_IVA` | `RINS=1`, `MONOT=2`, `EXEN=3`, `CF=4`, `NGAN=5`, `RNI=6`. |
+| `Proveedor.iva_condicion_id` | `COD_IVA` | `RINS=1`, `MONOT=2`, `EXEN=3`, `CF=4`, `NGAN=5`, `RNI/RNIS=6`. |
 
 ### Pedidos y ped_items
 
@@ -389,7 +406,7 @@ Item enviado:
 | `precio` | `OC_ITEMS.IMP_UNITARIO` | redondeado a 2 decimales. |
 | `recibida_cantidad` | `OC_ITEMS.CANT_RECIB` | si existe. |
 | `name` | `OC_ITEMS.DESCRIPCION` | max 255; alimenta autocreacion de mercaderia. |
-| `unidad_de_medida_id` | lookup/default | resolver por links/lookups/default, no asumir ID global. |
+| `unidad_de_medida_id` | decision tenant Paxapos | fijo `5`, porque en Paxapos la unidad requerida para todos los items OC es `Unidad`. |
 | `rubro_id` | `SG_JURISDICCION` | resuelto por link de rubro. |
 
 Estados OC:
@@ -411,10 +428,10 @@ Campos actuales:
 | `Gasto.importe_total` | `IMPORTE_TOT` | round 2. |
 | `Gasto.importe_neto` | `IMPORTE_TOT` | igual al total. |
 | `Gasto.punto_de_venta` | fijo | `RAFAM`. |
-| `Gasto.tipo_factura_id` | `TIPO_DOC` | lookup/default. |
-| `Gasto.factura_nro` | `NRO_DOC` | zfill(8) si existe. |
+| `Gasto.tipo_factura_id` | `CTA_COMPROB.TIPO`, fallback `TIPO_DOC` | lookup/default. |
+| `Gasto.factura_nro` | `CTA_COMPROB.NRO_COMPROB` | obligatorio para enviar gasto; no usar `SOLIC_GASTOS.NRO_DOC` como fuente fiscal. |
 | `Gasto.clasificacion_id` | `JURISDICCION` | link clasificacion. |
-| `Gasto.fecha_vencimiento` | `FECH_NECESIDAD`, fallback `FECH_ENTREGA` | si existe. |
+| `Gasto.fecha_vencimiento` | `CTA_COMPROB.FECH_VENCIM`, fallback `FECH_NECESIDAD`, fallback `FECH_ENTREGA` | si existe. |
 | `Gasto.proveedor_id` | `OC_COD_PROV` | link proveedor. |
 | `Gasto.observacion` | `OBSERVACIONES` | max 255. |
 
@@ -422,12 +439,13 @@ Reglas actuales:
 
 - `ESTADO_SOLIC = A` se omite.
 - Solo se envian gastos cuya ref `SG-{ejercicio}-{deleg_solic}-{nro_solic}` ya este vinculada a una OC enviada.
+- Solo se envian gastos con un unico comprobante fiscal resuelto por `REG_COMP -> CTA_COMPROB`. Si no hay comprobante o hay multiples comprobantes para la misma SG, se omiten hasta definir politica de negocio.
 
-Correccion pendiente por evidencia Oracle:
+Correccion aplicada por evidencia Oracle:
 
-- `factura_nro` no debe cerrarse con `SOLIC_GASTOS.NRO_DOC` como verdad final.
+- `factura_nro` ya no sale de `SOLIC_GASTOS.NRO_DOC`.
 - La fuente real de numero fiscal es `CTA_COMPROB.NRO_COMPROB`.
-- Falta implementar el join hacia `REG_COMP -> CTA_COMPROB` y resolver multiples comprobantes por `REG_COMP`.
+- Queda pendiente resolver multiples comprobantes por `REG_COMP` y los casos sin `CTA_COMPROB`.
 
 ### Ordenes de pago
 
@@ -441,8 +459,8 @@ Campos enviados:
 | `Egreso.identificador_pago` | `EJERCICIO, NRO_OP` | `RAFAM-OP-{ejercicio}-{nro_op}`. |
 | `Egreso.total` | `IMPORTE_TOTAL` | round 2; fallback 0 si invalido. |
 | `Egreso.tipo_de_pago_id` | env/default | `PAXAPOS_RAFAM_DEFAULT_TIPO_PAGO_ID`, default `1`. |
-| `Egreso.estado` | `ESTADO_OP` | `3` si `C`, si no `0`; `A` se omite. |
-| `Egreso.fecha` | `FECH_CONFIRM`, fallback `FECH_OP` | solo si `ESTADO_OP = C`. |
+| `Egreso.estado` | `ESTADO_OP`, `CONFIRMADO` | `3` solo si `ESTADO_OP = N`, `CONFIRMADO = S` y `FECH_CONFIRM` existe; `A` y `C` se omiten. |
+| `Egreso.fecha` | `FECH_CONFIRM` | obligatoria para enviar la OP; Paxapos la usa como fecha del egreso y confirma `estado=3`. |
 | `Egreso.observacion` | `CONCEPTO`, fallback `OBSERVACIONES` | max 255. |
 | `gasto_ids` | links locales de gastos | obligatorio para enviar la OP. |
 | `gasto_external_ids` | refs SG | fallback para migrator. |
@@ -482,9 +500,9 @@ SQLite local con tablas `link_*`.
 | `link_tipo_pago` | `name`, `codigo` | Overrides de tipos de pago. |
 | `link_tipo_retencion` | `name`, `codigo` | Overrides de tipos de retencion. |
 | `link_pedido` | ninguno | Pedidos si se reactiva envio. |
-| `link_orden_compra` | `fech_confirm`, `estado_oc`, `cod_prov`, `importe_tot`, `gasto_refs` | Estado OC y vinculo OC -> gastos. |
+| `link_orden_compra` | `fech_confirm`, `estado_oc`, `cod_prov`, `importe_tot`, `gasto_refs`, `gasto_linked_refs` | Estado OC, refs SG conocidas y refs SG ya enviadas como `gasto_ids` para no reenviar la misma OC indefinidamente. |
 | `link_gasto` | `estado_solic`, `importe_tot`, `cod_prov` | Resolver OP -> gastos. |
-| `link_orden_pago` | `estado_op`, `importe_total` | Control de OPs enviadas. |
+| `link_orden_pago` | `estado_op`, `confirmado`, `fech_confirm`, `importe_total` | Control de OPs enviadas. |
 
 ## Variables de entorno canonicas
 
@@ -561,7 +579,7 @@ make run-orden_pago-migrator-dry LIMIT=50 BATCH=50
 
 Estos puntos requieren nueva consulta, decision del usuario o cambio de codigo. No son supuestos.
 
-1. Implementar en el script la lectura de comprobantes reales: `REG_COMP -> CTA_COMPROB`.
+1. Validar en Oracle/Paxapos la lectura implementada de comprobantes reales: `REG_COMP -> CTA_COMPROB`.
 2. Definir como representar en Paxapos los `REG_COMP` con multiples `CTA_COMPROB`.
 3. Definir que hacer con `REG_COMP` sin `CTA_COMPROB` (18,35% en periodo 2024+).
 4. Medir una estrategia correcta para `CTA_HOJA_DE_RUTA` con los nombres reales de columnas (`OP_NRO`, `SG_DELEG_SOLIC`, etc.).
@@ -569,7 +587,7 @@ Estos puntos requieren nueva consulta, decision del usuario o cambio de codigo. 
 6. Confirmar IDs default del tenant Paxapos con `make migrator-lookups` antes de una importacion real.
 7. Definir politica de importes con overflow `DECIMAL(10,2)` y negativos.
 8. Confirmar significado funcional de `REG_COMP.ESTADO_REG_COMP` (`D`, `N`, `A`) antes de usarlo para filtros de envio.
-9. Reconciliar el mapeo actual de `Gasto.factura_nro` con la evidencia real de `CTA_COMPROB.NRO_COMPROB`.
+9. Definir politica de checkpoints para registros omitidos por dependencias faltantes: hoy no deben considerarse enviados aunque el batch fuente haya sido procesado.
 
 ## Documentos eliminados
 

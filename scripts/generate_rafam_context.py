@@ -54,7 +54,7 @@ DATE_COLUMNS = {
     "ORDEN_PAGO": ["FECH_OP", "FECH_CONFIRM", "FECH_ANUL"],
     "REG_COMP": ["FECH_REG_COMP", "FECH_CONFIRM", "FECH_ANUL"],
     "CTA_COMPROB": ["FECH_COMPROB", "FECH_MOVIM", "FECH_VENCIM"],
-    "CTA_HOJA_DE_RUTA": ["FECH_HOJA"],
+    "CTA_HOJA_DE_RUTA": ["OP_FECH", "SG_FECH", "PE_FECH"],
     "RETENCIONES": ["FECH_RETEN"],
     "DEDUCCIONES": ["FECH_DEDUC"],
     "RG_COMP": ["FECH_COMP", "FECH_REG_COMP"],
@@ -427,7 +427,7 @@ OP_RESOLUTION_SPECS = [
             "{op} op LEFT JOIN {hdr} hdr ON op.EJERCICIO = hdr.SG_EJERCICIO "
             "AND op.NRO_CANCE = hdr.SG_NRO"
         ),
-        right_key_expr="hdr.SG_EJERCICIO || '-' || hdr.SG_DELEG || '-' || hdr.SG_NRO",
+        right_key_expr="hdr.SG_EJERCICIO || '-' || hdr.SG_DELEG_SOLIC || '-' || hdr.SG_NRO",
         right_present_expr="hdr.SG_NRO",
         required_columns=(
             ("ORDEN_PAGO", "EJERCICIO"),
@@ -435,22 +435,23 @@ OP_RESOLUTION_SPECS = [
             ("ORDEN_PAGO", "NRO_CANCE"),
             ("CTA_HOJA_DE_RUTA", "SG_EJERCICIO"),
             ("CTA_HOJA_DE_RUTA", "SG_NRO"),
-            ("CTA_HOJA_DE_RUTA", "SG_DELEG"),
+            ("CTA_HOJA_DE_RUTA", "SG_DELEG_SOLIC"),
         ),
     ),
     OpResolutionSpec(
         name="cta_hoja_ruta_by_op_nro",
-        description="ORDEN_PAGO.NRO_OP contra CTA_HOJA_DE_RUTA.OP_NRO_OP cuando la vista lo expone.",
-        from_clause="{op} op LEFT JOIN {hdr} hdr ON op.NRO_OP = hdr.OP_NRO_OP",
-        right_key_expr="hdr.SG_EJERCICIO || '-' || hdr.SG_DELEG || '-' || hdr.SG_NRO",
-        right_present_expr="hdr.OP_NRO_OP",
+        description="ORDEN_PAGO.EJERCICIO + NRO_OP contra CTA_HOJA_DE_RUTA.OP_EJERCICIO + OP_NRO.",
+        from_clause="{op} op LEFT JOIN {hdr} hdr ON op.EJERCICIO = hdr.OP_EJERCICIO AND op.NRO_OP = hdr.OP_NRO",
+        right_key_expr="hdr.SG_EJERCICIO || '-' || hdr.SG_DELEG_SOLIC || '-' || hdr.SG_NRO",
+        right_present_expr="hdr.OP_NRO",
         required_columns=(
             ("ORDEN_PAGO", "EJERCICIO"),
             ("ORDEN_PAGO", "NRO_OP"),
-            ("CTA_HOJA_DE_RUTA", "OP_NRO_OP"),
+            ("CTA_HOJA_DE_RUTA", "OP_EJERCICIO"),
+            ("CTA_HOJA_DE_RUTA", "OP_NRO"),
             ("CTA_HOJA_DE_RUTA", "SG_EJERCICIO"),
             ("CTA_HOJA_DE_RUTA", "SG_NRO"),
-            ("CTA_HOJA_DE_RUTA", "SG_DELEG"),
+            ("CTA_HOJA_DE_RUTA", "SG_DELEG_SOLIC"),
         ),
     ),
 ]

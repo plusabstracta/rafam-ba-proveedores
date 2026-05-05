@@ -79,20 +79,46 @@ _SCHEMA_COLUMNS: dict[str, list[str]] = {
     ],
     # Auxiliary tables used as JOIN sources (not synced as entities)
     "CTA_HOJA_DE_RUTA": [
-        "PE_EJERCICIO", "PE_NRO", "SG_EJERCICIO", "SG_NRO", "SG_DELEG",
-        "OC_EJERCICIO", "OC_NRO_OC", "OC_COD_PROV", "OP_NRO_OP", "ESTADO_OP",
-        "OP_NRO_CANCE", "PE_JURISDICCION", "FECH_HOJA",
+        "USUARIO", "PE_EJERCICIO", "PE_NRO", "PE_FECH", "PE_CODIGO_DEP",
+        "PE_CODIGO_UE", "PE_JURISDICCION", "PE_ESTADO", "PE_COSTO_TOTAL",
+        "SG_EJERCICIO", "SG_DELEG_SOLIC", "SG_NRO", "SG_NRO_PED", "SG_JURISDICCION",
+        "SG_CODIGO_UE", "SG_CODIGO_DEP", "SG_FECH", "SG_TIPO_REGIS", "SG_CODIGO_FF",
+        "SG_IMPORTE", "SG_ESTADO", "SG_CONFIRMADO", "OC_EJERCICIO", "OC_UNI_COMPRA",
+        "OC_NRO", "OC_NRO_ADJUD", "OC_FECH", "OC_COD_PROV", "OC_ESTADO",
+        "OC_CONFIRMADO", "OC_IMPORTE", "RC_EJERCICIO", "RC_NRO", "RC_FECH",
+        "RC_JURISDICCION", "RC_COD_PROV", "RC_TIPO_REGIS", "RC_NRO_ORIG",
+        "RC_CODIGO_FF", "RC_UNI_COMPRA", "RC_NRO_OC", "RC_DELEG_SOLIC", "RC_NRO_SOLIC",
+        "RC_IMPORTE", "RC_ESTADO", "RC_CONFIRMADO", "RC_DEPENDENCIA", "RD_EJERCICIO",
+        "RD_NRO", "RD_FECH", "RD_NRO_REG_COMP", "RD_JURISDICCION", "RD_COD_PROV",
+        "RD_CODIGO_FF", "RD_IMPORTE", "RD_ESTADO", "RD_CONFIRMADO", "CC_TIPO_COMPROB",
+        "CC_NRO", "CC_COD_PROV", "CC_NRO_REG_COMP", "CC_FECH_MOVIM", "CC_FECH_COMPROB",
+        "CC_IMPORTE", "CC_IMPORTE_PAG", "OP_EJERCICIO", "OP_NRO", "OP_FECH",
+        "OP_CODIGO_FF", "OP_JURISDICCION", "OP_CODIGO_UE", "OP_COD_PROV", "OP_TIPO",
+        "OP_ESTADO", "OP_NRO_CANCE", "OP_CONFIRMADO", "OP_IMPORTE", "OP_IMPORTE_LIQUIDO",
     ],
-    "RG_COMP": [
-        "EJERCICIO", "NRO_REG_COMP", "NRO_OC", "COD_PROV", "JURISDICCION",
-        "FECH_REG_COMP",
+    "REG_COMP": [
+        "EJERCICIO", "NRO_REG_COMP", "FECH_REG_COMP", "LUG_EMI", "JURISDICCION",
+        "CODIGO_UE", "COD_PROV", "TIPO_REGIS", "NRO_ORIG", "CODIGO_FF",
+        "UNI_COMPRA", "NRO_OC", "DELEG_SOLIC", "NRO_SOLIC", "TIPO_DOC", "NRO_DOC",
+        "ANIO_DOC", "IMPORTE_TOT", "ESTADO_REG_COMP", "CONFIRMADO", "FECH_CONFIRM",
+        "FECH_ANUL", "MOTIVO_ANUL", "CANT_IMPRES", "CONCEPTO", "FECH_RELOJ",
+        "DEUDA", "DEPENDENCIA", "INSISTIDO", "RC_DIFERIDO", "EJERCICIO_ANT",
+        "NRO_REG_COMP_ANT", "RC_EJERCICIO_ANT",
+    ],
+    "CTA_COMPROB": [
+        "EJERCICIO", "TIPO", "NRO_COMPROB", "COD_PROV", "NRO_REG_COMP",
+        "FECH_MOVIM", "FECH_COMPROB", "FECH_VENCIM", "FECH_CONFORMAC",
+        "PORC_BONIF", "FECH_BONIF", "IMPORTE_COMPR", "IMPORTE_PAGADO",
+        "RINDE_IVA", "PORC_IVA", "PORC_CRED_FISCAL", "LIST_LIBRO_IVA",
+        "FECH_LIST_IVA", "COD_PROV_REAL", "RAZON_SOCIAL", "CUIT", "DETALLE",
+        "IMPORTE_SIN_IVA",
     ],
 }
 
 
 def _latest_csv_by_entity(csv_dir: Path) -> dict[str, Path]:
     latest: dict[str, Path] = {}
-    for path in csv_dir.glob("*.csv"):
+    for path in csv_dir.rglob("*.csv"):
         match = _SNAPSHOT_RE.match(path.stem)
         if match is None:
             continue
@@ -106,23 +132,31 @@ def _latest_csv_by_entity(csv_dir: Path) -> dict[str, Path]:
 _CTA_HOJA_DE_RUTA_VIEW_SQL = """\
 CREATE VIEW IF NOT EXISTS CTA_HOJA_DE_RUTA AS
 SELECT DISTINCT
-    sg.EJERCICIO    AS SG_EJERCICIO,
-    sg.NRO_SOLIC    AS SG_NRO,
-    sg.DELEG_SOLIC  AS SG_DELEG,
-    oc.EJERCICIO    AS OC_EJERCICIO,
-    oc.NRO_OC       AS OC_NRO_OC,
-    oc.COD_PROV     AS OC_COD_PROV,
-    pe.EJERCICIO    AS PE_EJERCICIO,
-    pe.NUM_PED      AS PE_NRO,
-    pe.JURISDICCION AS PE_JURISDICCION,
-    oc.FECH_CONFIRM AS FECH_HOJA
-FROM OC_ITEMS oci
-JOIN SOLIC_GASTOS sg
-  ON sg.EJERCICIO = oci.EJERCICIO
- AND sg.DELEG_SOLIC = oci.DELEG_SOLIC
- AND sg.NRO_SOLIC = oci.NRO_SOLIC
-JOIN ORDEN_COMPRA oc
-  ON oc.EJERCICIO = oci.EJERCICIO
+        sg.EJERCICIO    AS SG_EJERCICIO,
+        sg.DELEG_SOLIC  AS SG_DELEG_SOLIC,
+        sg.NRO_SOLIC    AS SG_NRO,
+        sg.JURISDICCION AS SG_JURISDICCION,
+        oc.EJERCICIO    AS OC_EJERCICIO,
+        oc.UNI_COMPRA   AS OC_UNI_COMPRA,
+        oc.NRO_OC       AS OC_NRO,
+        oc.COD_PROV     AS OC_COD_PROV,
+        op.EJERCICIO    AS OP_EJERCICIO,
+        op.NRO_OP       AS OP_NRO,
+        op.NRO_CANCE    AS OP_NRO_CANCE,
+        op.ESTADO_OP    AS OP_ESTADO,
+        pe.EJERCICIO    AS PE_EJERCICIO,
+        pe.NUM_PED      AS PE_NRO,
+        pe.JURISDICCION AS PE_JURISDICCION
+FROM ORDEN_PAGO op
+LEFT JOIN SOLIC_GASTOS sg
+    ON sg.EJERCICIO = op.EJERCICIO
+ AND sg.NRO_SOLIC = op.NRO_CANCE
+LEFT JOIN OC_ITEMS oci
+    ON oci.EJERCICIO = sg.EJERCICIO
+ AND oci.DELEG_SOLIC = sg.DELEG_SOLIC
+ AND oci.NRO_SOLIC = sg.NRO_SOLIC
+LEFT JOIN ORDEN_COMPRA oc
+    ON oc.EJERCICIO = oci.EJERCICIO
  AND oc.UNI_COMPRA = oci.UNI_COMPRA
  AND oc.NRO_OC = oci.NRO_OC
 LEFT JOIN PEDIDOS pe
@@ -138,8 +172,10 @@ def _ensure_cta_hoja_de_ruta_view(conn) -> None:
         text("SELECT type FROM sqlite_master WHERE name = 'CTA_HOJA_DE_RUTA'")
     ).scalar()
     if existing == "table":
-        conn.execute(text("DROP TABLE CTA_HOJA_DE_RUTA"))
-    elif existing == "view":
+        count = conn.execute(text("SELECT COUNT(*) FROM CTA_HOJA_DE_RUTA")).scalar()
+        print(f"[CTA_HOJA_DE_RUTA] tabla CSV preservada ({count} filas)")
+        return
+    if existing == "view":
         conn.execute(text("DROP VIEW CTA_HOJA_DE_RUTA"))
     conn.execute(text(_CTA_HOJA_DE_RUTA_VIEW_SQL))
     count = conn.execute(text("SELECT COUNT(*) FROM CTA_HOJA_DE_RUTA")).scalar()

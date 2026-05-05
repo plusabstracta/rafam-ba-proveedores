@@ -56,9 +56,9 @@ ENTITY_CONFIGS: dict[str, EntityConfig] = {
     "orden_pago": EntityConfig(
         name="orden_pago",
         table_name="ORDEN_PAGO",
-        ts_field="FECH_OP",
-        # Re-process pending payments from recent days in case their
-        # state changed from N→C or N→A after they were first synced.
+        ts_field="FECH_CONFIRM",
+        # Re-process confirmed normal payments from recent days in case their
+        # linked gastos became available after the first attempt.
         pending_state_field="ESTADO_OP",
         pending_state_value="N",
         pending_reprocess_days=30,
