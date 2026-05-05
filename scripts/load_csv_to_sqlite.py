@@ -17,7 +17,8 @@ from sqlalchemy import Column, MetaData, Table, Text, create_engine
 
 _SNAPSHOT_RE = re.compile(r"^(?P<entity>.+)_\d{8}_\d{6}$")
 
-# Real Oracle schema columns per table (from docs/rafam_schema.md).
+# Real Oracle schema columns per table. Canonical docs live in
+# docs/rafam_paxapos_source_of_truth.md.
 # CSVs exported from JOIN queries have extra columns that must be stripped
 # so that source_repository.py JOINs work correctly on SQLite.
 _SCHEMA_COLUMNS: dict[str, list[str]] = {

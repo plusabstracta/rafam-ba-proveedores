@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""update_field_mapping.py — Regenera docs/field_mapping.md desde el esquema real.
+"""update_field_mapping.py — Genera un dump legacy de mapeo de campos.
+
+La documentacion canonica vive en docs/rafam_paxapos_source_of_truth.md.
 
 Combina las columnas reales leídas desde la base de datos con el mapeo
 RAFAM→Paxapos definido en PAXAPOS_MAPPINGS (fuente de verdad en este script).
@@ -33,8 +35,8 @@ from sqlalchemy.engine import Engine
 REPO_ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(REPO_ROOT / ".env")
 
-DOCS_DIR = REPO_ROOT / "docs"
-OUTPUT_MD = DOCS_DIR / "field_mapping.md"
+OUTPUT_DIR = REPO_ROOT / "output" / "rafam_context"
+OUTPUT_MD = OUTPUT_DIR / "legacy_field_mapping.md"
 SCHEMA = "OWNER_RAFAM"
 
 
@@ -921,12 +923,12 @@ def _build_sample_data_section(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Regenera docs/field_mapping.md desde el esquema real de la DB"
+        description="Genera output/rafam_context/legacy_field_mapping.md desde el esquema real de la DB"
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Imprimir en stdout en vez de escribir docs/field_mapping.md",
+        help="Imprimir en stdout en vez de escribir output/rafam_context/legacy_field_mapping.md",
     )
     parser.add_argument(
         "--db",
@@ -979,7 +981,7 @@ def main() -> None:
         print("\n" + "-" * 60 + "\n")
         print(md)
     else:
-        DOCS_DIR.mkdir(parents=True, exist_ok=True)
+        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         OUTPUT_MD.write_text(md, encoding="utf-8")
         print(f"[OK] Escrito -> {OUTPUT_MD}")
 

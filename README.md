@@ -3,6 +3,10 @@
 Sincronizador incremental de RAFAM (Oracle) hacia Paxapos, con ejecución por entidad,
 checkpoints persistentes y modo de desarrollo offline usando snapshots CSV.
 
+## Documentacion canonica
+
+La fuente de verdad del proyecto es [docs/rafam_paxapos_source_of_truth.md](docs/rafam_paxapos_source_of_truth.md). Ese archivo consolida RAFAM real, script Python, contrato Paxapos, evidencias Oracle y pendientes confirmados. El DER grafico se mantiene en [docs/rafam_der.drawio](docs/rafam_der.drawio).
+
 ## Objetivos del proyecto
 
 - Extraer datos de RAFAM de forma incremental.

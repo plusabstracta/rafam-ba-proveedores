@@ -127,8 +127,8 @@ No agregar aliases ni fallbacks legacy a `DB_*`, `SQLITE_DB_PATH`, `CHECKPOINT_D
 
 - `README.md` explica uso diario y perfiles operativos.
 - `.env.example` es la plantilla única por roles y debe listar solo variables runtime vigentes.
-- `docs/deployment.md` documenta instalación/operación por perfil.
-- `docs/tablas_datos_paxapos.md` documenta mapeos RAFAM->Paxapos y debe cambiar junto con payload/mappers.
+- `docs/rafam_paxapos_source_of_truth.md` es la fuente canónica de RAFAM real, script Python, contrato Paxapos, mapeos, operación y pendientes verificados.
+- `docs/rafam_der.drawio` se conserva solo como vista gráfica del modelo RAFAM.
 - `.github/instructions/*.instructions.md` debe reflejar las mismas reglas que los docs para evitar drift de ingeniería.
 - Todo cambio de configuración, contrato Paxapos, orden de entidades, payload o comandos Makefile debe actualizar docs e instrucciones relacionadas en el mismo commit.
 

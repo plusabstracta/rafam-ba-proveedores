@@ -1,6 +1,6 @@
 ---
 description: "Use when implementing mappers, exporters, payload construction, entity linking, docs, env templates, or any code that sends data TO Paxapos. Covers the full RAFAM lifecycle, the Paxapos data model, API contract, authentication, validation rules, upsert behavior, env contract, and field-level mapping for every entity."
-applyTo: "src/exporter.py,src/gateway_mapper.py,src/entity_link_store.py,README.md,.env.example,docs/deployment.md,docs/tablas_datos_paxapos.md,docs/field_mapping.md,tests/test_migrator_mapping.py"
+applyTo: "src/exporter.py,src/gateway_mapper.py,src/entity_link_store.py,README.md,.env.example,docs/rafam_paxapos_source_of_truth.md,tests/test_migrator_mapping.py"
 ---
 
 # Contrato Paxapos + Flujo RAFAM — Referencia Completa

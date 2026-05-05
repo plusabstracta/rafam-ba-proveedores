@@ -1,5 +1,8 @@
 """
-explore_schema.py — Explora el esquema Oracle OWNER_RAFAM y genera docs/rafam_schema.md
+explore_schema.py — Dump legacy del esquema Oracle OWNER_RAFAM.
+
+La documentacion canonica vive en docs/rafam_paxapos_source_of_truth.md.
+Para evidencia completa usar scripts/generate_rafam_context.py.
 Uso: python scripts/explore_schema.py
 """
 
@@ -12,8 +15,8 @@ from pathlib import Path
 
 # ─── Rutas ───────────────────────────────────────────────────────────────────
 REPO_ROOT  = Path(__file__).resolve().parent.parent
-DOCS_DIR   = REPO_ROOT / "docs"
-OUTPUT_MD  = DOCS_DIR / "rafam_schema.md"
+OUTPUT_DIR = REPO_ROOT / "output" / "rafam_context"
+OUTPUT_MD  = OUTPUT_DIR / "legacy_rafam_schema.md"
 
 # ─── Entorno ─────────────────────────────────────────────────────────────────
 load_dotenv(REPO_ROOT / ".env")
@@ -350,7 +353,7 @@ def main() -> None:
             print(f"{len(cols)} columnas, {len(cons['pks'])} PK, {len(cons['fks'])} FK")
 
         # Escribir Markdown
-        DOCS_DIR.mkdir(parents=True, exist_ok=True)
+        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         md = build_markdown(SCHEMA, tables_data)
         OUTPUT_MD.write_text(md, encoding="utf-8")
         print(f"\n💾 Esquema exportado → {OUTPUT_MD}")
