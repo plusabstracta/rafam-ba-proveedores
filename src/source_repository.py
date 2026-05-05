@@ -166,7 +166,7 @@ class SourceRepository:
                 solic_gastos.c.JURISDICCION.label("SG_JURISDICCION"),
             )
             .select_from(
-                oc_items.outerjoin(
+                oc_items.join(
                     orden_compra,
                     and_(
                         oc_items.c.EJERCICIO == orden_compra.c.EJERCICIO,

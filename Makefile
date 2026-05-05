@@ -10,15 +10,10 @@ DEV_DB ?= state/dev_rafam.db
 BATCH ?= 500
 LIMIT ?=
 EXPORT ?= csv
-FORCE_UPDATE ?= 0
-MONTHS ?= 3
-TABLES ?=
-OUT ?= output/rafam_ultimos_3_meses
 
-.PHONY: help setup install env load-dev export-rafam-csv update-mapping explore-schema status run-all test reset-all \
+.PHONY: help setup install env load-dev update-mapping explore-schema rafam-context status run-all test reset-all \
 	run-jurisdicciones run-proveedores run-pedidos run-ped_items run-solic_gastos \
 	run-orden_compra run-oc_items run-orden_pago \
-	run-proveedores-gateway \
 	run-jurisdicciones-migrator run-jurisdicciones-migrator-dry \
 	run-proveedores-migrator run-proveedores-migrator-dry \
 	run-ped_items-migrator run-ped_items-migrator-dry \
@@ -33,16 +28,14 @@ help:
 	@echo "RAFAM BA Proveedores - comandos rapidos"
 	@echo ""
 	@echo "  make setup              Crea .venv, instala deps y genera .env si no existe"
-	@echo "  make export-rafam-csv   Exporta CSVs desde Oracle RAFAM (no requiere Paxapos)"
 	@echo "  make load-dev           Carga CSVs a SQLite local"
 	@echo "  make update-mapping     Regenera docs/field_mapping.md desde la DB (SQLite o Oracle)"
 	@echo "  make explore-schema     Genera docs/rafam_schema.md desde Oracle"
+	@echo "  make rafam-context      Genera output/rafam_context/*.md con contexto RAFAM medido"
 	@echo "  make status             Muestra estado de checkpoints"
 	@echo "  make run-all            Ejecuta sync de todas las entidades"
 	@echo "  make run-proveedores    Ejecuta sync solo de proveedores"
 	@echo "  make run-orden_compra   Ejecuta sync solo de orden_compra"
-	@echo "  make run-proveedores-gateway  Envia proveedores a Paxapos (POST JSON)"
-	@echo "  make run-proveedores-gateway-force-update  Fuerza update de vinculados en gateway"
 	@echo "  make run-jurisdicciones-migrator-dry  Prueba migrator jurisdicciones (rubros+clasif)"
 	@echo "  make run-jurisdicciones-migrator  Migra jurisdicciones -> rubros y clasificaciones"
 	@echo "  make run-proveedores-migrator  Envia proveedores al migrator RAFAM"
@@ -62,8 +55,7 @@ help:
 	@echo "  make test               Corre tests"
 	@echo ""
 	@echo "Variables opcionales:"
-	@echo "  BATCH=500 LIMIT=1000 EXPORT=csv FORCE_UPDATE=0 CSV_DIR=output DEV_DB=state/dev_rafam.db"
-	@echo "  MONTHS=3 TABLES=PROVEEDORES,ORDEN_PAGO OUT=output/rafam_ultimos_3_meses"
+	@echo "  BATCH=500 LIMIT=1000 EXPORT=csv CSV_DIR=output DEV_DB=state/dev_rafam.db"
 
 setup:
 	python -m venv .venv
@@ -79,17 +71,17 @@ env:
 load-dev:
 	$(PY) scripts/load_csv_to_sqlite.py --csv-dir $(CSV_DIR) --output-db $(DEV_DB)
 
-export-rafam-csv:
-	$(PY) scripts/export_last_3_months.py --months $(MONTHS) $(if $(TABLES),--tables $(TABLES),) --output-dir $(OUT)
-
 update-mapping:
-	RAFAM_SOURCE_SQLITE_DB_PATH=$(DEV_DB) RAFAM_SOURCE_BACKEND=sqlite $(PY) scripts/update_field_mapping.py
+	SQLITE_DB_PATH=$(DEV_DB) DB_BACKEND=sqlite $(PY) scripts/update_field_mapping.py
 
 update-mapping-oracle:
-	RAFAM_SOURCE_BACKEND=oracle $(PY) scripts/update_field_mapping.py
+	DB_BACKEND=oracle $(PY) scripts/update_field_mapping.py
 
 explore-schema:
 	$(PY) scripts/explore_schema.py
+
+rafam-context:
+	$(PY) scripts/generate_rafam_context.py
 
 status:
 	$(PY) main.py status
@@ -108,12 +100,6 @@ run-jurisdicciones:
 
 run-proveedores:
 	$(PY) main.py run --entity proveedores --batch-size $(BATCH) $(if $(LIMIT),--limit $(LIMIT),) --export $(EXPORT)
-
-run-proveedores-gateway:
-	$(PY) main.py run --entity proveedores --batch-size $(BATCH) $(if $(LIMIT),--limit $(LIMIT),) --export gateway $(if $(filter 1 true TRUE yes YES on ON,$(FORCE_UPDATE)),--force-update,)
-
-run-proveedores-gateway-force-update:
-	$(PY) main.py run --entity proveedores --batch-size $(BATCH) $(if $(LIMIT),--limit $(LIMIT),) --export gateway --force-update
 
 run-jurisdicciones-migrator:
 	$(PY) main.py run --entity jurisdicciones --batch-size $(BATCH) $(if $(LIMIT),--limit $(LIMIT),) --export migrator

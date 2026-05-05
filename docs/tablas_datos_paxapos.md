@@ -7,7 +7,7 @@ Inventario completo de todas las entidades que el script exporta hacia el sistem
 
 ---
 
-## Estructura raíz del payload (común a todos los envíos)
+## Estructura raíz del payload
 
 ```json
 {
@@ -26,14 +26,13 @@ Inventario completo de todas las entidades que el script exporta hacia el sistem
   "rubros": [],
   "clasificaciones": [],
   "proveedores": [],
-  "pedidos": [],
   "ordenes_compra": [],
   "gastos": [],
   "ordenes_pago": []
 }
 ```
 
-En cada batch se llenan solo las listas correspondientes a la entidad que se está enviando; el resto queda vacío.
+En cada batch se llenan **solo** las listas correspondientes a la entidad que se está enviando; el resto queda vacío. Las colecciones `centros_costo`, `rubros` y `clasificaciones` solo se envían en el batch de **jurisdicciones**.
 
 ---
 
@@ -117,60 +116,7 @@ Fuente RAFAM: `JURISDICCIONES` · Genera **tres** colecciones en el mismo payloa
 
 ---
 
-## 3. Pedidos (Solicitudes de bienes)
-
-Fuente RAFAM: `PEDIDOS` (cabecera) + `PED_ITEMS` (ítems)
-
-| Campo Paxapos | Fuente RAFAM | Regla / Transformación |
-|---|---|---|
-| `internal_id` | `EJERCICIO`, `NUM_PED` | `"rafam-ped-{ejercicio}-{num_ped}"` |
-| `tipo` | — | Fijo: `"solicitud"` |
-| `monto_presupuestado` | `PED_COSTO_TOT` | Float, de la cabecera |
-| `centro_costo_id` | `JURISDICCION` | ID Paxapos resuelto desde `link_centro_costo` |
-| `observacion` | — | `"Migrado RAFAM PED {ejercicio}-{num_ped}"` |
-| `items[].mercaderia_external_ref` | `EJERCICIO`, `NUM_PED`, `ORDEN`, claves contables | Referencia compuesta (clase, tipo, inciso, etc.) |
-| `items[].cantidad` | `CANTIDAD` | Float, obligatorio |
-| `items[].precio` | `COSTO_UNI` | Float, opcional |
-| `items[].unidad_de_medida_id` | `UNI_MED` | Lookup remoto por nombre; default: `PAXAPOS_RAFAM_DEFAULT_UNIDAD_ID` |
-| `items[].descripcion` | `DESCRIP_BIE` | Máx. 255 caracteres |
-| `items[].observacion` | `DESCRIP_BIE` | Mismo valor que `descripcion` |
-
-**Payload de ejemplo:**
-```json
-{
-  "pedidos": [
-    {
-      "external_id": { "ejercicio": 2024, "num_ped": 123 },
-      "Pedido": {
-        "internal_id": "rafam-ped-2024-123",
-        "tipo": "solicitud",
-        "observacion": "Migrado RAFAM PED 2024-123",
-        "monto_presupuestado": 15000.50
-      },
-      "items": [
-        {
-          "mercaderia_external_ref": {
-            "source": "rafam",
-            "entity": "ped_items",
-            "ejercicio": 2024,
-            "num_ped": 123,
-            "orden": 1
-          },
-          "cantidad": 10.0,
-          "precio": 1500.05,
-          "unidad_de_medida_id": 1,
-          "descripcion": "RESMA DE PAPEL A4",
-          "observacion": "RESMA DE PAPEL A4"
-        }
-      ]
-    }
-  ]
-}
-```
-
----
-
-## 4. Órdenes de Compra
+## 3. Órdenes de Compra
 
 Fuente RAFAM: `ORDEN_COMPRA` (cabecera) + `OC_ITEMS` (ítems)
 
@@ -187,7 +133,7 @@ Fuente RAFAM: `ORDEN_COMPRA` (cabecera) + `OC_ITEMS` (ítems)
 | `items[].cantidad` | `CANTIDAD` | Float, obligatorio |
 | `items[].precio` | `IMP_UNITARIO` | Precio unitario |
 | `items[].recibida_cantidad` | `CANT_RECIB` | Cantidad ya recibida en RAFAM |
-| `items[].unidad_de_medida_id` | `UNI_MED` | Igual que pedidos |
+| `items[].unidad_de_medida_id` | — | Fijo: `5` ("Unidad") · Hardcodeado en `_resolve_unidad_medida_id()` |
 
 **Payload de ejemplo:**
 ```json
@@ -199,7 +145,7 @@ Fuente RAFAM: `ORDEN_COMPRA` (cabecera) + `OC_ITEMS` (ítems)
         "internal_id": "rafam-oc-2024-1-456",
         "tipo": "orden_compra",
         "proveedor_id": 984,
-        "observacion": "Migrado RAFAM OC 2024-1-456"
+        "observacion": "OC_OBSERVACIONES de RAFAM (si existe)"
       },
       "items": [
         {
@@ -214,7 +160,7 @@ Fuente RAFAM: `ORDEN_COMPRA` (cabecera) + `OC_ITEMS` (ítems)
           "cantidad": 10.0,
           "recibida_cantidad": 5.0,
           "precio": 1500.0,
-          "unidad_de_medida_id": 1
+          "unidad_de_medida_id": 5
         }
       ]
     }
@@ -224,7 +170,7 @@ Fuente RAFAM: `ORDEN_COMPRA` (cabecera) + `OC_ITEMS` (ítems)
 
 ---
 
-## 5. Gastos (Solicitudes de gasto de fondos)
+## 4. Gastos (Solicitudes de gasto de fondos)
 
 Fuente RAFAM: `SOLIC_GASTOS`
 
@@ -264,7 +210,7 @@ Fuente RAFAM: `SOLIC_GASTOS`
 
 ---
 
-## 6. Órdenes de Pago (Egresos)
+## 5. Órdenes de Pago (Egresos)
 
 Fuente RAFAM: `ORDEN_PAGO` (con resolución de gastos vía `SG_DELEG_SOLIC`/`SG_NRO_SOLIC`, `CTA_HOJA_DE_RUTA` JOIN, o `RECO_DEU_COMPRA` → OC link_store)
 
@@ -315,22 +261,21 @@ Fuente RAFAM: `ORDEN_PAGO` (con resolución de gastos vía `SG_DELEG_SOLIC`/`SG_
 
 ## Resumen de tablas fuente
 
-| Entidad Paxapos | Tablas RAFAM involucradas |
-|---|---|
-| Proveedores | `PROVEEDORES` |
-| Rubros / Clasificaciones | `JURISDICCIONES` |
-| Pedidos | `PEDIDOS`, `PED_ITEMS` |
-| Órdenes de Compra | `ORDEN_COMPRA`, `OC_ITEMS` |
-| Gastos | `SOLIC_GASTOS` |
-| Órdenes de Pago | `ORDEN_PAGO`, `SOLIC_GASTOS` |
+| Entidad Paxapos | Tablas RAFAM involucradas | Estado |
+|---|---|---|
+| Proveedores | `PROVEEDORES` | Activo |
+| Rubros / Clasificaciones / Centros de costo | `JURISDICCIONES` | Activo |
+| Órdenes de Compra | `ORDEN_COMPRA`, `OC_ITEMS` | Activo |
+| Gastos | `SOLIC_GASTOS` | Activo |
+| Órdenes de Pago | `ORDEN_PAGO`, `SOLIC_GASTOS` | Activo |
 
 ## Variables de entorno relevantes
 
-| Variable | Uso |
-|---|---|
-| `PAXAPOS_RAFAM_DEFAULT_UNIDAD_ID` | ID de unidad de medida Paxapos por defecto (pedidos) |
-| `PAXAPOS_RAFAM_DEFAULT_TIPO_FACTURA_ID` | ID de tipo de factura Paxapos por defecto (gastos) |
-| `PAXAPOS_RAFAM_DEFAULT_TIPO_PAGO_ID` | ID de tipo de pago Paxapos por defecto (órdenes de pago, default `1`) |
+| Variable | Uso | Nota |
+|---|---|---|
+| `PAXAPOS_RAFAM_DEFAULT_UNIDAD_ID` | ~~ID de unidad de medida por defecto~~ | **No se usa.** UM hardcodeada a `5` en código |
+| `PAXAPOS_RAFAM_DEFAULT_TIPO_FACTURA_ID` | ID de tipo de factura Paxapos por defecto (gastos) | Activo |
+| `PAXAPOS_RAFAM_DEFAULT_TIPO_PAGO_ID` | ID de tipo de pago Paxapos por defecto (órdenes de pago, default `1`) | Activo |
 
 Los IDs de catálogos son propios del tenant Paxapos. Antes de una importación real, confirmar los defaults con `make migrator-lookups` y no asumir que el mismo ID representa el mismo concepto en todos los portales.
 
@@ -340,9 +285,9 @@ El script guarda vínculos RAFAM -> Paxapos en SQLite (`EntityLinkStore`) para n
 
 | Link local | Source key | Uso |
 |---|---|---|
-| `link_centro_costo` | `{"jurisdiccion": "..."}` | `centro_costo_id` en pedidos y OCs |
+| `link_centro_costo` | `{"jurisdiccion": "..."}` | `centro_costo_id` en OCs |
 | `link_rubro` | `{"jurisdiccion": "..."}` | `rubro_id` de ítems |
 | `link_clasificacion` | `{"jurisdiccion": "..."}` | `clasificacion_id` de gastos |
-| `link_unidad_medida` | `UNI_MED` RAFAM | Override RAFAM -> Paxapos para unidades |
+| ~~`link_unidad_medida`~~ | ~~`UNI_MED` RAFAM~~ | ~~No se usa~~ — UM hardcodeada a `5` |
 | `link_tipo_retencion` | `COD_RET` RAFAM | Override RAFAM -> Paxapos para tipos de retención |
 | `link_gasto` | external_id estructurado y alias legacy `rafam_ref` | Vínculo OC/Gasto/OP |

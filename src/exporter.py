@@ -538,7 +538,8 @@ class MigratorExporter(BaseExporter):
             return self._write_batch_proveedores(columns, rows)
 
         if entity == "ped_items":
-            return self._write_batch_ped_items(columns, rows)
+            logger.warning("Migrator [ped_items]: entidad deshabilitada — los pedidos se migran como OCs via 'oc_items'.")
+            return
 
         if entity == "oc_items":
             return self._write_batch_oc_items(columns, rows)
