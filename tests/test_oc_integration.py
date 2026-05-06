@@ -7,7 +7,6 @@ luego procesa oc_items y valida que los payloads sean correctos.
 
 Requiere: RAFAM_SOURCE_BACKEND=sqlite.
 """
-import json
 from pathlib import Path
 from unittest.mock import patch
 
@@ -58,14 +57,6 @@ def exporter_with_links(dev_engine):
                 entity="proveedores",
                 source_key=str(cod),
                 remote_id=str(10000 + int(cod)),
-            )
-        # Pre-linkear centros de costo (jurisdicciones)
-        for (j,) in conn.execute(text("SELECT JURISDICCION FROM JURISDICCIONES")).fetchall():
-            jurisdiccion_key = json.dumps({"jurisdiccion": str(j)}, sort_keys=True)
-            exp._link_store.save_link(
-                entity="centro_costo",
-                source_key=jurisdiccion_key,
-                remote_id=str(abs(hash(j)) % 1000 + 1),
             )
     return exp
 

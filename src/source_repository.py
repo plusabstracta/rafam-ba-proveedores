@@ -82,39 +82,62 @@ class SourceRepository:
         oc = self._reflect_table("ORDEN_COMPRA")
         oc_items = self._reflect_table("OC_ITEMS")
         solic_gastos = self._reflect_table("SOLIC_GASTOS")
+        cta_hdr = self._reflect_optional_table("CTA_HOJA_DE_RUTA")
 
         # ORDEN_COMPRA → OC_ITEMS (items) → SOLIC_GASTOS (jurisdicción).
         # El cursor incremental aplica sobre ORDEN_COMPRA (FECH_OC / ESTADO_OC),
         # así solo se traen OCs recién modificadas CON sus items.
-        stmt = (
-            select(
+        select_cols = [
+            oc_items,
+            oc.c.COD_PROV,
+            oc.c.FECH_OC.label("OC_FECH_OC"),
+            oc.c.OBSERVACIONES.label("OC_OBSERVACIONES"),
+            oc.c.ESTADO_OC.label("OC_ESTADO_OC"),
+            oc.c.FECH_CONFIRM.label("OC_FECH_CONFIRM"),
+            oc.c.IMPORTE_TOT.label("OC_IMPORTE_TOT"),
+            solic_gastos.c.JURISDICCION.label("SG_JURISDICCION"),
+        ]
+
+        from_clause = (
+            oc.join(
                 oc_items,
-                oc.c.COD_PROV,
-                oc.c.FECH_OC.label("OC_FECH_OC"),
-                oc.c.OBSERVACIONES.label("OC_OBSERVACIONES"),
-                oc.c.ESTADO_OC.label("OC_ESTADO_OC"),
-                oc.c.FECH_CONFIRM.label("OC_FECH_CONFIRM"),
-                oc.c.IMPORTE_TOT.label("OC_IMPORTE_TOT"),
-                solic_gastos.c.JURISDICCION.label("SG_JURISDICCION"),
-            )
-            .select_from(
-                oc.join(
-                    oc_items,
-                    and_(
-                        oc.c.EJERCICIO == oc_items.c.EJERCICIO,
-                        oc.c.UNI_COMPRA == oc_items.c.UNI_COMPRA,
-                        oc.c.NRO_OC == oc_items.c.NRO_OC,
-                    ),
-                ).outerjoin(
-                    solic_gastos,
-                    and_(
-                        oc_items.c.EJERCICIO == solic_gastos.c.EJERCICIO,
-                        oc_items.c.DELEG_SOLIC == solic_gastos.c.DELEG_SOLIC,
-                        oc_items.c.NRO_SOLIC == solic_gastos.c.NRO_SOLIC,
-                    ),
-                )
+                and_(
+                    oc.c.EJERCICIO == oc_items.c.EJERCICIO,
+                    oc.c.UNI_COMPRA == oc_items.c.UNI_COMPRA,
+                    oc.c.NRO_OC == oc_items.c.NRO_OC,
+                ),
+            ).outerjoin(
+                solic_gastos,
+                and_(
+                    oc_items.c.EJERCICIO == solic_gastos.c.EJERCICIO,
+                    oc_items.c.DELEG_SOLIC == solic_gastos.c.DELEG_SOLIC,
+                    oc_items.c.NRO_SOLIC == solic_gastos.c.NRO_SOLIC,
+                ),
             )
         )
+
+        # LEFT JOIN CTA_HOJA_DE_RUTA para obtener CC_NRO (nro comprobante del gasto vinculado)
+        if cta_hdr is not None:
+            hdr_oc_ej = self._safe_column(cta_hdr, "OC_EJERCICIO")
+            hdr_oc_uni = self._safe_column(cta_hdr, "OC_UNI_COMPRA")
+            hdr_oc_nro = self._safe_column(cta_hdr, "OC_NRO")
+            hdr_cc_nro = self._safe_column(cta_hdr, "CC_NRO")
+            hdr_cc_tipo = self._safe_column(cta_hdr, "CC_TIPO_COMPROB")
+            if hdr_oc_ej is not None and hdr_oc_uni is not None and hdr_oc_nro is not None:
+                from_clause = from_clause.outerjoin(
+                    cta_hdr,
+                    and_(
+                        oc.c.EJERCICIO == hdr_oc_ej,
+                        oc.c.UNI_COMPRA == hdr_oc_uni,
+                        oc.c.NRO_OC == hdr_oc_nro,
+                    ),
+                )
+                if hdr_cc_nro is not None:
+                    select_cols.append(hdr_cc_nro.label("HDR_CC_NRO"))
+                if hdr_cc_tipo is not None:
+                    select_cols.append(hdr_cc_tipo.label("HDR_CC_TIPO_COMPROB"))
+
+        stmt = select(*select_cols).select_from(from_clause)
         extra_filters = []
         if not (cfg.full_load or checkpoint.is_fresh):
             fech_anul_col = self._safe_column(oc, "FECH_ANUL")
@@ -163,36 +186,59 @@ class SourceRepository:
         oc_items = self._reflect_table("OC_ITEMS")
         orden_compra = self._reflect_table("ORDEN_COMPRA")
         solic_gastos = self._reflect_table("SOLIC_GASTOS")
+        cta_hdr = self._reflect_optional_table("CTA_HOJA_DE_RUTA")
 
-        stmt = (
-            select(
-                oc_items,
-                orden_compra.c.COD_PROV,
-                orden_compra.c.FECH_OC.label("OC_FECH_OC"),
-                orden_compra.c.OBSERVACIONES.label("OC_OBSERVACIONES"),
-                orden_compra.c.ESTADO_OC.label("OC_ESTADO_OC"),
-                orden_compra.c.FECH_CONFIRM.label("OC_FECH_CONFIRM"),
-                orden_compra.c.IMPORTE_TOT.label("OC_IMPORTE_TOT"),
-                solic_gastos.c.JURISDICCION.label("SG_JURISDICCION"),
-            )
-            .select_from(
-                oc_items.join(
-                    orden_compra,
-                    and_(
-                        oc_items.c.EJERCICIO == orden_compra.c.EJERCICIO,
-                        oc_items.c.UNI_COMPRA == orden_compra.c.UNI_COMPRA,
-                        oc_items.c.NRO_OC == orden_compra.c.NRO_OC,
-                    ),
-                ).outerjoin(
-                    solic_gastos,
-                    and_(
-                        oc_items.c.EJERCICIO == solic_gastos.c.EJERCICIO,
-                        oc_items.c.DELEG_SOLIC == solic_gastos.c.DELEG_SOLIC,
-                        oc_items.c.NRO_SOLIC == solic_gastos.c.NRO_SOLIC,
-                    ),
-                )
+        select_cols = [
+            oc_items,
+            orden_compra.c.COD_PROV,
+            orden_compra.c.FECH_OC.label("OC_FECH_OC"),
+            orden_compra.c.OBSERVACIONES.label("OC_OBSERVACIONES"),
+            orden_compra.c.ESTADO_OC.label("OC_ESTADO_OC"),
+            orden_compra.c.FECH_CONFIRM.label("OC_FECH_CONFIRM"),
+            orden_compra.c.IMPORTE_TOT.label("OC_IMPORTE_TOT"),
+            solic_gastos.c.JURISDICCION.label("SG_JURISDICCION"),
+        ]
+
+        from_clause = (
+            oc_items.join(
+                orden_compra,
+                and_(
+                    oc_items.c.EJERCICIO == orden_compra.c.EJERCICIO,
+                    oc_items.c.UNI_COMPRA == orden_compra.c.UNI_COMPRA,
+                    oc_items.c.NRO_OC == orden_compra.c.NRO_OC,
+                ),
+            ).outerjoin(
+                solic_gastos,
+                and_(
+                    oc_items.c.EJERCICIO == solic_gastos.c.EJERCICIO,
+                    oc_items.c.DELEG_SOLIC == solic_gastos.c.DELEG_SOLIC,
+                    oc_items.c.NRO_SOLIC == solic_gastos.c.NRO_SOLIC,
+                ),
             )
         )
+
+        # LEFT JOIN CTA_HOJA_DE_RUTA para obtener CC_NRO (nro comprobante del gasto vinculado)
+        if cta_hdr is not None:
+            hdr_oc_ej = self._safe_column(cta_hdr, "OC_EJERCICIO")
+            hdr_oc_uni = self._safe_column(cta_hdr, "OC_UNI_COMPRA")
+            hdr_oc_nro = self._safe_column(cta_hdr, "OC_NRO")
+            hdr_cc_nro = self._safe_column(cta_hdr, "CC_NRO")
+            hdr_cc_tipo = self._safe_column(cta_hdr, "CC_TIPO_COMPROB")
+            if hdr_oc_ej is not None and hdr_oc_uni is not None and hdr_oc_nro is not None:
+                from_clause = from_clause.outerjoin(
+                    cta_hdr,
+                    and_(
+                        orden_compra.c.EJERCICIO == hdr_oc_ej,
+                        orden_compra.c.UNI_COMPRA == hdr_oc_uni,
+                        orden_compra.c.NRO_OC == hdr_oc_nro,
+                    ),
+                )
+                if hdr_cc_nro is not None:
+                    select_cols.append(hdr_cc_nro.label("HDR_CC_NRO"))
+                if hdr_cc_tipo is not None:
+                    select_cols.append(hdr_cc_tipo.label("HDR_CC_TIPO_COMPROB"))
+
+        stmt = select(*select_cols).select_from(from_clause)
         stmt = self._apply_incremental_filters(stmt, oc_items, cfg, checkpoint)
         return stmt.order_by(oc_items.c.EJERCICIO, oc_items.c.UNI_COMPRA, oc_items.c.NRO_OC, oc_items.c.ITEM_OC)
 
@@ -374,6 +420,8 @@ class SourceRepository:
             ("SG_EJERCICIO", "HDR_SG_EJERCICIO"),
             ("OC_NRO", "HDR_OC_NRO_OC"),
             ("OC_COD_PROV", "HDR_OC_COD_PROV"),
+            ("CC_NRO", "HDR_CC_NRO"),
+            ("CC_TIPO_COMPROB", "HDR_CC_TIPO_COMPROB"),
         ]:
             col = self._safe_column(cta_hdr, col_name) if cta_hdr is not None else None
             if col is not None:

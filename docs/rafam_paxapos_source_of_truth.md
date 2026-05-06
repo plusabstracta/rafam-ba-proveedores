@@ -600,3 +600,44 @@ Se eliminaron porque ahora su contenido valido queda consolidado aca, y el resto
 - `docs/incremental_strategy.md`
 - `docs/RAFAM_DOCU_4-5.md`
 - `docs/tablas_datos_paxapos.md`
+
+## Mapeos de Catálogos RAFAM → Paxapos
+
+### Tipo de Comprobante (CTA_COMPROB.TIPO → tipo_facturas.name)
+
+Definido en `src/gateway_mapper.py :: RAFAM_TIPO_COMPROB_TO_PAXAPOS_NAME`.
+
+| RAFAM TIPO | Paxapos nombre | Notas |
+|------------|---------------|-------|
+| FAA | A | Factura A |
+| FAS | A | Factura A (servicio) |
+| FAB | B | Factura B |
+| FAC | C | Factura C |
+| FAM | M | Factura M |
+| TKT | Otros | Ticket |
+| NCB | NCB | Nota de Crédito B |
+| NDB | NDB | Nota de Débito B |
+| NDC | NDC | Nota de Débito C |
+| EXB | B | Exenta B |
+| REB | B | Recibo B |
+| REA | A | Recibo A |
+| LIQ, COM, VIA, REC, CEO, LIR | Otros | Liquidaciones, comisiones, viáticos, etc. |
+
+Resolución dinámica: se busca por `codename` primero, luego por `name` normalizado en el lookup de `tipos_factura`.
+
+### Tipo de Pago (ORDEN_PAGO.TIPO_CANCE → tipo_de_pagos.name)
+
+Definido en `src/gateway_mapper.py :: RAFAM_TIPO_CANCE_TO_PAXAPOS_PAGO_NAME`.
+
+| RAFAM TIPO_CANCE | Paxapos nombre | Significado |
+|------------------|---------------|-------------|
+| CA | Cheque | Cheque al día |
+| CM | Cheque | Cheque múltiple |
+| NO | Transferencia bancaria | Normal (transferencia) |
+| (otros/vacío) | Transferencia bancaria | Fallback |
+
+Resolución dinámica: se busca por `name` normalizado en el lookup de `tipos_de_pago`.
+
+### Unidades de Medida (PED_ITEMS.UNI_MED → compras_unidad_de_medidas)
+
+Estado: **pendiente de extracción**. Ejecutar `make extract-cat-uni-med` para generar `docs/cat_uni_med.md` con el catálogo RAFAM `CAT_UNI_MED`. Actualmente fallback a id=5 (Unidad).

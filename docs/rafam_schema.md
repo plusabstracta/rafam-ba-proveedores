@@ -122,7 +122,6 @@
 | `CC_TIPO_COMPROB` | `VARCHAR2(3)` | ✓ |  |  |
 | `CC_NRO` | `VARCHAR2(13)` | ✓ |  |  |
 | `CC_COD_PROV` | `NUMBER` | ✓ |  |  |
-| `CC_NRO_REG_COMP` | `NUMBER` | ✓ |  |  |
 | `CC_FECH_MOVIM` | `DATE` | ✓ |  |  |
 | `CC_FECH_COMPROB` | `DATE` | ✓ |  |  |
 | `CC_IMPORTE` | `NUMBER` | ✓ |  |  |

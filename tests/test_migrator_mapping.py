@@ -4,7 +4,6 @@ Tests de mapeo para MigratorExporter — sin llamadas HTTP reales.
 Validan que _map_solic_gasto, _map_ped_item, _map_oc_item y
 _write_batch_orden_pago construyen los payloads correctos.
 """
-import json
 from unittest.mock import patch
 
 import pytest
@@ -77,7 +76,8 @@ class TestMapSolicGasto:
         assert result["Gasto"]["fecha"] == "2026-03-10"
         assert result["Gasto"]["importe_total"] == 1210.50
         assert result["Gasto"]["tipo_factura_id"] == 2
-        assert result["Gasto"]["factura_nro"] == "0001-00000042"
+        assert result["Gasto"]["punto_de_venta"] == "0001"
+        assert result["Gasto"]["factura_nro"] == "00000042"
         assert result["Gasto"]["observacion"] == "Factura de papelería"
 
     def test_excluye_anuladas(self, exporter):
@@ -162,23 +162,11 @@ class TestWriteBatchOrdenPago:
     def test_agrupa_por_nro_op(self):
         exp = self._make_exporter()
 
-        # Pre-poblar link_store con gastos (simula sync previo de solic_gastos)
-        import json
-        exp._link_store.save_link(
-            entity="gasto",
-            source_key=json.dumps({"rafam_ref": "SG-2026-1-100"}, sort_keys=True),
-            remote_id="501",
-        )
-        exp._link_store.save_link(
-            entity="gasto",
-            source_key=json.dumps({"rafam_ref": "SG-2026-1-200"}, sort_keys=True),
-            remote_id="502",
-        )
-
         columns = [
             "EJERCICIO", "NRO_OP", "FECH_OP", "ESTADO_OP",
             "IMPORTE_TOTAL", "CONCEPTO", "NRO_CANCE",
             "SG_DELEG_SOLIC", "SG_NRO_SOLIC",
+            "HDR_CC_NRO",
             "FECH_CONFIRM", "LUG_EMI", "CODIGO_FF", "JURISDICCION",
             "CODIGO_UE", "COD_PROV", "TIPO_OP", "TIPO_DOC", "NRO_DOC",
             "ANIO_DOC", "CONFIRMADO", "CANT_IMPRES", "FECH_ANUL",
@@ -190,24 +178,25 @@ class TestWriteBatchOrdenPago:
             "RECO_DEU_COMPRA_EJER", "F931", "SICORE",
         ]
 
-        def row(nro_op, sg_deleg, sg_nro, estado="N", importe="500", confirmado="S", fech_confirm="2026-03-11 00:00:00"):
+        def row(nro_op, sg_deleg, sg_nro, estado="N", importe="500", confirmado="S", fech_confirm="2026-03-11 00:00:00", cc_nro="0001-00000042"):
             vals = {
                 "EJERCICIO": "2026", "NRO_OP": str(nro_op),
                 "FECH_OP": "2026-03-10 00:00:00",
                 "ESTADO_OP": estado, "IMPORTE_TOTAL": importe,
                 "CONCEPTO": "Pago servicios", "NRO_CANCE": str(sg_nro),
                 "SG_DELEG_SOLIC": str(sg_deleg), "SG_NRO_SOLIC": str(sg_nro),
+                "HDR_CC_NRO": cc_nro,
                 "CONFIRMADO": confirmado, "FECH_CONFIRM": fech_confirm,
             }
             return tuple(vals.get(c, "") for c in columns)
 
         rows = [
-            row(1001, 1, 100),
-            row(1002, 1, 200),
-            row(1003, None, None),  # sin gasto -> omitida
-            row(1004, 1, 100, estado="C"),  # cancelada -> omitida
-            row(1005, 1, 100, confirmado="N"),  # no confirmada -> omitida
-            row(1006, 1, 100, fech_confirm=""),  # sin FECH_CONFIRM -> omitida
+            row(1001, 1, 100, estado="C", cc_nro="0001-00000100"),
+            row(1002, 1, 200, estado="C", cc_nro="0001-00000200"),
+            row(1003, None, None, estado="C", cc_nro=""),  # sin CC_NRO -> omitida
+            row(1004, 1, 100, estado="A"),  # anulada -> omitida por estado
+            row(1005, 1, 100, estado="C", confirmado="N"),  # no confirmada -> omitida
+            row(1006, 1, 100, estado="C", fech_confirm=""),  # sin FECH_CONFIRM -> omitida
         ]
 
         sent_payloads = []
@@ -225,10 +214,10 @@ class TestWriteBatchOrdenPago:
         assert len(ops) == 2
         ids = {op["external_id"]["nro_op"] for op in ops}
         assert ids == {1001, 1002}
-        # verificar que gasto_ids se resolvió a IDs numéricos de Paxapos
+        # verificar que gasto_nro_comprobante se asignó desde HDR_CC_NRO
+        assert ops[0]["gasto_nro_comprobante"] == "0001-00000100"
+        assert ops[1]["gasto_nro_comprobante"] == "0001-00000200"
         for op in ops:
-            assert len(op["gasto_ids"]) == 1
-            assert isinstance(op["gasto_ids"][0], int)
             assert op["Egreso"]["estado"] == 3
             assert op["Egreso"]["fecha"] == "2026-03-11"
 
@@ -264,11 +253,6 @@ class TestWriteBatchOrdenPago:
 
     def test_op_cancelada_no_se_envia(self):
         exp = self._make_exporter()
-        exp._link_store.save_link(
-            entity="gasto",
-            source_key=json.dumps({"rafam_ref": "SG-2026-1-50"}, sort_keys=True),
-            remote_id="501",
-        )
         columns = [
             "EJERCICIO", "NRO_OP", "FECH_OP", "ESTADO_OP",
             "IMPORTE_TOTAL", "CONCEPTO", "NRO_CANCE",
@@ -434,11 +418,6 @@ class TestWriteBatchOcItems:
                 source_key=cod_prov,
                 remote_id=remote_prov_id,
             )
-        exp._link_store.save_link(
-            entity="centro_costo",
-            source_key=json.dumps({"jurisdiccion": "1110104000"}, sort_keys=True),
-            remote_id="1",
-        )
         return exp
 
     # ── OC con proveedor válido: se envía correctamente ──

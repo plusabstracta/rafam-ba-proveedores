@@ -9,7 +9,6 @@ _TABLE_PREFIX = "link_"
 # Override via the ``schemas`` parameter in EntityLinkStore.__init__().
 DEFAULT_LINK_SCHEMAS: dict[str, list[str]] = {
     "proveedores": ["cuit", "cod_estado"],
-    "centro_costo": [],
     "unidad_medida": ["name", "codigo"],
     "tipo_factura": ["name", "codigo"],
     "tipo_pago": ["name", "codigo"],

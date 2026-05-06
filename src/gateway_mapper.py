@@ -40,6 +40,49 @@ _JURISDICCION_CENTRO_COSTO_MAP: dict[str, int] = {
 }
 _JURISDICCION_CENTRO_COSTO_DEFAULT = 8  # CentroCosto "Otro"
 
+_UM: dict[str, int] = {
+    "UNIDAD": 1,
+    "KILOGRAMO": 2,
+    "LITRO": 3,
+    "METRO": 4,
+    "PAQUETE": 5,
+    "HORAS": 6,
+    "DIA": 7,
+}
+_UM_DEFAULT = 5 # Unidad
+
+# Mapeo RAFAM CTA_COMPROB.TIPO → nombre de tipo_factura en Paxapos.
+# Se usa para buscar dinámicamente en el lookup por name (normalizado).
+RAFAM_TIPO_COMPROB_TO_PAXAPOS_NAME: dict[str, str] = {
+    "FAA": "A",
+    "FAS": "A",
+    "FAB": "B",
+    "FAC": "C",
+    "FAM": "M",
+    "TKT": "Otros",
+    "NCB": "NCB",
+    "NDB": "NDB",
+    "NDC": "NDC",
+    "EXB": "B",
+    "REB": "B",
+    "REA": "A",
+    "LIQ": "Otros",
+    "COM": "Otros",
+    "VIA": "Otros",
+    "REC": "Otros",
+    "CEO": "Otros",
+    "LIR": "Otros",
+}
+
+# Mapeo RAFAM ORDEN_PAGO.TIPO_CANCE (ORIGEN TIPO) → nombre de tipo_de_pago en Paxapos.
+# CA/CM = Cheque, NO = Transferencia bancaria.
+RAFAM_TIPO_CANCE_TO_PAXAPOS_PAGO_NAME: dict[str, str] = {
+    "CA": "Cheque",
+    "CM": "Cheque",
+    "NO": "Transferencia bancaria",
+}
+RAFAM_TIPO_CANCE_DEFAULT_PAGO_NAME = "Transferencia bancaria"
+
 
 def resolve_centro_costo_id(jurisdiccion: Any) -> int:
     """Devuelve el CentroCosto.id de Paxapos para una jurisdicción RAFAM."""
@@ -115,15 +158,17 @@ def map_proveedor_row(raw: dict[str, Any]) -> dict[str, dict[str, Any]] | None:
         raw.get("TE_CELULAR"),
     )
 
+    razon_social = _clean(raw.get("RAZON_SOCIAL"))
+
     data: dict[str, Any] = {
         "name": name[:100],
-        "razon_social": _clean(raw.get("RAZON_SOCIAL")),
-        "mail": _clean(raw.get("EMAIL")),
-        "telefono": telefono,
-        "domicilio": domicilio,
-        "localidad": _first_non_empty(raw.get("LOCA_LEGAL"), raw.get("LOCA_POSTAL")),
-        "provincia": _first_non_empty(raw.get("PROV_LEGAL"), raw.get("PROV_POSTAL")),
-        "codigo_postal": _first_non_empty(raw.get("COD_LEGAL"), raw.get("COD_POSTAL")),
+        "razon_social": razon_social[:200] if razon_social else None,
+        "mail": (_clean(raw.get("EMAIL")) or "")[:100] or None,
+        "telefono": (telefono or "")[:100] or None,
+        "domicilio": (domicilio or "")[:100] or None,
+        "localidad": (_first_non_empty(raw.get("LOCA_LEGAL"), raw.get("LOCA_POSTAL")) or "")[:100] or None,
+        "provincia": (_first_non_empty(raw.get("PROV_LEGAL"), raw.get("PROV_POSTAL")) or "")[:100] or None,
+        "codigo_postal": (_first_non_empty(raw.get("COD_LEGAL"), raw.get("COD_POSTAL")) or "")[:10] or None,
         "cuit": cuit,
         "tipo_documento_id": 1 if cuit else None,  # TIPO_DOCUMENTO_CUIT
         "iva_condicion_id": _IVA_MAP.get(iva_code),

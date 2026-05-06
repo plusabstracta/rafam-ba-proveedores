@@ -27,7 +27,7 @@ from urllib import parse
 from urllib import error, request
 
 from .entity_link_store import EntityLinkStore
-from .gateway_mapper import map_proveedor_migrator_row, map_proveedor_row
+from .gateway_mapper import map_proveedor_migrator_row, map_proveedor_row, resolve_centro_costo_id
 
 logger = logging.getLogger(__name__)
 
@@ -489,16 +489,11 @@ class MigratorExporter(BaseExporter):
         self._dry_run = dry_run
         self._link_store = EntityLinkStore()
         self._lookup_payload = fetch_migrator_lookups([
-            "centros_costo",
             "unidades_de_medida",
             "tipos_factura",
             "tipos_de_pago",
             "tipos_retencion",
         ])
-        self._centros_costo = self._lookup_list(self._lookup_payload, "centros_costo")
-        self._centros_costo_by_name = self._build_single_index(self._centros_costo, "name")
-        self._centros_costo_by_jurisdiccion = self._build_jurisdiccion_index(self._centros_costo)
-        self._seed_centro_costo_from_lookups()
         self._unidades = self._lookup_list(self._lookup_payload, "unidades_de_medida")
         self._tipos_factura = self._lookup_list(self._lookup_payload, "tipos_factura")
         self._tipos_factura_by_codename = self._build_single_index(self._tipos_factura, "codename")
@@ -531,9 +526,6 @@ class MigratorExporter(BaseExporter):
         }
 
     def write_batch(self, entity: str, columns: list[str], rows: list[tuple]) -> None:
-        if entity == "jurisdicciones":
-            return self._write_batch_jurisdicciones(columns, rows)
-
         if entity == "proveedores":
             return self._write_batch_proveedores(columns, rows)
 
@@ -560,63 +552,7 @@ class MigratorExporter(BaseExporter):
             )
             return
 
-        raise ValueError("Modo migrator soporta por ahora: jurisdicciones, proveedores, ped_items, oc_items, orden_compra, solic_gastos, orden_pago")
-
-    def _write_batch_jurisdicciones(self, columns: list[str], rows: list[tuple]) -> None:
-        centros_costo = []
-
-        for row in rows:
-            raw = dict(zip(columns, row))
-            jurisdiccion = raw.get("JURISDICCION")
-            if not jurisdiccion:
-                continue
-            jurisdiccion = str(jurisdiccion).strip()
-            if not jurisdiccion:
-                continue
-
-            denominacion = str(raw.get("DENOMINACION") or "").strip() or jurisdiccion
-            external_id = {"jurisdiccion": jurisdiccion}
-
-            centros_costo.append({
-                "external_id": external_id,
-                "CentroCosto": {
-                    "name": denominacion,
-                    "description": f"Jurisdiccion RAFAM {jurisdiccion}",
-                },
-            })
-
-        if not centros_costo:
-            logger.info("Migrator [jurisdicciones]: lote vacío luego del mapeo")
-            return
-
-        payload = {
-            "dry_run": self._dry_run,
-            "options": self._payload_options(),
-            "centros_costo": centros_costo,
-            "proveedores": [],
-            "pedidos": [],
-            "ordenes_compra": [],
-            "gastos": [],
-            "ordenes_pago": [],
-        }
-
-        url = self._import_url
-        logger.debug(
-            "Migrator request [jurisdicciones] POST %s dry_run=%s centros_costo=%d",
-            url, self._dry_run, len(centros_costo),
-        )
-        parsed = self._post_json(url, payload)
-
-        stats = parsed.get("stats", {}) if isinstance(parsed, dict) else {}
-        centros_stats = stats.get("centros_costo", {}) if isinstance(stats, dict) else {}
-
-        self._persist_links("jurisdicciones", parsed, {})
-        self._raise_on_migrator_errors(parsed)
-        logger.info(
-            "Migrator OK [jurisdicciones]: centros_costo=%d/%d ok, dry_run=%s",
-            centros_stats.get("ok", 0), len(centros_costo),
-            self._dry_run,
-        )
+        raise ValueError("Modo migrator soporta por ahora: proveedores, ped_items, oc_items, orden_compra, solic_gastos, orden_pago")
 
     def _write_batch_proveedores(self, columns: list[str], rows: list[tuple]) -> None:
         proveedores = []
@@ -755,6 +691,7 @@ class MigratorExporter(BaseExporter):
         grouped_raw: dict[tuple[int, int, int], dict] = {}
         grouped_gasto_refs: dict[tuple[int, int, int], list[str]] = {}
         grouped_gasto_linked_refs: dict[tuple[int, int, int], list[str]] = {}
+        grouped_cc_nros: dict[tuple[int, int, int], list[str]] = {}
         skipped_no_prov: set[tuple[int, int, int]] = set()
         unresolved_items = 0
 
@@ -834,6 +771,13 @@ class MigratorExporter(BaseExporter):
                 if rafam_ref not in refs:
                     refs.append(rafam_ref)
 
+            # Recolectar CC_NRO de CTA_HOJA_DE_RUTA (nro comprobante del gasto)
+            cc_nro = str(raw.get("HDR_CC_NRO") or "").strip()
+            if cc_nro:
+                cc_nros = grouped_cc_nros.setdefault(key, [])
+                if cc_nro not in cc_nros:
+                    cc_nros.append(cc_nro)
+
             item = self._map_oc_item(raw)
             if item is None:
                 unresolved_items += 1
@@ -841,27 +785,15 @@ class MigratorExporter(BaseExporter):
                 continue
             grouped[key]["items"].append(item)
 
-        # ── 1b. Resolver gasto_ids por OC via link_gasto ─────────────────
+        # ── 1b. Asignar gasto_nro_comprobante desde CTA_HOJA_DE_RUTA.CC_NRO ──
         for key, oc_data in grouped.items():
-            gasto_refs = grouped_gasto_refs.get(key, [])
-            if not gasto_refs:
-                continue
-            gasto_ids = []
-            gasto_external_ids = []
-            gasto_linked_refs = []
-            for ref in gasto_refs:
-                gasto_external_id = self._gasto_external_id_from_ref(ref)
-                if gasto_external_id is not None:
-                    gasto_external_ids.append(gasto_external_id)
-                remote_gasto = self._get_gasto_remote_id(ref)
-                if remote_gasto:
-                    gasto_ids.append(int(remote_gasto))
-                    gasto_linked_refs.append(ref)
-            if gasto_external_ids:
-                oc_data["gasto_external_ids"] = gasto_external_ids
-            if gasto_ids:
-                oc_data["gasto_ids"] = gasto_ids
-                grouped_gasto_linked_refs[key] = gasto_linked_refs
+            cc_nros = grouped_cc_nros.get(key, [])
+            if cc_nros:
+                if len(cc_nros) == 1:
+                    oc_data["gasto_nro_comprobante"] = cc_nros[0]
+                else:
+                    oc_data["gasto_nro_comprobante"] = cc_nros
+                grouped_gasto_linked_refs[key] = cc_nros
 
         # ── 2. Clasificar OCs por acción según estado y link previo ───────
         ocs_to_create: list[dict] = []      # estado R, sin link o link con estado != R
@@ -1028,6 +960,7 @@ class MigratorExporter(BaseExporter):
         grouped_raw: dict[tuple[int, int, int], dict] = {}
         grouped_gasto_refs: dict[tuple[int, int, int], list[str]] = {}
         grouped_gasto_linked_refs: dict[tuple[int, int, int], list[str]] = {}
+        grouped_cc_nros: dict[tuple[int, int, int], list[str]] = {}
         skipped_no_prov: set[tuple[int, int, int]] = set()
         unresolved_items = 0
 
@@ -1106,6 +1039,13 @@ class MigratorExporter(BaseExporter):
                 if rafam_ref not in refs:
                     refs.append(rafam_ref)
 
+            # Recolectar CC_NRO de CTA_HOJA_DE_RUTA (nro comprobante del gasto)
+            cc_nro = str(raw.get("HDR_CC_NRO") or "").strip()
+            if cc_nro:
+                cc_nros = grouped_cc_nros.setdefault(key, [])
+                if cc_nro not in cc_nros:
+                    cc_nros.append(cc_nro)
+
             item = self._map_oc_item(raw)
             if item is None:
                 unresolved_items += 1
@@ -1113,27 +1053,15 @@ class MigratorExporter(BaseExporter):
                 continue
             grouped[key]["items"].append(item)
 
-        # ── 1b. Resolver gasto_ids por OC via link_gasto ─────────────────
+        # ── 1b. Asignar gasto_nro_comprobante desde CTA_HOJA_DE_RUTA.CC_NRO ──
         for key, oc_data in grouped.items():
-            gasto_refs = grouped_gasto_refs.get(key, [])
-            if not gasto_refs:
-                continue
-            gasto_ids = []
-            gasto_external_ids = []
-            gasto_linked_refs = []
-            for ref in gasto_refs:
-                gasto_external_id = self._gasto_external_id_from_ref(ref)
-                if gasto_external_id is not None:
-                    gasto_external_ids.append(gasto_external_id)
-                remote_gasto = self._get_gasto_remote_id(ref)
-                if remote_gasto:
-                    gasto_ids.append(int(remote_gasto))
-                    gasto_linked_refs.append(ref)
-            if gasto_external_ids:
-                oc_data["gasto_external_ids"] = gasto_external_ids
-            if gasto_ids:
-                oc_data["gasto_ids"] = gasto_ids
-                grouped_gasto_linked_refs[key] = gasto_linked_refs
+            cc_nros = grouped_cc_nros.get(key, [])
+            if cc_nros:
+                if len(cc_nros) == 1:
+                    oc_data["gasto_nro_comprobante"] = cc_nros[0]
+                else:
+                    oc_data["gasto_nro_comprobante"] = cc_nros
+                grouped_gasto_linked_refs[key] = cc_nros
 
         # ── 2. Clasificar OCs por acción según estado y link previo ───────
         ocs_to_create: list[dict] = []
@@ -1360,7 +1288,6 @@ class MigratorExporter(BaseExporter):
             "fecha": fecha,
             "importe_total": importe_total,
             "importe_neto": importe_total,  # RAFAM no discrimina IVA
-            "punto_de_venta": "RAFAM",
         }
 
         cta_count = self._to_int(raw.get("CTA_COMPROB_COUNT"))
@@ -1383,7 +1310,13 @@ class MigratorExporter(BaseExporter):
         if tipo_factura_id is not None:
             gasto_data["tipo_factura_id"] = tipo_factura_id
 
-        gasto_data["factura_nro"] = nro_comprob
+        # Parsear NRO_COMPROB: si tiene guion, separar en punto_de_venta + factura_nro
+        dash_pos = nro_comprob.find("-")
+        if dash_pos > 0:
+            gasto_data["punto_de_venta"] = nro_comprob[:dash_pos]
+            gasto_data["factura_nro"] = nro_comprob[dash_pos + 1:]
+        else:
+            gasto_data["factura_nro"] = nro_comprob
 
 
 
@@ -1445,34 +1378,11 @@ class MigratorExporter(BaseExporter):
                     refs.append(ref)
         return refs
 
-    def _resolve_paxapos_gasto_ids_from_refs(self, gasto_refs: list[str]) -> list[int]:
-        """Resolve Paxapos gasto_ids from SG refs via link_orden_compra.paxapos_gasto_ids.
-
-        Flow: SG ref is in OC's gasto_refs → that OC has paxapos_gasto_ids from
-        Paxapos response → those are the gasto IDs needed for the OP payload.
-        """
-        table = self._link_store._ensure_table("orden_compra")
-        gasto_ids: list[int] = []
-        for ref in gasto_refs:
-            # Find OC links where gasto_refs contains this SG ref
-            rows = self._link_store._conn.execute(
-                f"SELECT paxapos_gasto_ids FROM [{table}] "
-                f"WHERE remote_id != '' AND paxapos_gasto_ids != '' AND gasto_refs LIKE ?",
-                (f"%{ref}%",),
-            ).fetchall()
-            for row in rows:
-                for gid in row["paxapos_gasto_ids"].split(","):
-                    gid = gid.strip()
-                    if gid:
-                        gid_int = int(gid)
-                        if gid_int not in gasto_ids:
-                            gasto_ids.append(gid_int)
-        return gasto_ids
-
     def _write_batch_orden_pago(self, columns: list[str], rows: list[tuple]) -> None:
         # Agrupa por (EJERCICIO, NRO_OP) y acumula las refs de gastos del LEFT JOIN
         grouped: dict[tuple[int, int], dict] = {}
         grouped_gasto_refs: dict[tuple[int, int], list[str]] = {}
+        grouped_cc_nros: dict[tuple[int, int], list[str]] = {}
         grouped_retenciones: dict[tuple[int, int], dict[str, dict]] = {}
         raw_by_source_key: dict[str, dict] = {}
         skipped_estado: dict[str, int] = {}
@@ -1498,15 +1408,12 @@ class MigratorExporter(BaseExporter):
                 if rafam_ref not in refs:
                     refs.append(rafam_ref)
 
-            # Also collect CTA_HOJA_DE_RUTA refs if available
-            hdr_sg_nro = self._to_int(raw.get("HDR_SG_NRO"))
-            hdr_sg_deleg = self._to_int(raw.get("HDR_SG_DELEG"))
-            if hdr_sg_nro is not None and hdr_sg_deleg is not None:
-                hdr_ej = self._to_int(raw.get("HDR_SG_EJERCICIO")) or ejercicio
-                rafam_ref = f"SG-{hdr_ej}-{hdr_sg_deleg}-{hdr_sg_nro}"
-                refs = grouped_gasto_refs.setdefault(key, [])
-                if rafam_ref not in refs:
-                    refs.append(rafam_ref)
+            # Recolectar CC_NRO de CTA_HOJA_DE_RUTA (nro comprobante del gasto)
+            cc_nro = str(raw.get("HDR_CC_NRO") or "").strip()
+            if cc_nro:
+                cc_nros = grouped_cc_nros.setdefault(key, [])
+                if cc_nro not in cc_nros:
+                    cc_nros.append(cc_nro)
 
             estado = str(raw.get("ESTADO_OP", "")).strip().upper()
             if estado != "C":
@@ -1538,6 +1445,14 @@ class MigratorExporter(BaseExporter):
             # Guardar raw para extras en persist_links
             raw_by_source_key[sk] = raw
 
+            # Resolver proveedor_id via link_store (RAFAM COD_PROV → Paxapos id)
+            cod_prov = raw.get("COD_PROV") or raw.get("HDR_OC_COD_PROV")
+            remote_prov_id: int | None = None
+            if cod_prov is not None:
+                remote_prov = self._link_store.get_remote_id("proveedores", str(cod_prov))
+                if remote_prov:
+                    remote_prov_id = int(remote_prov)
+
             importe = raw.get("IMPORTE_TOTAL")
             try:
                 total = round(float(importe), 2) if importe is not None else 0.0
@@ -1547,7 +1462,7 @@ class MigratorExporter(BaseExporter):
             egreso: dict = {
                 "identificador_pago": f"RAFAM-OP-{ejercicio}-{nro_op}",
                 "total": total,
-                "tipo_de_pago_id": self._resolve_tipo_pago_id(),
+                "tipo_de_pago_id": self._resolve_tipo_pago_id(raw),
                 "estado": 3,
                 "fecha": fecha_confirm,
             }
@@ -1560,31 +1475,27 @@ class MigratorExporter(BaseExporter):
                 "external_id": {"ejercicio": ejercicio, "nro_op": nro_op},
                 "Egreso": egreso,
             }
+            if remote_prov_id is not None:
+                grouped[key]["proveedor_id"] = remote_prov_id
 
         ordenes_pago = []
         skipped_no_gasto = 0
         for key, op in grouped.items():
-            gasto_refs = grouped_gasto_refs.get(key, [])
-            if not gasto_refs:
+            cc_nros = grouped_cc_nros.get(key, [])
+            if not cc_nros:
                 skipped_no_gasto += 1
                 logger.debug(
-                    "Migrator [orden_pago] OP %s-%s omitida: sin gasto vinculado (NRO_CANCE sin match en SOLIC_GASTOS)",
+                    "Migrator [orden_pago] OP %s-%s omitida: sin CC_NRO en CTA_HOJA_DE_RUTA",
                     key[0], key[1],
                 )
                 continue
 
-            # Resolver gasto_ids via OC link_store: SG ref → OC (gasto_refs) → paxapos_gasto_ids
-            gasto_ids = self._resolve_paxapos_gasto_ids_from_refs(gasto_refs)
+            # Asignar gasto_nro_comprobante (string o array)
+            if len(cc_nros) == 1:
+                op["gasto_nro_comprobante"] = cc_nros[0]
+            else:
+                op["gasto_nro_comprobante"] = cc_nros
 
-            if not gasto_ids:
-                skipped_no_gasto += 1
-                logger.debug(
-                    "Migrator [orden_pago] OP %s-%s: gasto_refs %s sin paxapos_gasto_ids en link_orden_compra",
-                    key[0], key[1], gasto_refs,
-                )
-                continue
-
-            op["gasto_ids"] = gasto_ids
             retenciones = list(grouped_retenciones.get(key, {}).values())
             if retenciones:
                 op["retenciones"] = retenciones
@@ -1742,15 +1653,35 @@ class MigratorExporter(BaseExporter):
     def _resolve_tipo_factura_id(self, tipo_doc) -> int | None:
         if tipo_doc:
             text = self._normalize_text(tipo_doc)
+            # Primero intentar por codename directo (el RAFAM code)
             by_codename = self._tipos_factura_by_codename.get(text)
             if by_codename and self._to_int(by_codename.get("id")) is not None:
                 return int(by_codename.get("id"))
+            # Segundo: mapear RAFAM code → nombre Paxapos y buscar por name
+            from .gateway_mapper import RAFAM_TIPO_COMPROB_TO_PAXAPOS_NAME
+            paxapos_name = RAFAM_TIPO_COMPROB_TO_PAXAPOS_NAME.get(str(tipo_doc).strip().upper())
+            if paxapos_name:
+                normalized_name = self._normalize_text(paxapos_name)
+                by_name = self._tipos_factura_by_name.get(normalized_name)
+                if by_name and self._to_int(by_name.get("id")) is not None:
+                    return int(by_name.get("id"))
+            # Tercero: buscar por name directo
             by_name = self._tipos_factura_by_name.get(text)
             if by_name and self._to_int(by_name.get("id")) is not None:
                 return int(by_name.get("id"))
         return self._default_tipo_factura_id
 
-    def _resolve_tipo_pago_id(self) -> int:
+    def _resolve_tipo_pago_id(self, raw: dict | None = None) -> int:
+        if raw:
+            from .gateway_mapper import RAFAM_TIPO_CANCE_TO_PAXAPOS_PAGO_NAME, RAFAM_TIPO_CANCE_DEFAULT_PAGO_NAME
+            tipo_cance = str(raw.get("TIPO_CANCE") or "").strip().upper()
+            pago_name = RAFAM_TIPO_CANCE_TO_PAXAPOS_PAGO_NAME.get(
+                tipo_cance, RAFAM_TIPO_CANCE_DEFAULT_PAGO_NAME
+            )
+            normalized = self._normalize_text(pago_name)
+            by_name = self._tipos_de_pago_by_name.get(normalized)
+            if by_name and self._to_int(by_name.get("id")) is not None:
+                return int(by_name.get("id"))
         return self._default_tipo_pago_id
 
     def _map_retencion(self, raw: dict, ejercicio: int, nro_op: int) -> dict | None:
@@ -1816,63 +1747,13 @@ class MigratorExporter(BaseExporter):
                 return int(row.get("id"))
         return None
 
-    _JURISDICCION_DESC_PREFIX = "Jurisdiccion RAFAM "
-
-    @classmethod
-    def _build_jurisdiccion_index(cls, centros_costo: list[dict]) -> dict[str, dict]:
-        idx: dict[str, dict] = {}
-        for cc in centros_costo:
-            desc = str(cc.get("description") or "").strip()
-            if desc.startswith(cls._JURISDICCION_DESC_PREFIX):
-                code = desc[len(cls._JURISDICCION_DESC_PREFIX):].strip()
-                if code and cc.get("id") is not None:
-                    idx[code] = cc
-        return idx
-
-    def _seed_centro_costo_from_lookups(self) -> None:
-        seeded = 0
-        for code, cc in self._centros_costo_by_jurisdiccion.items():
-            remote_id = self._to_int(cc.get("id"))
-            if remote_id is None:
-                continue
-            source_key = json.dumps({"jurisdiccion": code}, sort_keys=True)
-            existing = self._link_store.get_remote_id("centro_costo", source_key)
-            if existing:
-                continue
-            self._link_store.save_link(
-                entity="centro_costo",
-                source_key=source_key,
-                remote_id=str(remote_id),
-            )
-            seeded += 1
-        if seeded:
-            logger.info("Migrator: seeded %d centro_costo links from Paxapos lookups", seeded)
-
     def _resolve_centro_costo_id(self, jurisdiccion) -> int | None:
         if jurisdiccion is None:
             return None
-        jurisdiccion_text = str(jurisdiccion).strip()
-        if not jurisdiccion_text:
+        text = str(jurisdiccion).strip()
+        if not text:
             return None
-
-        source_key = json.dumps({"jurisdiccion": jurisdiccion_text}, sort_keys=True)
-        for key in (source_key, jurisdiccion_text):
-            remote = self._link_store.get_remote_id("centro_costo", key)
-            if remote and self._to_int(remote) is not None:
-                return int(remote)
-
-        # Fallback: buscar en lookups por jurisdiccion parseada de description
-        cc = self._centros_costo_by_jurisdiccion.get(jurisdiccion_text)
-        if cc:
-            remote_id = self._to_int(cc.get("id"))
-            if remote_id is not None:
-                self._link_store.save_link(
-                    entity="centro_costo",
-                    source_key=source_key,
-                    remote_id=str(remote_id),
-                )
-                return remote_id
-        return None
+        return resolve_centro_costo_id(text)
 
     @staticmethod
     def _retencion_alias(value) -> str | None:
@@ -1959,7 +1840,15 @@ class MigratorExporter(BaseExporter):
         return ""
 
     def _resolve_unidad_medida_id(self, raw: dict) -> int:
-        return 5  # Unidad (id=5 en Paxapos) — hardcoded por contrato
+        # Intentar resolver via link_store (si ya se mapeó previamente)
+        uni_med = raw.get("UNI_MED")
+        if uni_med is not None:
+            uni_med_str = str(uni_med).strip()
+            if uni_med_str:
+                remote = self._link_store.get_remote_id("unidad_medida", uni_med_str)
+                if remote and self._to_int(remote) is not None:
+                    return int(remote)
+        return 5  # Unidad (fallback por defecto)
 
 
 
@@ -2104,8 +1993,6 @@ class MigratorExporter(BaseExporter):
 
         if entity == "proveedores":
             self._persist_links_proveedores(results, raw_by_source_key)
-        elif entity == "jurisdicciones":
-            self._persist_links_jurisdicciones(results)
         elif entity == "ped_items":
             self._persist_links_section(results, "pedidos", "pedido", ["ejercicio", "num_ped"])
         elif entity == "oc_items":
@@ -2143,26 +2030,6 @@ class MigratorExporter(BaseExporter):
                 cuit=cuit,
                 cod_estado=cod_estado,
             )
-
-    def _persist_links_jurisdicciones(self, results: dict) -> None:
-        """Persiste entity_links para centros de costo."""
-        centros_costo = results.get("centros_costo", [])
-        if isinstance(centros_costo, list):
-            for cc in centros_costo:
-                if not isinstance(cc, dict) or not cc.get("success"):
-                    continue
-                external_id = cc.get("external_id") or {}
-                if not isinstance(external_id, dict):
-                    continue
-                jurisdiccion = external_id.get("jurisdiccion")
-                remote_id = cc.get("id")
-                if jurisdiccion is None or remote_id is None:
-                    continue
-                self._link_store.save_link(
-                    entity="centro_costo",
-                    source_key=json.dumps({"jurisdiccion": str(jurisdiccion)}, sort_keys=True),
-                    remote_id=str(remote_id),
-                )
 
     def _persist_links_orden_compra(self, results: dict, raw_by_source_key: dict[str, dict]) -> None:
         """Persiste entity_links para ordenes_compra con extras (estado_oc, fech_confirm, etc.)."""

@@ -9,11 +9,6 @@ from .models import EntityConfig
 SCHEMA = "OWNER_RAFAM"
 
 ENTITY_CONFIGS: dict[str, EntityConfig] = {
-    "jurisdicciones": EntityConfig(
-        name="jurisdicciones",
-        table_name="JURISDICCIONES",
-        full_load=True,  # small reference table — always full scan
-    ),
     "proveedores": EntityConfig(
         name="proveedores",
         table_name="PROVEEDORES",

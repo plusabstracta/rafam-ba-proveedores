@@ -11,17 +11,16 @@ BATCH ?= 500
 LIMIT ?=
 EXPORT ?= csv
 
-.PHONY: help setup install env load-dev update-mapping explore-schema rafam-context status run-all test reset-all \
-	run-jurisdicciones run-proveedores run-pedidos run-ped_items run-solic_gastos \
+.PHONY: help setup install env load-dev update-mapping explore-schema extract-cat-uni-med rafam-context status run-all test reset-all \
+	run-proveedores run-pedidos run-ped_items run-solic_gastos \
 	run-orden_compra run-oc_items run-orden_pago \
-	run-jurisdicciones-migrator run-jurisdicciones-migrator-dry \
 	run-proveedores-migrator run-proveedores-migrator-dry \
 	run-ped_items-migrator run-ped_items-migrator-dry \
 	run-oc_items-migrator run-oc_items-migrator-dry \
 	run-solic_gastos-migrator run-solic_gastos-migrator-dry \
 	run-orden_pago-migrator run-orden_pago-migrator-dry \
 	migrator-spec migrator-lookups \
-	reset-jurisdicciones reset-proveedores reset-pedidos reset-ped_items reset-solic_gastos \
+	reset-proveedores reset-pedidos reset-ped_items reset-solic_gastos \
 	reset-orden_compra reset-oc_items reset-orden_pago
 
 help:
@@ -31,13 +30,12 @@ help:
 	@echo "  make load-dev           Carga CSVs a SQLite local"
 	@echo "  make update-mapping     Regenera docs/field_mapping.md desde la DB (SQLite o Oracle)"
 	@echo "  make explore-schema     Genera docs/rafam_schema.md desde Oracle"
+	@echo "  make extract-cat-uni-med  Extrae CAT_UNI_MED de Oracle a docs/cat_uni_med.md"
 	@echo "  make rafam-context      Genera output/rafam_context/*.md con contexto RAFAM medido"
 	@echo "  make status             Muestra estado de checkpoints"
 	@echo "  make run-all            Ejecuta sync de todas las entidades"
 	@echo "  make run-proveedores    Ejecuta sync solo de proveedores"
 	@echo "  make run-orden_compra   Ejecuta sync solo de orden_compra"
-	@echo "  make run-jurisdicciones-migrator-dry  Prueba migrator jurisdicciones (rubros+clasif)"
-	@echo "  make run-jurisdicciones-migrator  Migra jurisdicciones -> rubros y clasificaciones"
 	@echo "  make run-proveedores-migrator  Envia proveedores al migrator RAFAM"
 	@echo "  make run-proveedores-migrator-dry  Prueba migrator con dry_run=true"
 	@echo "  make run-ped_items-migrator-dry  Prueba migracion de ped_items -> pedidos"
@@ -80,6 +78,9 @@ update-mapping-oracle:
 explore-schema:
 	$(PY) scripts/explore_schema.py
 
+extract-cat-uni-med:
+	$(PY) scripts/extract_cat_uni_med.py
+
 rafam-context:
 	$(PY) scripts/generate_rafam_context.py $(RAFAM_CONTEXT_ARGS)
 
@@ -95,17 +96,8 @@ migrator-lookups:
 run-all:
 	$(PY) main.py run --batch-size $(BATCH) $(if $(LIMIT),--limit $(LIMIT),) --export $(EXPORT)
 
-run-jurisdicciones:
-	$(PY) main.py run --entity jurisdicciones --batch-size $(BATCH) $(if $(LIMIT),--limit $(LIMIT),) --export $(EXPORT)
-
 run-proveedores:
 	$(PY) main.py run --entity proveedores --batch-size $(BATCH) $(if $(LIMIT),--limit $(LIMIT),) --export $(EXPORT)
-
-run-jurisdicciones-migrator:
-	$(PY) main.py run --entity jurisdicciones --batch-size $(BATCH) $(if $(LIMIT),--limit $(LIMIT),) --export migrator
-
-run-jurisdicciones-migrator-dry:
-	$(PY) main.py run --entity jurisdicciones --batch-size $(BATCH) $(if $(LIMIT),--limit $(LIMIT),) --export migrator --dry-run
 
 run-proveedores-migrator:
 	$(PY) main.py run --entity proveedores --batch-size $(BATCH) $(if $(LIMIT),--limit $(LIMIT),) --export migrator
@@ -157,9 +149,6 @@ run-orden_pago:
 
 reset-all:
 	$(PY) main.py reset --all
-
-reset-jurisdicciones:
-	$(PY) main.py reset --entity jurisdicciones
 
 reset-proveedores:
 	$(PY) main.py reset --entity proveedores
