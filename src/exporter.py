@@ -564,8 +564,6 @@ class MigratorExporter(BaseExporter):
 
     def _write_batch_jurisdicciones(self, columns: list[str], rows: list[tuple]) -> None:
         centros_costo = []
-        rubros = []
-        clasificaciones = []
 
         for row in rows:
             raw = dict(zip(columns, row))
@@ -586,16 +584,8 @@ class MigratorExporter(BaseExporter):
                     "description": f"Jurisdiccion RAFAM {jurisdiccion}",
                 },
             })
-            rubros.append({
-                "external_id": external_id,
-                "Rubro": {"name": denominacion},
-            })
-            clasificaciones.append({
-                "external_id": external_id,
-                "Clasificacion": {"name": denominacion, "parent_id": None},
-            })
 
-        if not rubros:
+        if not centros_costo:
             logger.info("Migrator [jurisdicciones]: lote vacío luego del mapeo")
             return
 
@@ -603,8 +593,6 @@ class MigratorExporter(BaseExporter):
             "dry_run": self._dry_run,
             "options": self._payload_options(),
             "centros_costo": centros_costo,
-            "rubros": rubros,
-            "clasificaciones": clasificaciones,
             "proveedores": [],
             "pedidos": [],
             "ordenes_compra": [],
@@ -614,23 +602,19 @@ class MigratorExporter(BaseExporter):
 
         url = self._import_url
         logger.debug(
-            "Migrator request [jurisdicciones] POST %s dry_run=%s rubros=%d clasificaciones=%d",
-            url, self._dry_run, len(rubros), len(clasificaciones),
+            "Migrator request [jurisdicciones] POST %s dry_run=%s centros_costo=%d",
+            url, self._dry_run, len(centros_costo),
         )
         parsed = self._post_json(url, payload)
 
         stats = parsed.get("stats", {}) if isinstance(parsed, dict) else {}
         centros_stats = stats.get("centros_costo", {}) if isinstance(stats, dict) else {}
-        rubros_stats = stats.get("rubros", {}) if isinstance(stats, dict) else {}
-        clas_stats = stats.get("clasificaciones", {}) if isinstance(stats, dict) else {}
 
         self._persist_links("jurisdicciones", parsed, {})
         self._raise_on_migrator_errors(parsed)
         logger.info(
-            "Migrator OK [jurisdicciones]: centros_costo=%d/%d ok, rubros=%d/%d ok, clasificaciones=%d/%d ok, dry_run=%s",
+            "Migrator OK [jurisdicciones]: centros_costo=%d/%d ok, dry_run=%s",
             centros_stats.get("ok", 0), len(centros_costo),
-            rubros_stats.get("ok", 0), len(rubros),
-            clas_stats.get("ok", 0), len(clasificaciones),
             self._dry_run,
         )
 
@@ -1401,13 +1385,7 @@ class MigratorExporter(BaseExporter):
 
         gasto_data["factura_nro"] = nro_comprob
 
-        # clasificacion_id via EntityLinkStore (requiere haber sincronizado jurisdicciones)
-        jurisdiccion = raw.get("JURISDICCION")
-        if jurisdiccion is not None:
-            cls_key = json.dumps({"jurisdiccion": str(jurisdiccion)}, sort_keys=True)
-            cls_link = self._link_store.get_remote_id("clasificacion", cls_key)
-            if cls_link:
-                gasto_data["clasificacion_id"] = int(cls_link)
+
 
         # fecha_vencimiento: FECH_NECESIDAD con fallback a FECH_ENTREGA
         fech_venc = (
@@ -1467,12 +1445,35 @@ class MigratorExporter(BaseExporter):
                     refs.append(ref)
         return refs
 
+    def _resolve_paxapos_gasto_ids_from_refs(self, gasto_refs: list[str]) -> list[int]:
+        """Resolve Paxapos gasto_ids from SG refs via link_orden_compra.paxapos_gasto_ids.
+
+        Flow: SG ref is in OC's gasto_refs → that OC has paxapos_gasto_ids from
+        Paxapos response → those are the gasto IDs needed for the OP payload.
+        """
+        table = self._link_store._ensure_table("orden_compra")
+        gasto_ids: list[int] = []
+        for ref in gasto_refs:
+            # Find OC links where gasto_refs contains this SG ref
+            rows = self._link_store._conn.execute(
+                f"SELECT paxapos_gasto_ids FROM [{table}] "
+                f"WHERE remote_id != '' AND paxapos_gasto_ids != '' AND gasto_refs LIKE ?",
+                (f"%{ref}%",),
+            ).fetchall()
+            for row in rows:
+                for gid in row["paxapos_gasto_ids"].split(","):
+                    gid = gid.strip()
+                    if gid:
+                        gid_int = int(gid)
+                        if gid_int not in gasto_ids:
+                            gasto_ids.append(gid_int)
+        return gasto_ids
+
     def _write_batch_orden_pago(self, columns: list[str], rows: list[tuple]) -> None:
         # Agrupa por (EJERCICIO, NRO_OP) y acumula las refs de gastos del LEFT JOIN
         grouped: dict[tuple[int, int], dict] = {}
         grouped_gasto_refs: dict[tuple[int, int], list[str]] = {}
         grouped_retenciones: dict[tuple[int, int], dict[str, dict]] = {}
-        grouped_reco: dict[tuple[int, int], tuple] = {}  # RECO_DEU_COMPRA fallback data
         raw_by_source_key: dict[str, dict] = {}
         skipped_estado: dict[str, int] = {}
         skipped_confirmado: dict[str, int] = {}
@@ -1497,13 +1498,6 @@ class MigratorExporter(BaseExporter):
                 if rafam_ref not in refs:
                     refs.append(rafam_ref)
 
-            # Collect RECO_DEU_COMPRA for fallback resolution (OP → OC → gasto_refs)
-            if key not in grouped_reco:
-                reco_compra = raw.get("RECO_DEU_COMPRA")
-                reco_ejer = raw.get("RECO_DEU_COMPRA_EJER")
-                if reco_compra is not None and str(reco_compra).strip():
-                    grouped_reco[key] = (reco_compra, reco_ejer)
-
             # Also collect CTA_HOJA_DE_RUTA refs if available
             hdr_sg_nro = self._to_int(raw.get("HDR_SG_NRO"))
             hdr_sg_deleg = self._to_int(raw.get("HDR_SG_DELEG"))
@@ -1515,7 +1509,7 @@ class MigratorExporter(BaseExporter):
                     refs.append(rafam_ref)
 
             estado = str(raw.get("ESTADO_OP", "")).strip().upper()
-            if estado != "N":
+            if estado != "C":
                 skipped_estado[estado or "(vacio)"] = skipped_estado.get(estado or "(vacio)", 0) + 1
                 continue
             confirmado = str(raw.get("CONFIRMADO", "")).strip().upper()
@@ -1569,57 +1563,28 @@ class MigratorExporter(BaseExporter):
 
         ordenes_pago = []
         skipped_no_gasto = 0
-        resolved_via_reco = 0
         for key, op in grouped.items():
             gasto_refs = grouped_gasto_refs.get(key, [])
-            # Fallback: resolve via RECO_DEU_COMPRA → OC link_store → gasto_refs
-            if not gasto_refs and key in grouped_reco:
-                reco_compra, reco_ejer = grouped_reco[key]
-                gasto_refs = self._resolve_gasto_refs_via_oc(key[0], reco_compra, reco_ejer)
-                if gasto_refs:
-                    resolved_via_reco += 1
-                    logger.debug(
-                        "Migrator [orden_pago] OP %s-%s: gasto resuelto via RECO_DEU_COMPRA=%s → %s",
-                        key[0], key[1], reco_compra, gasto_refs,
-                    )
             if not gasto_refs:
                 skipped_no_gasto += 1
                 logger.debug(
-                    "Migrator [orden_pago] OP %s-%s omitida: sin gasto vinculado (NRO_CANCE + RECO_DEU_COMPRA sin match)",
+                    "Migrator [orden_pago] OP %s-%s omitida: sin gasto vinculado (NRO_CANCE sin match en SOLIC_GASTOS)",
                     key[0], key[1],
                 )
                 continue
-            # Resolver gasto_ids via link_store (RAFAM rafam_ref → Paxapos gasto id)
-            gasto_ids = []
-            gasto_external_ids = []
-            unresolved_refs = []
-            for ref in gasto_refs:
-                gasto_external_id = self._gasto_external_id_from_ref(ref)
-                if gasto_external_id is not None:
-                    gasto_external_ids.append(gasto_external_id)
-                remote_gasto = self._get_gasto_remote_id(ref)
-                if remote_gasto:
-                    gasto_ids.append(int(remote_gasto))
-                else:
-                    unresolved_refs.append(ref)
+
+            # Resolver gasto_ids via OC link_store: SG ref → OC (gasto_refs) → paxapos_gasto_ids
+            gasto_ids = self._resolve_paxapos_gasto_ids_from_refs(gasto_refs)
 
             if not gasto_ids:
                 skipped_no_gasto += 1
                 logger.debug(
-                    "Migrator [orden_pago] OP %s-%s: gastos sin link remoto: %s",
-                    key[0], key[1], unresolved_refs,
+                    "Migrator [orden_pago] OP %s-%s: gasto_refs %s sin paxapos_gasto_ids en link_orden_compra",
+                    key[0], key[1], gasto_refs,
                 )
                 continue
 
-            if unresolved_refs:
-                logger.warning(
-                    "Migrator [orden_pago] OP %s-%s: %d/%d gastos sin link remoto: %s",
-                    key[0], key[1], len(unresolved_refs), len(gasto_refs), unresolved_refs,
-                )
-
             op["gasto_ids"] = gasto_ids
-            if gasto_external_ids:
-                op["gasto_external_ids"] = gasto_external_ids
             retenciones = list(grouped_retenciones.get(key, {}).values())
             if retenciones:
                 op["retenciones"] = retenciones
@@ -1627,8 +1592,8 @@ class MigratorExporter(BaseExporter):
 
         if skipped_no_gasto:
             logger.warning(
-                "Migrator [orden_pago]: %d OPs omitidas sin gasto vinculado, %d resueltas via RECO_DEU_COMPRA",
-                skipped_no_gasto, resolved_via_reco,
+                "Migrator [orden_pago]: %d OPs omitidas sin gasto vinculado",
+                skipped_no_gasto,
             )
         if skipped_estado:
             logger.info("Migrator [orden_pago]: OPs omitidas por estado: %s", skipped_estado)
@@ -1700,10 +1665,10 @@ class MigratorExporter(BaseExporter):
             item["descripcion"] = str(descripcion)[:255]
             item["observacion"] = str(descripcion)[:255]
 
-        # rubro_id via link_store (JURISDICCION de PED_ITEMS → rubro Paxapos)
-        rubro_id = self._resolve_rubro_id(raw)
-        if rubro_id is not None:
-            item["rubro_id"] = rubro_id
+        # centro_costo_id via link_store (JURISDICCION de PED_ITEMS → centro_costo Paxapos)
+        centro_costo_id = self._resolve_centro_costo_id(raw.get("JURISDICCION"))
+        if centro_costo_id is not None:
+            item["centro_costo_id"] = centro_costo_id
 
         return item
 
@@ -1767,10 +1732,10 @@ class MigratorExporter(BaseExporter):
         if descripcion:
             item["name"] = str(descripcion).strip()[:255]
 
-        # rubro_id via link_store (JURISDICCION de SOLIC_GASTOS JOIN → rubro Paxapos)
-        rubro_id = self._resolve_rubro_id(raw, jurisdiccion_key="SG_JURISDICCION")
-        if rubro_id is not None:
-            item["rubro_id"] = rubro_id
+        # centro_costo_id via link_store (JURISDICCION de SOLIC_GASTOS JOIN → centro_costo Paxapos)
+        centro_costo_id = self._resolve_centro_costo_id(raw.get("SG_JURISDICCION"))
+        if centro_costo_id is not None:
+            item["centro_costo_id"] = centro_costo_id
 
         return item
 
@@ -1996,16 +1961,7 @@ class MigratorExporter(BaseExporter):
     def _resolve_unidad_medida_id(self, raw: dict) -> int:
         return 5  # Unidad (id=5 en Paxapos) — hardcoded por contrato
 
-    def _resolve_rubro_id(self, raw: dict, jurisdiccion_key: str = "JURISDICCION") -> int | None:
-        """Resuelve rubro_id desde JURISDICCION via entity_link_store."""
-        jurisdiccion = raw.get(jurisdiccion_key)
-        if jurisdiccion is None:
-            return None
-        rubro_key = json.dumps({"jurisdiccion": str(jurisdiccion)}, sort_keys=True)
-        remote = self._link_store.get_remote_id("rubro", rubro_key)
-        if remote:
-            return int(remote)
-        return None
+
 
     def _mercaderia_external_ref_oc_item(self, raw: dict) -> dict | None:
         ejercicio = self._to_int(raw.get("EJERCICIO"))
@@ -2189,7 +2145,7 @@ class MigratorExporter(BaseExporter):
             )
 
     def _persist_links_jurisdicciones(self, results: dict) -> None:
-        """Persiste entity_links para centros de costo, rubros y clasificaciones."""
+        """Persiste entity_links para centros de costo."""
         centros_costo = results.get("centros_costo", [])
         if isinstance(centros_costo, list):
             for cc in centros_costo:
@@ -2204,43 +2160,6 @@ class MigratorExporter(BaseExporter):
                     continue
                 self._link_store.save_link(
                     entity="centro_costo",
-                    source_key=json.dumps({"jurisdiccion": str(jurisdiccion)}, sort_keys=True),
-                    remote_id=str(remote_id),
-                )
-
-        rubros = results.get("rubros", [])
-        if isinstance(rubros, list):
-            for r in rubros:
-                if not isinstance(r, dict) or not r.get("success"):
-                    continue
-                external_id = r.get("external_id") or {}
-                if not isinstance(external_id, dict):
-                    continue
-                jurisdiccion = external_id.get("jurisdiccion")
-                remote_id = r.get("id")
-                # r.get('id') is not None evita descartar id=0 (falsy)
-                if jurisdiccion is None or remote_id is None:
-                    continue
-                self._link_store.save_link(
-                    entity="rubro",
-                    source_key=json.dumps({"jurisdiccion": str(jurisdiccion)}, sort_keys=True),
-                    remote_id=str(remote_id),
-                )
-
-        clasificaciones = results.get("clasificaciones", [])
-        if isinstance(clasificaciones, list):
-            for c in clasificaciones:
-                if not isinstance(c, dict) or not c.get("success"):
-                    continue
-                external_id = c.get("external_id") or {}
-                if not isinstance(external_id, dict):
-                    continue
-                jurisdiccion = external_id.get("jurisdiccion")
-                remote_id = c.get("id")
-                if jurisdiccion is None or remote_id is None:
-                    continue
-                self._link_store.save_link(
-                    entity="clasificacion",
                     source_key=json.dumps({"jurisdiccion": str(jurisdiccion)}, sort_keys=True),
                     remote_id=str(remote_id),
                 )
@@ -2277,6 +2196,10 @@ class MigratorExporter(BaseExporter):
             gasto_refs = raw.get("_GASTO_REFS", "")
             gasto_linked_refs = raw.get("_GASTO_LINKED_REFS", "")
 
+            # gasto_ids returned by Paxapos in the OC response
+            paxapos_gasto_ids_list = result.get("gasto_ids") or []
+            paxapos_gasto_ids = ",".join(str(g) for g in paxapos_gasto_ids_list) if paxapos_gasto_ids_list else ""
+
             self._link_store.save_link(
                 entity="orden_compra",
                 source_key=source_key,
@@ -2287,6 +2210,7 @@ class MigratorExporter(BaseExporter):
                 importe_tot=importe_tot,
                 gasto_refs=gasto_refs,
                 gasto_linked_refs=gasto_linked_refs,
+                paxapos_gasto_ids=paxapos_gasto_ids,
             )
 
     def _persist_links_solic_gastos(self, results: dict, raw_by_source_key: dict[str, dict]) -> None:

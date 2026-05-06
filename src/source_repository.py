@@ -413,7 +413,7 @@ class SourceRepository:
         confirmado_col = self._safe_column(orden_pago, "CONFIRMADO")
         fech_confirm_col = self._safe_column(orden_pago, "FECH_CONFIRM")
         if estado_col is not None:
-            base_filters.append(estado_col == "N")
+            base_filters.append(estado_col == "C")
         if confirmado_col is not None:
             base_filters.append(confirmado_col == "S")
         if fech_confirm_col is not None:

@@ -34,7 +34,7 @@ def dev_engine():
 
 @pytest.fixture(scope="module")
 def exporter_with_links(dev_engine):
-    """MigratorExporter con proveedores y rubros pre-linkeados desde la DB local."""
+    """MigratorExporter con proveedores y centros de costo pre-linkeados desde la DB local."""
     with patch("src.exporter.fetch_migrator_lookups") as ml:
         ml.return_value = {
             "unidades_de_medida": [{"id": "1", "name": "Unidad"}],
@@ -59,14 +59,9 @@ def exporter_with_links(dev_engine):
                 source_key=str(cod),
                 remote_id=str(10000 + int(cod)),
             )
-        # Pre-linkear rubros (jurisdicciones)
+        # Pre-linkear centros de costo (jurisdicciones)
         for (j,) in conn.execute(text("SELECT JURISDICCION FROM JURISDICCIONES")).fetchall():
             jurisdiccion_key = json.dumps({"jurisdiccion": str(j)}, sort_keys=True)
-            exp._link_store.save_link(
-                entity="rubro",
-                source_key=jurisdiccion_key,
-                remote_id=str(abs(hash(j)) % 1000 + 1),
-            )
             exp._link_store.save_link(
                 entity="centro_costo",
                 source_key=jurisdiccion_key,

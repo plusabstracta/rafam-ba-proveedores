@@ -10,14 +10,12 @@ _TABLE_PREFIX = "link_"
 DEFAULT_LINK_SCHEMAS: dict[str, list[str]] = {
     "proveedores": ["cuit", "cod_estado"],
     "centro_costo": [],
-    "clasificacion": [],
-    "rubro": [],
     "unidad_medida": ["name", "codigo"],
     "tipo_factura": ["name", "codigo"],
     "tipo_pago": ["name", "codigo"],
     "tipo_retencion": ["name", "codigo"],
     "pedido": [],
-    "orden_compra": ["fech_confirm", "estado_oc", "cod_prov", "importe_tot", "gasto_refs", "gasto_linked_refs"],
+    "orden_compra": ["fech_confirm", "estado_oc", "cod_prov", "importe_tot", "gasto_refs", "gasto_linked_refs", "paxapos_gasto_ids"],
     "gasto": ["estado_solic", "importe_tot", "cod_prov"],
     "orden_pago": ["estado_op", "confirmado", "fech_confirm", "importe_total"],
 }
