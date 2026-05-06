@@ -25,9 +25,9 @@ def main():
         print("ERROR: Configurar RAFAM_SOURCE_USER y RAFAM_SOURCE_PASSWORD en .env")
         sys.exit(1)
 
+    # Thick mode requerido para Oracle < 12.2
     oracle_client_dir = os.getenv("ORACLE_CLIENT_DIR")
-    if oracle_client_dir:
-        oracledb.init_oracle_client(lib_dir=oracle_client_dir)
+    oracledb.init_oracle_client(lib_dir=oracle_client_dir or None)
 
     dsn = oracledb.makedsn(DB_HOST, DB_PORT, service_name=DB_SERVICE)
     conn = oracledb.connect(user=DB_USER, password=DB_PASSWORD, dsn=dsn)
