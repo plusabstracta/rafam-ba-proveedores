@@ -4,32 +4,42 @@ import os
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT))
 
 from dotenv import load_dotenv
-from sqlalchemy import create_engine, text
 
-load_dotenv()
+load_dotenv(REPO_ROOT / ".env")
+
+import oracledb
+
+DB_HOST = os.getenv("RAFAM_SOURCE_HOST", os.getenv("DB_HOST", "10.10.91.241"))
+DB_PORT = int(os.getenv("RAFAM_SOURCE_PORT", os.getenv("DB_PORT", "1521")))
+DB_SERVICE = os.getenv("RAFAM_SOURCE_SERVICE", os.getenv("DB_SERVICE", "BDRAFAM"))
+DB_USER = os.getenv("RAFAM_SOURCE_USER")
+DB_PASSWORD = os.getenv("RAFAM_SOURCE_PASSWORD")
 
 
 def main():
-    oracle_dsn = os.getenv("ORACLE_DSN")
-    oracle_user = os.getenv("ORACLE_USER")
-    oracle_pass = os.getenv("ORACLE_PASSWORD")
-
-    if not all([oracle_dsn, oracle_user, oracle_pass]):
-        print("ERROR: Configurar ORACLE_DSN, ORACLE_USER, ORACLE_PASSWORD en .env")
+    if not DB_USER or not DB_PASSWORD:
+        print("ERROR: Configurar RAFAM_SOURCE_USER y RAFAM_SOURCE_PASSWORD en .env")
         sys.exit(1)
 
-    url = f"oracle+oracledb://{oracle_user}:{oracle_pass}@{oracle_dsn}"
-    engine = create_engine(url)
+    oracle_client_dir = os.getenv("ORACLE_CLIENT_DIR")
+    if oracle_client_dir:
+        oracledb.init_oracle_client(lib_dir=oracle_client_dir)
 
-    query = text("SELECT CODIGO, DESCRIPCION FROM OWNER_RAFAM.CAT_UNI_MED ORDER BY CODIGO")
+    dsn = oracledb.makedsn(DB_HOST, DB_PORT, service_name=DB_SERVICE)
+    conn = oracledb.connect(user=DB_USER, password=DB_PASSWORD, dsn=dsn)
+    print(f"Conectado a [{DB_SERVICE}] en {DB_HOST}:{DB_PORT}")
 
-    with engine.connect() as conn:
-        rows = conn.execute(query).fetchall()
+    cursor = conn.cursor()
+    cursor.execute("SELECT CODIGO, DESCRIPCION FROM OWNER_RAFAM.CAT_UNI_MED ORDER BY CODIGO")
+    rows = cursor.fetchall()
+    cursor.close()
+    conn.close()
 
-    output = Path(__file__).resolve().parent.parent / "docs" / "cat_uni_med.md"
+    output = REPO_ROOT / "docs" / "cat_uni_med.md"
     output.parent.mkdir(parents=True, exist_ok=True)
 
     with open(output, "w") as f:
