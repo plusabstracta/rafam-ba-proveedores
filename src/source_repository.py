@@ -34,7 +34,16 @@ class SourceRepository:
             # Column names are uppercased to match Oracle conventions, since
             # python-oracledb returns them lowercase from get_columns().
             insp = sa_inspect(self._conn)
-            col_defs = insp.get_columns(table_name, schema=self._schema)
+            try:
+                col_defs = insp.get_columns(table_name, schema=self._schema)
+            except Exception as exc:
+                if self._conn.dialect.name == "sqlite":
+                    raise type(exc)(
+                        f"{table_name} — tabla no encontrada en SQLite. "
+                        f"Ejecuta 'make load-dev' para cargar CSVs, o cambia "
+                        f"RAFAM_SOURCE_BACKEND=oracle en .env"
+                    ) from exc
+                raise
             table = Table(table_name, self._metadata, schema=self._schema)
             for col_def in col_defs:
                 table.append_column(Column(col_def["name"].upper(), col_def["type"]))

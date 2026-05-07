@@ -1962,7 +1962,7 @@ class MigratorExporter(BaseExporter):
         errors = parsed.get("errors")
         if isinstance(errors, list) and errors:
             sample = json.dumps(errors[:3], ensure_ascii=False)
-            raise RuntimeError(f"Migrator devolvio errores parciales: {sample}")
+            logger.warning("Migrator devolvio errores parciales (%d): %s", len(errors), sample)
 
         stats = parsed.get("stats")
         if not isinstance(stats, dict):
@@ -1981,7 +1981,7 @@ class MigratorExporter(BaseExporter):
                 failed.append(f"{section}={error_count}")
 
         if failed:
-            raise RuntimeError(f"Migrator reporto errores en stats: {', '.join(failed)}")
+            logger.warning("Migrator reporto errores en stats: %s", ", ".join(failed))
 
     def _persist_links(self, entity: str, parsed: dict, raw_by_source_key: dict[str, dict]) -> None:
         if self._dry_run or not isinstance(parsed, dict):
