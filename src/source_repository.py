@@ -74,6 +74,85 @@ class SourceRepository:
     def execute(self, stmt: Select):
         return self._conn.execution_options(stream_results=True).execute(stmt)
 
+    def fetch_retenciones_for_ops(
+        self,
+        op_keys: list[tuple[int, int]] | set[tuple[int, int]],
+    ) -> dict[tuple[int, int], list[dict]]:
+        """Trae retenciones para un set de OPs identificadas por (EJERCICIO, NRO_CANCE).
+
+        Devuelve dict {(ejercicio, nro_cance): [{cod_ret, importe, descripcion}, ...]}.
+        Se hace en query separada para evitar producto cartesiano OP×RET×CTA_HOJA_DE_RUTA
+        en _build_orden_pago_statement.
+        """
+        if not op_keys:
+            return {}
+
+        retenciones = self._reflect_optional_table("RETENCIONES")
+        if retenciones is None:
+            return {}
+        deducciones = self._reflect_optional_table("DEDUCCIONES")
+
+        ret_ej = self._safe_column(retenciones, "EJERCICIO")
+        ret_nc = self._safe_column(retenciones, "NRO_CANCE")
+        ret_cod = self._safe_column(retenciones, "COD_RET")
+        ret_imp = self._safe_column(retenciones, "IMPORTE")
+        if ret_ej is None or ret_nc is None or ret_cod is None or ret_imp is None:
+            return {}
+
+        select_cols = [
+            ret_ej.label("EJERCICIO"),
+            ret_nc.label("NRO_CANCE"),
+            ret_cod.label("COD_RET"),
+            ret_imp.label("IMPORTE"),
+        ]
+        from_clause = retenciones
+
+        if deducciones is not None:
+            ded_codigo = self._safe_column(deducciones, "CODIGO")
+            ded_desc = self._safe_column(deducciones, "DESCRIPCION")
+            if ded_codigo is not None:
+                join_conditions = [ret_cod == ded_codigo]
+                ded_ejercicio = self._safe_column(deducciones, "EJERCICIO")
+                if ded_ejercicio is not None:
+                    join_conditions.append(ret_ej == ded_ejercicio)
+                from_clause = from_clause.outerjoin(deducciones, and_(*join_conditions))
+                if ded_desc is not None:
+                    select_cols.append(ded_desc.label("DESCRIPCION"))
+
+        # Filtrar por (EJERCICIO, NRO_CANCE) IN (...) — usamos OR de tuplas para
+        # compatibilidad SQLite/Oracle.
+        # Agrupamos por ejercicio para minimizar predicados.
+        keys_by_ej: dict[int, set[int]] = {}
+        for ej, nc in op_keys:
+            if ej is None or nc is None:
+                continue
+            keys_by_ej.setdefault(int(ej), set()).add(int(nc))
+
+        if not keys_by_ej:
+            return {}
+
+        ej_filters = []
+        for ej, ncs in keys_by_ej.items():
+            ej_filters.append(and_(ret_ej == ej, ret_nc.in_(list(ncs))))
+
+        stmt = select(*select_cols).select_from(from_clause).where(or_(*ej_filters))
+
+        out: dict[tuple[int, int], list[dict]] = {}
+        for row in self._conn.execute(stmt):
+            mapping = row._mapping
+            try:
+                ej = int(mapping["EJERCICIO"])
+                nc = int(mapping["NRO_CANCE"])
+            except (TypeError, ValueError, KeyError):
+                continue
+            entry = {
+                "cod_ret": mapping.get("COD_RET"),
+                "importe": mapping.get("IMPORTE"),
+                "descripcion": mapping.get("DESCRIPCION") if "DESCRIPCION" in mapping.keys() else None,
+            }
+            out.setdefault((ej, nc), []).append(entry)
+        return out
+
     def _build_simple_table_statement(
         self,
         cfg: EntityConfig,
@@ -384,8 +463,9 @@ class SourceRepository:
     ) -> Select:
         orden_pago = self._reflect_table("ORDEN_PAGO")
         solic_gastos = self._reflect_table("SOLIC_GASTOS")
-        retenciones = self._reflect_optional_table("RETENCIONES")
-        deducciones = self._reflect_optional_table("DEDUCCIONES")
+        # NOTE: RETENCIONES y DEDUCCIONES NO se joinean acá — se traen aparte
+        # via fetch_retenciones_for_ops() para evitar producto cartesiano con
+        # CTA_HOJA_DE_RUTA (que tambien explota filas por OP).
         # CTA_HOJA_DE_RUTA: denormalized view linking OC→SG (and optionally PE).
         # In Oracle it's a pre-built VIEW; in SQLite dev it's a derived VIEW
         # created by load_csv_to_sqlite.py.  Required in both environments.
@@ -435,33 +515,6 @@ class SourceRepository:
             col = self._safe_column(cta_hdr, col_name) if cta_hdr is not None else None
             if col is not None:
                 select_cols.append(col.label(label))
-
-        if retenciones is not None:
-            from_clause = from_clause.outerjoin(
-                retenciones,
-                and_(
-                    orden_pago.c.EJERCICIO == retenciones.c.EJERCICIO,
-                    orden_pago.c.NRO_CANCE == retenciones.c.NRO_CANCE,
-                ),
-            )
-            ret_cod = self._safe_column(retenciones, "COD_RET")
-            ret_importe = self._safe_column(retenciones, "IMPORTE")
-            if ret_cod is not None:
-                select_cols.append(ret_cod.label("RET_COD_RET"))
-            if ret_importe is not None:
-                select_cols.append(ret_importe.label("RET_IMPORTE"))
-
-            if deducciones is not None:
-                ded_codigo = self._safe_column(deducciones, "CODIGO")
-                ded_desc = self._safe_column(deducciones, "DESCRIPCION")
-                if ded_codigo is not None and ret_cod is not None:
-                    join_conditions = [ret_cod == ded_codigo]
-                    ded_ejercicio = self._safe_column(deducciones, "EJERCICIO")
-                    if ded_ejercicio is not None:
-                        join_conditions.append(orden_pago.c.EJERCICIO == ded_ejercicio)
-                    from_clause = from_clause.outerjoin(deducciones, and_(*join_conditions))
-                    if ded_desc is not None:
-                        select_cols.append(ded_desc.label("RET_DESCRIPCION"))
 
         stmt = select(*select_cols).select_from(from_clause)
         stmt = self._apply_incremental_filters(stmt, orden_pago, cfg, checkpoint)

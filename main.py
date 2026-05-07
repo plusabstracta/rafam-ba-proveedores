@@ -23,7 +23,7 @@ from src.checkpoint_store import CheckpointStore
 from src.config import ENTITY_CONFIGS
 from src.db import create_source_engine
 from src.entity_link_store import EntityLinkStore
-from src.exporter import BaseExporter, build_exporter, fetch_migrator_lookups, fetch_migrator_spec
+from src.exporter import BaseExporter, _env_bool, build_exporter, fetch_migrator_lookups, fetch_migrator_spec
 from src.source_repository import SourceRepository
 from src.sync_engine import SyncEngine
 
@@ -274,11 +274,27 @@ def cmd_run(args) -> None:
     engine   = _build_engine()
     targets  = [args.entity] if args.entity else list(ENTITY_CONFIGS.keys())
 
+    # solic_gastos: solo se migra explícitamente (--entity solic_gastos) o
+    # cuando RAFAM_MIGRATE_SOLIC_GASTOS=true (carga histórica inicial).
+    # En runs incrementales los gastos los crean humanos en Paxapos y RAFAM
+    # solo manda los pagos vinculados via NRO_COMPROBANTE.
+    if not args.entity and not _env_bool("RAFAM_MIGRATE_SOLIC_GASTOS", "false"):
+        if "solic_gastos" in targets:
+            targets.remove("solic_gastos")
+            logger.info(
+                "solic_gastos OMITIDO (RAFAM_MIGRATE_SOLIC_GASTOS=false). "
+                "Para incluir: --entity solic_gastos o exportar RAFAM_MIGRATE_SOLIC_GASTOS=true",
+            )
+
     try:
         source_engine = create_source_engine()
         with source_engine.connect() as conn:
             logger.info("Conexión a base origen establecida (%s)", source_engine.url.get_backend_name())
             source_repo = SourceRepository(conn)
+            # Inyectar source_repo al exporter para fetch secundarios
+            # (ej: retenciones por OP, evita cartesian en query principal).
+            if hasattr(exporter, "attach_source"):
+                exporter.attach_source(source_repo)
             for entity in targets:
                 _sync_entity(source_repo, engine, exporter, entity, args.batch_size, args.limit, args.dry_run)
     except (SQLAlchemyError, ValueError) as exc:

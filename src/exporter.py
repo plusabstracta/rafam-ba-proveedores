@@ -45,6 +45,10 @@ class BaseExporter(ABC):
     def write_batch(self, entity: str, columns: list[str], rows: list[tuple]) -> None:
         """Procesa un lote de filas para la entidad dada."""
 
+    def attach_source(self, source_repo) -> None:
+        """Inyecta SourceRepository para fetch secundarios. Default: no-op."""
+        return None
+
     def close(self) -> None:
         """Llamado una vez al finalizar todas las entidades. Override si necesario."""
 
@@ -507,11 +511,17 @@ class MigratorExporter(BaseExporter):
         self._tipos_retencion_by_codename = self._build_single_index(self._tipos_retencion, "codename")
         self._tipos_retencion_by_name = self._build_single_index(self._tipos_retencion, "name")
         self._missing_mercaderia_matches: dict[str, int] = {}
+        self._source_repo = None
+        self._retencion_skipped_no_catalog: int = 0
+        self._retencion_skipped_no_match: dict[str, int] = {}
 
         if not self._verify_ssl:
             logger.warning("PAXAPOS_VERIFY_SSL=false: SSL certificate verification deshabilitada para migrator")
         if isinstance(self._lookup_payload, dict) and self._lookup_payload.get("_partial_errors"):
             logger.warning("Migrator lookups parciales: %s", self._lookup_payload.get("_partial_errors"))
+
+    def attach_source(self, source_repo) -> None:
+        self._source_repo = source_repo
 
     def _payload_options(self) -> dict:
         return {
@@ -1379,11 +1389,14 @@ class MigratorExporter(BaseExporter):
         return refs
 
     def _write_batch_orden_pago(self, columns: list[str], rows: list[tuple]) -> None:
-        # Agrupa por (EJERCICIO, NRO_OP) y acumula las refs de gastos del LEFT JOIN
+        # Agrupa por (EJERCICIO, NRO_OP) y acumula las refs de gastos del LEFT JOIN.
+        # NOTA: las retenciones NO vienen en este batch — se traen por separado
+        # via source_repo.fetch_retenciones_for_ops() para evitar producto cartesiano
+        # con CTA_HOJA_DE_RUTA. Ver source_repository._build_orden_pago_statement.
         grouped: dict[tuple[int, int], dict] = {}
         grouped_gasto_refs: dict[tuple[int, int], list[str]] = {}
         grouped_cc_nros: dict[tuple[int, int], list[str]] = {}
-        grouped_retenciones: dict[tuple[int, int], dict[str, dict]] = {}
+        op_to_nro_cance: dict[tuple[int, int], int] = {}
         raw_by_source_key: dict[str, dict] = {}
         skipped_estado: dict[str, int] = {}
         skipped_confirmado: dict[str, int] = {}
@@ -1434,11 +1447,6 @@ class MigratorExporter(BaseExporter):
                 skipped_existing_keys.add(key)
                 continue
 
-            retencion = self._map_retencion(raw, ejercicio, nro_op)
-            if retencion is not None:
-                ret_key = json.dumps(retencion.get("external_id", {}), sort_keys=True)
-                grouped_retenciones.setdefault(key, {})[ret_key] = retencion
-
             if key in grouped:
                 continue
 
@@ -1478,6 +1486,21 @@ class MigratorExporter(BaseExporter):
             if remote_prov_id is not None:
                 grouped[key]["proveedor_id"] = remote_prov_id
 
+            # Guardar NRO_CANCE para fetch posterior de retenciones
+            nro_cance = self._to_int(raw.get("NRO_CANCE"))
+            if nro_cance is not None:
+                op_to_nro_cance[key] = nro_cance
+
+        # Fetch retenciones en query separada (por (EJERCICIO, NRO_CANCE))
+        retenciones_by_op: dict[tuple[int, int], list[dict]] = {}
+        if op_to_nro_cance and self._source_repo is not None:
+            cance_keys = {(ej, nc) for (ej, _), nc in op_to_nro_cance.items()}
+            cance_to_rets = self._source_repo.fetch_retenciones_for_ops(list(cance_keys))
+            for op_key, nc in op_to_nro_cance.items():
+                rets = cance_to_rets.get((op_key[0], nc), [])
+                if rets:
+                    retenciones_by_op[op_key] = rets
+
         ordenes_pago = []
         skipped_no_gasto = 0
         for key, op in grouped.items():
@@ -1496,9 +1519,14 @@ class MigratorExporter(BaseExporter):
             else:
                 op["gasto_nro_comprobante"] = cc_nros
 
-            retenciones = list(grouped_retenciones.get(key, {}).values())
-            if retenciones:
-                op["retenciones"] = retenciones
+            # Mapear retenciones (de fetch separado)
+            ret_payload = []
+            for ret in retenciones_by_op.get(key, []):
+                mapped = self._map_retencion_dict(ret, key[0], key[1])
+                if mapped is not None:
+                    ret_payload.append(mapped)
+            if ret_payload:
+                op["retenciones"] = ret_payload
             ordenes_pago.append(op)
 
         if skipped_no_gasto:
@@ -1514,6 +1542,19 @@ class MigratorExporter(BaseExporter):
             logger.info("Migrator [orden_pago]: %d OPs omitidas sin FECH_CONFIRM", skipped_no_fech_confirm)
         if skipped_existing_keys:
             logger.info("Migrator [orden_pago]: %d OPs omitidas por link local existente", len(skipped_existing_keys))
+        if self._retencion_skipped_no_catalog:
+            logger.warning(
+                "Migrator [orden_pago]: %d retenciones omitidas porque tipos_retencion lookup esta vacio. "
+                "Cargar account_tipo_impuestos en el tenant Paxapos.",
+                self._retencion_skipped_no_catalog,
+            )
+            self._retencion_skipped_no_catalog = 0
+        if self._retencion_skipped_no_match:
+            logger.warning(
+                "Migrator [orden_pago]: retenciones omitidas sin match en lookup: %s",
+                self._retencion_skipped_no_match,
+            )
+            self._retencion_skipped_no_match = {}
 
         if not ordenes_pago:
             logger.info("Migrator [orden_pago]: lote vacío luego del mapeo")
@@ -1686,9 +1727,15 @@ class MigratorExporter(BaseExporter):
                 return int(by_name.get("id"))
         return self._default_tipo_pago_id
 
-    def _map_retencion(self, raw: dict, ejercicio: int, nro_op: int) -> dict | None:
-        cod_ret = raw.get("RET_COD_RET")
-        importe = raw.get("RET_IMPORTE")
+    def _map_retencion_dict(self, ret: dict, ejercicio: int, nro_op: int) -> dict | None:
+        """Mapea una retencion (dict con cod_ret/importe/descripcion) al formato Paxapos.
+
+        Pre-resuelve tipo_impuesto_id contra el catalogo del tenant (lookups.tipos_retencion).
+        Si el catalogo esta vacio o no hay match, OMITE la retencion (con contador para warning)
+        en vez de mandar al servidor para que falle.
+        """
+        cod_ret = ret.get("cod_ret")
+        importe = ret.get("importe")
         if cod_ret is None or importe is None:
             return None
 
@@ -1703,7 +1750,23 @@ class MigratorExporter(BaseExporter):
         if monto_retenido == 0:
             return None
 
-        descripcion = str(raw.get("RET_DESCRIPCION") or "").strip()
+        descripcion = str(ret.get("descripcion") or "").strip()
+
+        tipo_retencion_id = self._resolve_tipo_retencion_id(cod_text, descripcion)
+        if tipo_retencion_id is None:
+            # Intentar via alias (ganancias/iibb/suss/iva) → buscar en catalogo
+            alias = self._retencion_alias(descripcion or cod_text)
+            if alias:
+                tipo_retencion_id = self._resolve_tipo_retencion_id_by_alias(alias)
+
+        if tipo_retencion_id is None:
+            if not self._tipos_retencion:
+                self._retencion_skipped_no_catalog += 1
+            else:
+                key = descripcion or f"COD_RET={cod_text}"
+                self._retencion_skipped_no_match[key] = self._retencion_skipped_no_match.get(key, 0) + 1
+            return None
+
         retencion: dict = {
             "external_id": {
                 "ejercicio": ejercicio,
@@ -1712,22 +1775,38 @@ class MigratorExporter(BaseExporter):
             },
             "monto_retenido": monto_retenido,
             "numero_certificado": f"RAFAM-RET-{ejercicio}-{nro_op}-{cod_text}",
+            "tipo_impuesto_id": tipo_retencion_id,
         }
-
-        tipo_retencion_id = self._resolve_tipo_retencion_id(cod_text, descripcion)
-        if tipo_retencion_id is not None:
-            retencion["tipo_impuesto_id"] = tipo_retencion_id
-        else:
-            alias = self._retencion_alias(descripcion or cod_text)
-            if alias:
-                retencion["tipo"] = alias
-            elif descripcion:
-                retencion["tipo_impuesto_name"] = descripcion
 
         if descripcion:
             retencion["observacion"] = f"Retencion RAFAM {descripcion} OP {ejercicio}/{nro_op}"
 
         return retencion
+
+    def _resolve_tipo_retencion_id_by_alias(self, alias: str) -> int | None:
+        """Busca un tipo_impuesto en lookups por alias normalizado (ganancias/iibb/suss/iva).
+
+        Match por name normalizado conteniendo el alias.
+        """
+        if not alias or not self._tipos_retencion:
+            return None
+        target_tokens = {
+            "ganancias": ("ganancia",),
+            "iibb": ("iibb", "ingresos brutos", "ingreso bruto"),
+            "suss": ("suss", "seguridad social"),
+            "iva": ("iva",),
+        }.get(alias, (alias,))
+
+        for tr in self._tipos_retencion:
+            name_norm = self._normalize_text(tr.get("name") or "")
+            if not name_norm:
+                continue
+            for tok in target_tokens:
+                if self._normalize_text(tok) in name_norm:
+                    tid = self._to_int(tr.get("id"))
+                    if tid is not None:
+                        return tid
+        return None
 
     def _resolve_tipo_retencion_id(self, cod_ret, descripcion) -> int | None:
         cod_text = str(cod_ret).strip() if cod_ret is not None else ""
@@ -1921,6 +2000,16 @@ class MigratorExporter(BaseExporter):
 
     def _post_json(self, url: str, payload: dict) -> dict:
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        # Debug opcional: si DUMP_PAYLOAD esta seteado, vuelca request+response a un archivo.
+        dump_path = os.environ.get("DUMP_PAYLOAD")
+        if dump_path:
+            try:
+                with open(dump_path, "ab") as fh:
+                    fh.write(("\n=== POST " + url + " ===\n").encode("utf-8"))
+                    fh.write(json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"))
+                    fh.write(b"\n")
+            except OSError:
+                pass
         req = request.Request(url=url, data=data, headers=self._headers(), method="POST")
         ssl_context = None
         if not self._verify_ssl:
@@ -1949,6 +2038,14 @@ class MigratorExporter(BaseExporter):
                 parsed = json.loads(body) if body else {}
                 if isinstance(parsed, dict) and parsed.get("errors"):
                     logger.debug("Migrator response errors=%s", parsed.get("errors"))
+                if dump_path:
+                    try:
+                        with open(dump_path, "ab") as fh:
+                            fh.write(b"--- RESPONSE ---\n")
+                            fh.write(json.dumps(parsed, ensure_ascii=False, indent=2).encode("utf-8"))
+                            fh.write(b"\n")
+                    except OSError:
+                        pass
                 return parsed
         except error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace") if exc.fp else ""
