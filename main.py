@@ -22,6 +22,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from src.checkpoint_store import CheckpointStore
 from src.config import ENTITY_CONFIGS
 from src.db import create_source_engine
+from src.entity_link_store import EntityLinkStore
 from src.exporter import BaseExporter, build_exporter, fetch_migrator_lookups, fetch_migrator_spec
 from src.source_repository import SourceRepository
 from src.sync_engine import SyncEngine
@@ -36,6 +37,17 @@ _GROUPED_BATCH_FIELDS = {
     "oc_items": ["EJERCICIO", "UNI_COMPRA", "NRO_OC"],
     "orden_compra": ["EJERCICIO", "UNI_COMPRA", "NRO_OC"],
     "orden_pago": ["EJERCICIO", "NRO_OP"],
+}
+
+# Maps entity config names to the link store entity they write to.
+_ENTITY_LINK_NAMES: dict[str, str] = {
+    "proveedores": "proveedores",
+    "pedidos": "pedido",
+    "ped_items": "pedido",
+    "orden_compra": "orden_compra",
+    "oc_items": "orden_compra",
+    "solic_gastos": "gasto",
+    "orden_pago": "orden_pago",
 }
 
 
@@ -79,12 +91,18 @@ def cmd_reset(args) -> None:
         sys.exit(1)
 
     engine = _build_engine()
+    link_store = EntityLinkStore()
 
     if args.all:
         for entity in ENTITY_CONFIGS:
             engine.reset_checkpoint(entity)
             logger.info("Reseteado: %s", entity)
-        logger.info("Todos los checkpoints reseteados — próxima ejecución será full load.")
+        cleared = link_store.clear_all()
+        for link_entity, count in cleared.items():
+            if count:
+                logger.info("Links borrados: %s (%d)", link_entity, count)
+        link_store.close()
+        logger.info("Todos los checkpoints y links reseteados — próxima ejecución será full load.")
         return
 
     if args.entity not in ENTITY_CONFIGS:
@@ -95,6 +113,11 @@ def cmd_reset(args) -> None:
         sys.exit(1)
 
     engine.reset_checkpoint(args.entity)
+    link_entity = _ENTITY_LINK_NAMES.get(args.entity)
+    if link_entity:
+        count = link_store.clear_entity(link_entity)
+        logger.info("Links borrados: %s (%d)", link_entity, count)
+    link_store.close()
     logger.info("Checkpoint reseteado: %s", args.entity)
 
 

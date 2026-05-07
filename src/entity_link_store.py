@@ -83,6 +83,22 @@ class EntityLinkStore:
     def close(self) -> None:
         self._conn.close()
 
+    # ── reset ─────────────────────────────────────────────────────────────
+
+    def clear_entity(self, entity: str) -> int:
+        """Delete all links for a single entity. Returns rows deleted."""
+        table = self._ensure_table(entity)
+        cursor = self._conn.execute(f"DELETE FROM [{table}]")
+        self._conn.commit()
+        return cursor.rowcount
+
+    def clear_all(self) -> dict[str, int]:
+        """Delete all links for every entity in the schema. Returns {entity: rows_deleted}."""
+        result: dict[str, int] = {}
+        for entity in self._schemas:
+            result[entity] = self.clear_entity(entity)
+        return result
+
     # ── public API ────────────────────────────────────────────────────────
 
     def save_link(
