@@ -524,6 +524,10 @@ class MigratorExporter(BaseExporter):
         self._source_repo = source_repo
 
     def _payload_options(self) -> dict:
+        # auto_create_gasto: por default false (uso normal). El operador carga
+        # el Gasto en Paxapos antes que la OP llegue desde RAFAM. Si la OP llega
+        # antes, el server responde gasto_no_encontrado y se reintenta luego.
+        # Activar con RAFAM_AUTO_CREATE_GASTO=true SOLO en carga historica inicial.
         return {
             "upsert": True,
             "atomic": False,
@@ -531,6 +535,7 @@ class MigratorExporter(BaseExporter):
             "send_oc_mail": False,
             "strict_mail": False,
             "auto_create_mercaderia": True,
+            "auto_create_gasto": _env_bool("RAFAM_AUTO_CREATE_GASTO", "false"),
             "auto_calcular_retenciones": False,
             "notificar_proveedor_pago": False,
         }
