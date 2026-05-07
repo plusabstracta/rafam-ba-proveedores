@@ -5,6 +5,7 @@ hand-written SQL in application code.
 """
 
 import os
+from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -13,7 +14,10 @@ from .models import EntityConfig
 # load_dotenv() MUST run before reading env vars, because this module is
 # imported before main.py calls load_dotenv().  It's idempotent so safe
 # to call multiple times.
-load_dotenv()
+# Use explicit path because find_dotenv() from src/ may not locate the
+# project root .env depending on python-dotenv version.
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+load_dotenv(_PROJECT_ROOT / ".env")
 
 SCHEMA = "OWNER_RAFAM"
 
