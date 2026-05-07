@@ -2,14 +2,24 @@ import re
 from typing import Any
 
 
+# Mapeo RAFAM PROVEEDORES.COD_IVA -> Paxapos iva_responsabilidades.id
+# Catalogo Paxapos (tabla iva_responsabilidades):
+#   1 I "Resp. Inscripto"
+#   2 E "Exento"
+#   3 A "No Responsable"
+#   4 C "Consumidor Final"
+#   5 T "No Categorizado"
+#   6 M "Responsable Monotributo"
 _IVA_MAP = {
-    "RINS": 1,   # Responsable Inscripto
-    "MONOT": 2,  # Monotributista
-    "EXEN": 3,   # Exento
-    "CF": 4,     # Consumidor final
-    "NGAN": 5,   # No responsable
-    "RNI": 6,    # Responsable no inscripto
-    "RNIS": 6,   # Responsable no inscripto
+    "RINS":  1,  # Responsable Inscripto
+    "EXEN":  2,  # Exento
+    "NGAN":  3,  # No alcanzado / No responsable
+    "CF":    4,  # Consumidor Final
+    "RNI":   5,  # Responsable No Inscripto (figura derogada) -> No Categorizado
+    "RNIS":  5,  # idem alias
+    "MONOT": 6,  # Monotributista
+    "M.SOC": 6,  # Monotributo Social -> mismo cubo Monotributo
+    "MSOC":  6,  # alias sin punto
 }
 
 # Mapeo RAFAM JURISDICCION → Paxapos CentroCosto.id

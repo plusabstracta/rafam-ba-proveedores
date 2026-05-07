@@ -366,7 +366,7 @@ Campos enviados por `map_proveedor_migrator_row`:
 | `Proveedor.codigo_postal` | `COD_LEGAL`, fallback `COD_POSTAL` | primer no vacio. |
 | `Proveedor.cuit` | `CUIT` | solo si normaliza a 11 digitos. |
 | `Proveedor.tipo_documento_id` | `CUIT` | `1` si hay CUIT valido. |
-| `Proveedor.iva_condicion_id` | `COD_IVA` | `RINS=1`, `MONOT=2`, `EXEN=3`, `CF=4`, `NGAN=5`, `RNI/RNIS=6`. |
+| `Proveedor.iva_condicion_id` | `COD_IVA` | `RINS=1` (Resp. Inscripto), `EXEN=2` (Exento), `NGAN=3` (No Responsable), `CF=4` (Consumidor Final), `RNI/RNIS=5` (No Categorizado), `MONOT/M.SOC=6` (Monotributo). |
 
 ### Pedidos y ped_items
 

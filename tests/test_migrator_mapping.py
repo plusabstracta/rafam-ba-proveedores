@@ -53,7 +53,41 @@ def test_proveedor_rnis_mapea_iva_condicion():
     })
 
     assert result is not None
+    # RNIS (Resp. No Inscripto, derogado) -> No Categorizado (id 5)
+    assert result["Proveedor"]["iva_condicion_id"] == 5
+
+
+def test_proveedor_monot_mapea_a_monotributo():
+    result = map_proveedor_migrator_row({
+        "COD_PROV": "8",
+        "FANTASIA": "Mono Prov",
+        "CUIT": "20-12345678-3",
+        "COD_IVA": "MONOT",
+    })
+    assert result is not None
     assert result["Proveedor"]["iva_condicion_id"] == 6
+
+
+def test_proveedor_rins_mapea_a_responsable_inscripto():
+    result = map_proveedor_migrator_row({
+        "COD_PROV": "9",
+        "FANTASIA": "RI Prov",
+        "CUIT": "30-12345678-9",
+        "COD_IVA": "RINS",
+    })
+    assert result is not None
+    assert result["Proveedor"]["iva_condicion_id"] == 1
+
+
+def test_proveedor_exen_mapea_a_exento():
+    result = map_proveedor_migrator_row({
+        "COD_PROV": "10",
+        "FANTASIA": "Exento Prov",
+        "CUIT": "30-12345678-9",
+        "COD_IVA": "EXEN",
+    })
+    assert result is not None
+    assert result["Proveedor"]["iva_condicion_id"] == 2
 
 class TestMapSolicGasto:
 
