@@ -32,6 +32,7 @@ class EntityConfig:
     pending_state_field: Optional[str] = None
     pending_state_value: Optional[str] = None
     pending_reprocess_days: Optional[int] = None
+    ejercicio_min: Optional[int] = None         # filter: EJERCICIO >= value
 
 
 @dataclass

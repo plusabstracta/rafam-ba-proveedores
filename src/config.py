@@ -4,9 +4,13 @@ The query layer builds SQLAlchemy expressions from this metadata, avoiding
 hand-written SQL in application code.
 """
 
+import os
+
 from .models import EntityConfig
 
 SCHEMA = "OWNER_RAFAM"
+
+_EJERCICIO_MIN = int(os.getenv("RAFAM_EJERCICIO_MIN", "0")) or None
 
 ENTITY_CONFIGS: dict[str, EntityConfig] = {
     "proveedores": EntityConfig(
@@ -18,11 +22,13 @@ ENTITY_CONFIGS: dict[str, EntityConfig] = {
         name="pedidos",
         table_name="PEDIDOS",
         ts_field="FECH_EMI",
+        ejercicio_min=_EJERCICIO_MIN,
     ),
     "ped_items": EntityConfig(
         name="ped_items",
         table_name="PED_ITEMS",
         full_load=True,  # no reliable cursor column yet — confirm with explore_schema.py
+        ejercicio_min=_EJERCICIO_MIN,
     ),
     "orden_compra": EntityConfig(
         name="orden_compra",
@@ -32,11 +38,13 @@ ENTITY_CONFIGS: dict[str, EntityConfig] = {
         pending_state_field="ESTADO_OC",
         pending_state_value="N",
         pending_reprocess_days=30,
+        ejercicio_min=_EJERCICIO_MIN,
     ),
     "oc_items": EntityConfig(
         name="oc_items",
         table_name="OC_ITEMS",
         full_load=True,  # no date/timestamp column in table
+        ejercicio_min=_EJERCICIO_MIN,
     ),
     "solic_gastos": EntityConfig(
         name="solic_gastos",
@@ -47,6 +55,7 @@ ENTITY_CONFIGS: dict[str, EntityConfig] = {
         pending_state_field="ESTADO_SOLIC",
         pending_state_value="C",
         pending_reprocess_days=30,
+        ejercicio_min=_EJERCICIO_MIN,
     ),
     "orden_pago": EntityConfig(
         name="orden_pago",
@@ -57,5 +66,6 @@ ENTITY_CONFIGS: dict[str, EntityConfig] = {
         pending_state_field="ESTADO_OP",
         pending_state_value="N",
         pending_reprocess_days=30,
+        ejercicio_min=_EJERCICIO_MIN,
     ),
 }

@@ -487,6 +487,12 @@ class SourceRepository:
         cp: Checkpoint,
         extra_filters: list | None = None,
     ) -> Select:
+        # Always apply ejercicio_min filter (regardless of full_load / fresh).
+        if cfg.ejercicio_min is not None:
+            ej_col = self._safe_column(table, "EJERCICIO")
+            if ej_col is not None:
+                stmt = stmt.where(ej_col >= cfg.ejercicio_min)
+
         if cfg.full_load or cp.is_fresh:
             return stmt
 

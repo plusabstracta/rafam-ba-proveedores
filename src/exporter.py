@@ -1568,8 +1568,9 @@ class MigratorExporter(BaseExporter):
             "unidad_de_medida_id": self._resolve_unidad_medida_id(raw),
         }
 
+        # precio_unitario: Paxapos lo multiplica por cantidad y guarda el total en PedidoMercaderia.precio.
         if raw.get("COSTO_UNI") is not None:
-            item["precio"] = round(float(raw.get("COSTO_UNI")), 2)
+            item["precio_unitario"] = round(float(raw.get("COSTO_UNI")), 2)
 
         descripcion = raw.get("DESCRIP_BIE")
         if descripcion:
@@ -1630,8 +1631,9 @@ class MigratorExporter(BaseExporter):
             "unidad_de_medida_id": self._resolve_unidad_medida_id(raw),
         }
 
+        # precio_unitario: Paxapos lo multiplica por cantidad y guarda el total en PedidoMercaderia.precio.
         if raw.get("IMP_UNITARIO") is not None:
-            item["precio"] = round(float(raw.get("IMP_UNITARIO")), 2)
+            item["precio_unitario"] = round(float(raw.get("IMP_UNITARIO")), 2)
 
         if raw.get("CANT_RECIB") is not None:
             item["recibida_cantidad"] = float(raw.get("CANT_RECIB"))
