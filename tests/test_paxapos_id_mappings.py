@@ -299,3 +299,156 @@ class TestPedidoInternalIdEnOrdenPago:
         sent = self._send_and_capture(exp, rows)
         op = sent[0]["ordenes_pago"][0]
         assert op["Egreso"]["tipo_de_pago_id"] == 1
+
+
+# ─── Bug "varios pagos en cero para un mismo comprobante" ────────────────────
+
+
+class TestNoCrearPagosEnCero:
+    """
+    Bug reportado: para un mismo comprobante se generaban varios Egresos en
+    Paxapos, uno con importe correcto y otros en $0.
+
+    Causa raiz: cuando una OP RAFAM tenia IMPORTE_TOTAL NULL, no parseable o
+    igual a 0 (tipico en OPs de ajuste contable / anulacion), el script
+    silenciosamente la enviaba con total=0. Como cada OP tiene
+    identificador_pago unico, el upsert no las une y se acumulan Egresos en $0
+    vinculados al mismo Gasto via gasto_nro_comprobante.
+
+    Estos tests garantizan que el script NUNCA exporta una OP con total <= 0.
+    """
+
+    def _make_exporter(self):
+        with patch("src.exporter.fetch_migrator_lookups") as mock_lookups:
+            mock_lookups.return_value = {
+                "unidades_de_medida": [],
+                "tipos_factura": [],
+                "tipos_de_pago": [],
+                "tipos_retencion": [],
+            }
+            with patch.dict(
+                "os.environ",
+                {
+                    "PAXAPOS_URL": "https://example.com",
+                    "PAXAPOS_TENANT": "test",
+                    "PAXAPOS_API_KEY": "key",
+                    "LOCAL_STATE_DB_PATH": ":memory:",
+                },
+                clear=False,
+            ):
+                return MigratorExporter(dry_run=True)
+
+    @staticmethod
+    def _columns():
+        return [
+            "EJERCICIO", "NRO_OP", "FECH_OP", "ESTADO_OP",
+            "IMPORTE_TOTAL", "CONCEPTO", "NRO_CANCE",
+            "SG_DELEG_SOLIC", "SG_NRO_SOLIC",
+            "HDR_CC_NRO",
+            "FECH_CONFIRM", "CONFIRMADO", "TIPO_CANCE",
+        ]
+
+    def _row(self, cols, **overrides):
+        defaults = {
+            "EJERCICIO": "2026", "NRO_OP": "9001",
+            "FECH_OP": "2026-04-10 00:00:00",
+            "ESTADO_OP": "C", "IMPORTE_TOTAL": "1500.00",
+            "CONCEPTO": "Pago", "NRO_CANCE": "9100",
+            "SG_DELEG_SOLIC": "1", "SG_NRO_SOLIC": "300",
+            "HDR_CC_NRO": "0001-00099999",
+            "FECH_CONFIRM": "2026-04-15 00:00:00", "CONFIRMADO": "S",
+            "TIPO_CANCE": "NO",
+        }
+        defaults.update(overrides)
+        return tuple(defaults.get(c, "") for c in cols)
+
+    def _capture(self, exp, rows):
+        cols = self._columns()
+        sent: list[dict] = []
+        exp._post_json = lambda url, p: (
+            sent.append(p)
+            or {"stats": {"ordenes_pago": {"ok": len(p.get("ordenes_pago", [])), "error": 0}}}
+        )
+        exp.write_batch("orden_pago", cols, rows)
+        return sent
+
+    def test_op_con_importe_total_null_no_se_exporta(self):
+        """IMPORTE_TOTAL = NULL -> OP omitida (no se crea Egreso en $0)."""
+        exp = self._make_exporter()
+        rows = [self._row(self._columns(), NRO_OP="9001", IMPORTE_TOTAL=None)]
+        sent = self._capture(exp, rows)
+        # No se envia payload alguno (lote vacio)
+        assert sent == [], "OP con IMPORTE_TOTAL=NULL no debe exportarse"
+
+    def test_op_con_importe_total_cero_no_se_exporta(self):
+        """IMPORTE_TOTAL = 0 -> OP omitida (ajuste contable / anulacion RAFAM)."""
+        exp = self._make_exporter()
+        rows = [self._row(self._columns(), NRO_OP="9002", IMPORTE_TOTAL="0.00")]
+        sent = self._capture(exp, rows)
+        assert sent == [], "OP con IMPORTE_TOTAL=0 no debe exportarse"
+
+    def test_op_con_importe_total_negativo_no_se_exporta(self):
+        """IMPORTE_TOTAL negativo es un caso defensivo: no se exporta."""
+        exp = self._make_exporter()
+        rows = [self._row(self._columns(), NRO_OP="9003", IMPORTE_TOTAL="-100.00")]
+        sent = self._capture(exp, rows)
+        assert sent == [], "OP con IMPORTE_TOTAL<0 no debe exportarse"
+
+    def test_op_con_importe_total_no_parseable_no_se_exporta(self):
+        """Strings basura en IMPORTE_TOTAL -> OP omitida con warning, no Egreso en $0."""
+        exp = self._make_exporter()
+        rows = [self._row(self._columns(), NRO_OP="9004", IMPORTE_TOTAL="N/D")]
+        sent = self._capture(exp, rows)
+        assert sent == [], "OP con IMPORTE_TOTAL no parseable no debe exportarse"
+
+    def test_op_con_importe_valido_si_se_exporta(self):
+        """Sanity check: la OP con importe positivo si se exporta."""
+        exp = self._make_exporter()
+        rows = [self._row(self._columns(), NRO_OP="9005", IMPORTE_TOTAL="1500.00")]
+        sent = self._capture(exp, rows)
+        assert len(sent) == 1
+        ops = sent[0]["ordenes_pago"]
+        assert len(ops) == 1
+        assert ops[0]["Egreso"]["total"] == 1500.00
+
+    def test_lote_mixto_solo_exporta_op_con_importe_valido(self):
+        """
+        Escenario realista del bug: 4 OPs RAFAM apuntando al mismo comprobante.
+        Solo una tiene importe; las otras son ajustes contables (0/null/error).
+        Esperado: se exporta UN solo Egreso (no 4).
+        """
+        exp = self._make_exporter()
+        cc = "0001-00099999"
+        rows = [
+            self._row(self._columns(), NRO_OP="8001", IMPORTE_TOTAL="2500.00", HDR_CC_NRO=cc),
+            self._row(self._columns(), NRO_OP="8002", IMPORTE_TOTAL="0.00", HDR_CC_NRO=cc),
+            self._row(self._columns(), NRO_OP="8003", IMPORTE_TOTAL=None, HDR_CC_NRO=cc),
+            self._row(self._columns(), NRO_OP="8004", IMPORTE_TOTAL="ERROR", HDR_CC_NRO=cc),
+        ]
+        sent = self._capture(exp, rows)
+        assert len(sent) == 1
+        ops = sent[0]["ordenes_pago"]
+        assert len(ops) == 1, (
+            f"Solo debe exportarse 1 OP con importe valido (no {len(ops)}). "
+            "El bug original creaba 4 Egresos: 1 con importe y 3 en $0."
+        )
+        op = ops[0]
+        assert op["external_id"]["nro_op"] == 8001
+        assert op["Egreso"]["total"] == 2500.00
+        assert op["gasto_nro_comprobante"] == cc
+
+    def test_warning_log_cuando_se_skipea(self, caplog):
+        """Las OPs skipeadas deben dejar trazabilidad en el log."""
+        import logging
+        exp = self._make_exporter()
+        rows = [
+            self._row(self._columns(), NRO_OP="7001", IMPORTE_TOTAL="0.00"),
+            self._row(self._columns(), NRO_OP="7002", IMPORTE_TOTAL=None),
+        ]
+        with caplog.at_level(logging.WARNING):
+            self._capture(exp, rows)
+
+        msgs = " ".join(rec.getMessage() for rec in caplog.records)
+        assert "OP 2026-7001" in msgs
+        assert "OP 2026-7002" in msgs
+        assert "IMPORTE_TOTAL" in msgs

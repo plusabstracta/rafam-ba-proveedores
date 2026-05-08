@@ -16,9 +16,7 @@ EXPORT ?= csv
 	run-proveedores run-pedidos run-ped_items run-solic_gastos \
 	run-orden_compra run-oc_items run-orden_pago \
 	run-proveedores-migrator run-proveedores-migrator-dry \
-	run-ped_items-migrator run-ped_items-migrator-dry \
 	run-oc_items-migrator run-oc_items-migrator-dry \
-	run-solic_gastos-migrator run-solic_gastos-migrator-dry \
 	run-orden_pago-migrator run-orden_pago-migrator-dry \
 	migrate-proveedores migrate-proveedores-dry \
 	migrate-oc migrate-oc-dry \
@@ -42,12 +40,8 @@ help:
 	@echo "  make run-orden_compra   Ejecuta sync solo de orden_compra"
 	@echo "  make run-proveedores-migrator  Envia proveedores al migrator RAFAM"
 	@echo "  make run-proveedores-migrator-dry  Prueba migrator con dry_run=true"
-	@echo "  make run-ped_items-migrator-dry  Prueba migracion de ped_items -> pedidos"
-	@echo "  make run-ped_items-migrator  Migra ped_items -> pedidos"
 	@echo "  make run-oc_items-migrator-dry  Prueba migracion de oc_items -> ordenes_compra"
 	@echo "  make run-oc_items-migrator  Migra oc_items -> ordenes_compra"
-	@echo "  make run-solic_gastos-migrator-dry  Prueba migracion de solic_gastos -> gastos"
-	@echo "  make run-solic_gastos-migrator  Migra solic_gastos -> gastos (facturas)"
 	@echo "  make run-orden_pago-migrator-dry  Prueba migracion de orden_pago"
 	@echo "  make run-orden_pago-migrator  Migra ordenes_pago"
 	@echo "  make migrator-spec      Consulta spec.json del migrator RAFAM"
@@ -120,23 +114,11 @@ run-proveedores-migrator:
 run-proveedores-migrator-dry:
 	$(PY) main.py run --entity proveedores --batch-size $(BATCH) $(if $(LIMIT),--limit $(LIMIT),) --export migrator --dry-run
 
-run-ped_items-migrator-dry:
-	$(PY) main.py run --entity ped_items --batch-size $(BATCH) $(if $(LIMIT),--limit $(LIMIT),) --export migrator --dry-run
-
-run-ped_items-migrator:
-	$(PY) main.py run --entity ped_items --batch-size $(BATCH) $(if $(LIMIT),--limit $(LIMIT),) --export migrator
-
 run-oc_items-migrator-dry:
 	$(PY) main.py run --entity oc_items --batch-size $(BATCH) $(if $(LIMIT),--limit $(LIMIT),) --export migrator --dry-run
 
 run-oc_items-migrator:
 	$(PY) main.py run --entity oc_items --batch-size $(BATCH) $(if $(LIMIT),--limit $(LIMIT),) --export migrator
-
-run-solic_gastos-migrator-dry:
-	$(PY) main.py run --entity solic_gastos --batch-size $(BATCH) $(if $(LIMIT),--limit $(LIMIT),) --export migrator --dry-run
-
-run-solic_gastos-migrator:
-	$(PY) main.py run --entity solic_gastos --batch-size $(BATCH) $(if $(LIMIT),--limit $(LIMIT),) --export migrator
 
 run-orden_pago-migrator-dry:
 	$(PY) main.py run --entity orden_pago --batch-size $(BATCH) $(if $(LIMIT),--limit $(LIMIT),) --export migrator --dry-run

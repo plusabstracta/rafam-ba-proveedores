@@ -1674,6 +1674,7 @@ class MigratorExporter(BaseExporter):
         skipped_estado: dict[str, int] = {}
         skipped_confirmado: dict[str, int] = {}
         skipped_no_fech_confirm = 0
+        skipped_importe_invalido: dict[str, int] = {}
         skipped_existing_keys: set[tuple[int, int]] = set()
 
         for row in rows:
@@ -1777,10 +1778,35 @@ class MigratorExporter(BaseExporter):
                     break
 
             importe = raw.get("IMPORTE_TOTAL")
+            # Validar IMPORTE_TOTAL antes de crear el Egreso. Si es NULL,
+            # no parseable o <=0 NO se exporta: en RAFAM esto suele ser una
+            # OP de ajuste contable o anulacion (CONFIRMADO=S, ESTADO_OP=C
+            # con importe 0). Si las dejaramos pasar, se crean Egresos en
+            # cero vinculados al mismo Gasto, mostrando "varios pagos" para
+            # un mismo comprobante (1 con importe, otros en 0).
+            if importe is None:
+                skipped_importe_invalido["null"] = skipped_importe_invalido.get("null", 0) + 1
+                logger.warning(
+                    "Migrator [orden_pago] OP %s-%s omitida: IMPORTE_TOTAL es NULL en RAFAM",
+                    ejercicio, nro_op,
+                )
+                continue
             try:
-                total = round(float(importe), 2) if importe is not None else 0.0
+                total = round(float(importe), 2)
             except (TypeError, ValueError):
-                total = 0.0
+                skipped_importe_invalido["no_parseable"] = skipped_importe_invalido.get("no_parseable", 0) + 1
+                logger.warning(
+                    "Migrator [orden_pago] OP %s-%s omitida: IMPORTE_TOTAL %r no parseable",
+                    ejercicio, nro_op, importe,
+                )
+                continue
+            if total <= 0:
+                skipped_importe_invalido["<=0"] = skipped_importe_invalido.get("<=0", 0) + 1
+                logger.warning(
+                    "Migrator [orden_pago] OP %s-%s omitida: IMPORTE_TOTAL=%s (probable ajuste contable o anulacion)",
+                    ejercicio, nro_op, total,
+                )
+                continue
 
             egreso: dict = {
                 "identificador_pago": f"RAFAM-OP-{ejercicio}-{nro_op}",
@@ -1877,6 +1903,12 @@ class MigratorExporter(BaseExporter):
             logger.info("Migrator [orden_pago]: OPs omitidas por CONFIRMADO: %s", skipped_confirmado)
         if skipped_no_fech_confirm:
             logger.info("Migrator [orden_pago]: %d OPs omitidas sin FECH_CONFIRM", skipped_no_fech_confirm)
+        if skipped_importe_invalido:
+            logger.warning(
+                "Migrator [orden_pago]: OPs omitidas por IMPORTE_TOTAL invalido: %s. "
+                "Esto evita crear Egresos en $0 que ensucian el panel de pagos.",
+                skipped_importe_invalido,
+            )
         if skipped_existing_keys:
             logger.info("Migrator [orden_pago]: %d OPs omitidas por link local existente", len(skipped_existing_keys))
         if self._retencion_skipped_no_catalog:
