@@ -917,8 +917,9 @@ class MigratorExporter(BaseExporter):
 
         # ── 2. Clasificar OCs por acción según estado y link previo ───────
         ocs_to_create: list[dict] = []      # estado R, sin link o link con estado != R
-        ocs_to_anular: list[dict] = []      # estado A, link previo con estado R (estaba en Paxapos)
+        ocs_to_anular: list[dict] = []      # estado A, link previo con estado R (estaba en Paxapos), sin OP
         ocs_to_skip_register: list[tuple[int, int, int]] = []  # estado N/A sin link previo R
+        ocs_to_skip_has_op: list[tuple[int, int, int]] = []    # estado A con OP asociada → no eliminar
         ocs_same_state: list[tuple[int, int, int]] = []  # estado R ya enviado, sin gastos nuevos
         created_count = 0
         anuladas_count = 0
@@ -953,10 +954,18 @@ class MigratorExporter(BaseExporter):
                     skipped_same_state += 1
             elif estado_actual == "A":
                 if link_previo and estado_previo == "R" and link_previo.get("remote_id"):
-                    # Estaba en Paxapos con R → anular
-                    oc_data["Pedido"]["estado_aprobacion"] = 4
-                    oc_data["Pedido"]["motivo_rechazo"] = "Anulada en RAFAM"
-                    ocs_to_anular.append(oc_data)
+                    if link_previo.get("has_op"):
+                        # Tiene OP asociada → NO eliminar de Paxapos
+                        logger.info(
+                            "Migrator [oc_items] OC %s-%s-%s anulada en RAFAM pero tiene OP,"
+                            " no se elimina de Paxapos",
+                            key[0], key[1], key[2],
+                        )
+                        ocs_to_skip_has_op.append(key)
+                    else:
+                        # Estaba en Paxapos con R, sin OP → soft-delete
+                        oc_data["Pedido"]["deleted"] = 1
+                        ocs_to_anular.append(oc_data)
                 else:
                     # Anulada sin haber sido R → solo registrar localmente
                     ocs_to_skip_register.append(key)
@@ -966,7 +975,7 @@ class MigratorExporter(BaseExporter):
 
         # ── 3. Registrar en link TODAS las OCs (con o sin envío) ──────────
         # Las que se saltan o registran solo localmente (R, A sin N previo)
-        for key in ocs_to_skip_register + ocs_same_state:
+        for key in ocs_to_skip_register + ocs_same_state + ocs_to_skip_has_op:
             raw = grouped_raw[key]
             source_key = json.dumps(
                 {"ejercicio": key[0], "nro_oc": key[2], "uni_compra": key[1]},
@@ -1013,9 +1022,10 @@ class MigratorExporter(BaseExporter):
 
         if not ordenes_compra:
             logger.info(
-                "Migrator [oc_items]: nada que enviar (skip_estado=%d, mismo_estado=%d, sin_items=%d)",
+                "Migrator [oc_items]: nada que enviar (skip_estado=%d, mismo_estado=%d, skip_has_op=%d, sin_items=%d)",
                 len(ocs_to_skip_register),
                 skipped_same_state,
+                len(ocs_to_skip_has_op),
                 unresolved_items,
             )
             return
@@ -1050,13 +1060,14 @@ class MigratorExporter(BaseExporter):
         self._raise_on_migrator_errors(parsed)
         logger.info(
             "Migrator OK [oc_items->ordenes_compra]: %d ok, %d error, crear=%d, anular=%d, "
-            "skip_estado=%d, mismo_estado=%d, dry_run=%s",
+            "skip_estado=%d, mismo_estado=%d, skip_has_op=%d, dry_run=%s",
             ok_count,
             error_count,
             len(ocs_to_create),
             len(ocs_to_anular),
             len(ocs_to_skip_register),
             skipped_same_state,
+            len(ocs_to_skip_has_op),
             self._dry_run,
         )
         self._log_unresolved_summary("oc_items")
@@ -1202,6 +1213,7 @@ class MigratorExporter(BaseExporter):
         ocs_to_create: list[dict] = []
         ocs_to_anular: list[dict] = []
         ocs_to_skip_register: list[tuple[int, int, int]] = []
+        ocs_to_skip_has_op: list[tuple[int, int, int]] = []
         ocs_same_state: list[tuple[int, int, int]] = []
 
         for key, oc_data in grouped.items():
@@ -1229,16 +1241,23 @@ class MigratorExporter(BaseExporter):
                     ocs_same_state.append(key)
             elif estado_actual == "A":
                 if link_previo and estado_previo == "R" and link_previo.get("remote_id"):
-                    oc_data["Pedido"]["estado_aprobacion"] = 4
-                    oc_data["Pedido"]["motivo_rechazo"] = "Anulada en RAFAM"
-                    ocs_to_anular.append(oc_data)
+                    if link_previo.get("has_op"):
+                        logger.info(
+                            "Migrator [orden_compra] OC %s-%s-%s anulada en RAFAM pero tiene OP,"
+                            " no se elimina de Paxapos",
+                            key[0], key[1], key[2],
+                        )
+                        ocs_to_skip_has_op.append(key)
+                    else:
+                        oc_data["Pedido"]["deleted"] = 1
+                        ocs_to_anular.append(oc_data)
                 else:
                     ocs_to_skip_register.append(key)
             else:
                 ocs_to_skip_register.append(key)
 
         # ── 3. Registrar en link TODAS las OCs que no se envían ───────────
-        for key in ocs_to_skip_register + ocs_same_state:
+        for key in ocs_to_skip_register + ocs_same_state + ocs_to_skip_has_op:
             raw = grouped_raw[key]
             source_key = json.dumps(
                 {"ejercicio": key[0], "nro_oc": key[2], "uni_compra": key[1]},
@@ -1283,9 +1302,10 @@ class MigratorExporter(BaseExporter):
 
         if not ordenes_compra:
             logger.info(
-                "Migrator [orden_compra]: nada que enviar (skip_estado=%d, mismo_estado=%d, sin_items=%d)",
+                "Migrator [orden_compra]: nada que enviar (skip_estado=%d, mismo_estado=%d, skip_has_op=%d, sin_items=%d)",
                 len(ocs_to_skip_register),
                 len(ocs_same_state),
+                len(ocs_to_skip_has_op),
                 unresolved_items,
             )
             return
@@ -1320,13 +1340,14 @@ class MigratorExporter(BaseExporter):
         self._raise_on_migrator_errors(parsed)
         logger.info(
             "Migrator OK [orden_compra]: %d ok, %d error, crear=%d, anular=%d, "
-            "skip_estado=%d, mismo_estado=%d, dry_run=%s",
+            "skip_estado=%d, mismo_estado=%d, skip_has_op=%d, dry_run=%s",
             ok_count,
             error_count,
             len(ocs_to_create),
             len(ocs_to_anular),
             len(ocs_to_skip_register),
             len(ocs_same_state),
+            len(ocs_to_skip_has_op),
             self._dry_run,
         )
         self._log_unresolved_summary("orden_compra")
@@ -1665,6 +1686,7 @@ class MigratorExporter(BaseExporter):
         grouped_cc_nros: dict[tuple[int, int], list[str]] = {}
         grouped_pedido_ids: dict[tuple[int, int], list[int]] = {}
         grouped_pedido_internal_ids: dict[tuple[int, int], list[str]] = {}
+        grouped_oc_source_keys: dict[tuple[int, int], list[str]] = {}
         op_to_nro_cance: dict[tuple[int, int], int] = {}
         raw_by_source_key: dict[str, dict] = {}
         # cc_raw_by_key: dedup por comprobante fiscal real para emitir gastos[]
@@ -1787,6 +1809,17 @@ class MigratorExporter(BaseExporter):
                 internals = grouped_pedido_internal_ids.setdefault(key, [])
                 if internal_id not in internals:
                     internals.append(internal_id)
+
+                # Rastrear OC source_key para marcar has_op después del envío
+                oc_uni = self._to_int(raw.get("HDR_OC_UNI_COMPRA"))
+                if oc_uni is not None:
+                    oc_sk = json.dumps(
+                        {"ejercicio": oc_ej, "nro_oc": oc_nro, "uni_compra": oc_uni},
+                        sort_keys=True,
+                    )
+                    oc_sks = grouped_oc_source_keys.setdefault(key, [])
+                    if oc_sk not in oc_sks:
+                        oc_sks.append(oc_sk)
 
             estado = str(raw.get("ESTADO_OP", "")).strip().upper()
             if estado != "C":
@@ -2025,6 +2058,32 @@ class MigratorExporter(BaseExporter):
 
         self._persist_links("orden_pago", parsed, raw_by_source_key)
         self._raise_on_migrator_errors(parsed)
+
+        # ── Marcar OCs asociadas con has_op ───────────────────────────────
+        # Para cada OP enviada con éxito, flaggear sus OCs vinculadas para que
+        # no se eliminen de Paxapos si la OC pasa a estado A en RAFAM.
+        op_results = (parsed.get("results", {}) or {}).get("ordenes_pago", [])
+        if isinstance(op_results, list):
+            marked_oc_sks: set[str] = set()
+            for result in op_results:
+                if not isinstance(result, dict) or not result.get("success"):
+                    continue
+                ext = result.get("external_id") or {}
+                ej = ext.get("ejercicio")
+                nro = ext.get("nro_op")
+                if ej is None or nro is None:
+                    continue
+                op_key = (int(ej), int(nro))
+                for oc_sk in grouped_oc_source_keys.get(op_key, []):
+                    if oc_sk not in marked_oc_sks:
+                        self._link_store.mark_oc_has_op(oc_sk)
+                        marked_oc_sks.add(oc_sk)
+            if marked_oc_sks:
+                logger.info(
+                    "Migrator [orden_pago]: %d OCs marcadas con has_op",
+                    len(marked_oc_sks),
+                )
+
         # Nota: si hubo OPs omitidas por falta de CC_NRO, se registran como warning
         # arriba pero NO se levanta excepción: las OPs enviables se procesaron OK,
         # y los reintentos se manejan via pending_state_field=N + reprocess_days=30

@@ -472,7 +472,7 @@ class TestMigratorExporterExtraPaths:
         assert created["Pedido"]["created"] == "2026-03-10 00:00:00"
         assert len(created["items"]) == 2
         assert created["gasto_nro_comprobante"] == "0001-00000001"
-        assert ordenes[1]["Pedido"]["estado_aprobacion"] == 4
+        assert ordenes[1]["Pedido"]["deleted"] == 1
         assert exporter._link_store.get_link("orden_compra", same_state_key)["remote_id"] == "990"
         skip_key = json.dumps({"ejercicio": 2026, "nro_oc": 400, "uni_compra": 1}, sort_keys=True)
         assert exporter._link_store.get_link("orden_compra", skip_key)["estado_oc"] == "N"

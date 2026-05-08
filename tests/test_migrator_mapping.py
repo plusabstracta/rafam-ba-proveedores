@@ -4,6 +4,7 @@ Tests de mapeo para MigratorExporter — sin llamadas HTTP reales.
 Validan que _map_solic_gasto, _map_ped_item, _map_oc_item y
 _write_batch_orden_pago construyen los payloads correctos.
 """
+import json
 from unittest.mock import patch
 
 import pytest
@@ -875,3 +876,73 @@ class TestWriteBatchOcItems:
 
         items = sent[0]["ordenes_compra"][0]["items"]
         assert len(items) == 2, "Solo 2 items distintos (item_oc 1 y 2), sin duplicados"
+
+    # ── Anulación: R→A sin OP → soft-delete ──
+
+    def test_oc_anulada_sin_op_envia_deleted(self):
+        """OC previamente migrada con R, ahora A y sin OP → Pedido.deleted=1."""
+        exp = self._make_exporter_with_prov()
+        source_key = json.dumps({"ejercicio": 2026, "nro_oc": 100, "uni_compra": 1}, sort_keys=True)
+        exp._link_store.save_link(
+            "orden_compra", source_key, "880",
+            estado_oc="R", gasto_linked_refs="",
+        )
+
+        rows = [_oc_row(estado_oc="A")]
+
+        sent = []
+        exp._post_json = lambda url, p: (
+            sent.append(p)
+            or {"stats": {"ordenes_compra": {"ok": 1, "error": 0}}}
+        )
+        exp.write_batch("oc_items", OC_COLUMNS, rows)
+
+        assert len(sent) == 1
+        oc = sent[0]["ordenes_compra"][0]
+        assert oc["Pedido"]["deleted"] == 1
+        assert "estado_aprobacion" not in oc["Pedido"] or oc["Pedido"]["estado_aprobacion"] != 4
+        assert "motivo_rechazo" not in oc["Pedido"]
+
+    # ── Anulación: R→A con OP → NO se envía ──
+
+    def test_oc_anulada_con_op_no_se_envia(self):
+        """OC previamente migrada con R, ahora A pero con has_op=1 → no se envía."""
+        exp = self._make_exporter_with_prov()
+        source_key = json.dumps({"ejercicio": 2026, "nro_oc": 100, "uni_compra": 1}, sort_keys=True)
+        exp._link_store.save_link(
+            "orden_compra", source_key, "880",
+            estado_oc="R", gasto_linked_refs="", has_op="1",
+        )
+
+        rows = [_oc_row(estado_oc="A")]
+
+        sent = []
+        exp._post_json = lambda url, p: (
+            sent.append(p)
+            or {"stats": {"ordenes_compra": {"ok": 0, "error": 0}}}
+        )
+        exp.write_batch("oc_items", OC_COLUMNS, rows)
+
+        # No se envía nada a Paxapos
+        assert sent == []
+        # Pero se registra localmente con estado A
+        link = exp._link_store.get_link("orden_compra", source_key)
+        assert link is not None
+        assert link["estado_oc"] == "A"
+        assert link["remote_id"] == "880"  # se preserva
+
+    # ── mark_oc_has_op ──
+
+    def test_mark_oc_has_op(self):
+        """mark_oc_has_op actualiza el campo has_op en la tabla de links."""
+        exp = self._make_exporter_with_prov()
+        source_key = json.dumps({"ejercicio": 2026, "nro_oc": 100, "uni_compra": 1}, sort_keys=True)
+        exp._link_store.save_link("orden_compra", source_key, "880", estado_oc="R")
+
+        link_before = exp._link_store.get_link("orden_compra", source_key)
+        assert not link_before.get("has_op")
+
+        exp._link_store.mark_oc_has_op(source_key)
+
+        link_after = exp._link_store.get_link("orden_compra", source_key)
+        assert link_after["has_op"] == "1"

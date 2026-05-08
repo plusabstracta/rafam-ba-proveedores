@@ -14,7 +14,7 @@ DEFAULT_LINK_SCHEMAS: dict[str, list[str]] = {
     "tipo_pago": ["name", "codigo"],
     "tipo_retencion": ["name", "codigo"],
     "pedido": [],
-    "orden_compra": ["fech_confirm", "estado_oc", "cod_prov", "importe_tot", "gasto_refs", "gasto_linked_refs", "paxapos_gasto_ids"],
+    "orden_compra": ["fech_confirm", "estado_oc", "cod_prov", "importe_tot", "gasto_refs", "gasto_linked_refs", "paxapos_gasto_ids", "has_op"],
     "gasto": ["estado_solic", "importe_tot", "cod_prov"],
     "orden_pago": ["estado_op", "confirmado", "fech_confirm", "importe_total"],
 }
@@ -157,6 +157,15 @@ class EntityLinkStore:
         if not row:
             return None
         return dict(row)
+
+    def mark_oc_has_op(self, source_key: str) -> None:
+        """Flag an OC as having an associated OP (orden de pago)."""
+        table = self._ensure_table("orden_compra")
+        self._conn.execute(
+            f"UPDATE [{table}] SET [has_op] = '1', updated_at = datetime('now') WHERE source_key = ?",
+            (source_key,),
+        )
+        self._conn.commit()
 
     def get_sent_oc_gasto_refs(self) -> set[str]:
         """Return gasto rafam_refs linked to OCs that have been sent to Paxapos."""
