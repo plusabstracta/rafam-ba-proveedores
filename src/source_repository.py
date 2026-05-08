@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import Column, MetaData, Table, and_, func, or_, select
+from sqlalchemy import Column, MetaData, Table, and_, func, literal_column, or_, select
 from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.engine import Connection
 from sqlalchemy.exc import SQLAlchemyError
@@ -456,6 +456,99 @@ class SourceRepository:
             .subquery("sg_comprobantes")
         )
 
+    def _build_op_fallback_subquery(self, reg_comp, cta_comprob):
+        """Subquery agrupada por (EJERCICIO, DELEG_SOLIC, NRO_SOLIC) que aporta
+        un fallback robusto cuando CTA_HOJA_DE_RUTA no resuelve la cadena
+        OP → OC ni OP → comprobante. Path: SG → REG_COMP → CTA_COMPROB.
+
+        REG_COMP tiene directamente NRO_OC, UNI_COMPRA, COD_PROV (vínculo a la
+        OC) y NRO_REG_COMP (vínculo a CTA_COMPROB). Esto evita depender de la
+        vista CTA_HOJA_DE_RUTA, que puede no estar populada para todas las OPs
+        del ejercicio (caso real observado: OPs 2026 con OP_NRO en hoja de
+        ruta vacío).
+        """
+        if reg_comp is None or cta_comprob is None:
+            return None
+        cols = {
+            "rc_ej": self._safe_column(reg_comp, "EJERCICIO"),
+            "rc_deleg": self._safe_column(reg_comp, "DELEG_SOLIC"),
+            "rc_nro_sol": self._safe_column(reg_comp, "NRO_SOLIC"),
+            "rc_nro_rc": self._safe_column(reg_comp, "NRO_REG_COMP"),
+            "rc_nro_oc": self._safe_column(reg_comp, "NRO_OC"),
+            "rc_uni": self._safe_column(reg_comp, "UNI_COMPRA"),
+            "rc_prov": self._safe_column(reg_comp, "COD_PROV"),
+            "cc_ej": self._safe_column(cta_comprob, "EJERCICIO"),
+            "cc_rc": self._safe_column(cta_comprob, "NRO_REG_COMP"),
+            "cc_tipo": self._safe_column(cta_comprob, "TIPO"),
+            "cc_nro": self._safe_column(cta_comprob, "NRO_COMPROB"),
+            "cc_prov": self._safe_column(cta_comprob, "COD_PROV"),
+            "cc_imp": self._safe_column(cta_comprob, "IMPORTE_COMPR"),
+            "cc_neto": self._safe_column(cta_comprob, "IMPORTE_SIN_IVA"),
+            "cc_fec": self._safe_column(cta_comprob, "FECH_COMPROB"),
+            "cc_venc": self._safe_column(cta_comprob, "FECH_VENCIM"),
+        }
+        # Las columnas críticas de SG y CTA_COMPROB son requeridas; si falta
+        # alguna, no se puede armar el fallback y devolvemos None.
+        required_keys = (
+            "rc_ej", "rc_deleg", "rc_nro_sol", "rc_nro_rc",
+            "rc_nro_oc", "rc_uni", "rc_prov",
+            "cc_ej", "cc_rc", "cc_tipo", "cc_nro", "cc_prov",
+            "cc_imp", "cc_fec",
+        )
+        if any(cols[k] is None for k in required_keys):
+            return None
+
+        # IMPORTE_SIN_IVA y FECH_VENCIM son opcionales (algunos comprobantes
+        # no las tienen). Si faltan, las exportamos como NULL literal para
+        # mantener el contrato de columnas estable.
+        cc_neto_expr = (
+            func.min(cols["cc_neto"]) if cols["cc_neto"] is not None
+            else literal_column("NULL")
+        )
+        cc_venc_expr = (
+            func.min(cols["cc_venc"]) if cols["cc_venc"] is not None
+            else literal_column("NULL")
+        )
+
+        return (
+            select(
+                cols["rc_ej"].label("FB_EJERCICIO"),
+                cols["rc_deleg"].label("FB_DELEG_SOLIC"),
+                cols["rc_nro_sol"].label("FB_NRO_SOLIC"),
+                func.min(cols["rc_nro_oc"]).label("FB_OC_NRO"),
+                func.min(cols["rc_uni"]).label("FB_OC_UNI_COMPRA"),
+                func.min(cols["rc_prov"]).label("FB_OC_COD_PROV"),
+                func.min(cols["cc_nro"]).label("FB_CC_NRO"),
+                func.min(cols["cc_tipo"]).label("FB_CC_TIPO"),
+                func.min(cols["cc_prov"]).label("FB_CC_COD_PROV"),
+                func.min(cols["cc_imp"]).label("FB_CC_IMPORTE_COMPR"),
+                cc_neto_expr.label("FB_CC_IMPORTE_SIN_IVA"),
+                func.min(cols["cc_fec"]).label("FB_CC_FECH_COMPROB"),
+                cc_venc_expr.label("FB_CC_FECH_VENCIM"),
+            )
+            .select_from(
+                reg_comp.outerjoin(
+                    cta_comprob,
+                    and_(
+                        cols["rc_ej"] == cols["cc_ej"],
+                        cols["rc_nro_rc"] == cols["cc_rc"],
+                    ),
+                )
+            )
+            .where(
+                and_(
+                    cols["rc_deleg"].is_not(None),
+                    cols["rc_nro_sol"].is_not(None),
+                )
+            )
+            .group_by(
+                cols["rc_ej"],
+                cols["rc_deleg"],
+                cols["rc_nro_sol"],
+            )
+            .subquery("op_fb")
+        )
+
     def _build_orden_pago_statement(
         self,
         cfg: EntityConfig,
@@ -474,6 +567,10 @@ class SourceRepository:
         # (IMPORTE_COMPR, FECH_COMPROB, FECH_VENCIM) para auto-crear el Gasto
         # en Paxapos cuando la SG aún no fue migrada.
         cta_comprob = self._reflect_optional_table("CTA_COMPROB")
+        # REG_COMP es el puente directo SG → OC y SG → CTA_COMPROB sin pasar
+        # por CTA_HOJA_DE_RUTA. Se usa como fallback cuando esa vista no
+        # tiene populadas las columnas OP_*.
+        reg_comp = self._reflect_optional_table("REG_COMP")
 
         select_cols = [
             orden_pago,
@@ -564,6 +661,32 @@ class SourceRepository:
                     cta_col = self._safe_column(cta_comprob, cta_col_name)
                     if cta_col is not None:
                         select_cols.append(cta_col.label(label))
+
+        # Fallback path: SG → REG_COMP → CTA_COMPROB. Aporta FB_OC_* y FB_CC_*
+        # cuando CTA_HOJA_DE_RUTA no resuelve el vinculo (caso real: vista
+        # con OP_NRO vacio para todas las OPs del ejercicio actual).
+        op_fb = self._build_op_fallback_subquery(reg_comp, cta_comprob)
+        if op_fb is not None:
+            from_clause = from_clause.outerjoin(
+                op_fb,
+                and_(
+                    solic_gastos.c.EJERCICIO == op_fb.c.FB_EJERCICIO,
+                    solic_gastos.c.DELEG_SOLIC == op_fb.c.FB_DELEG_SOLIC,
+                    solic_gastos.c.NRO_SOLIC == op_fb.c.FB_NRO_SOLIC,
+                ),
+            )
+            select_cols.extend([
+                op_fb.c.FB_OC_NRO,
+                op_fb.c.FB_OC_UNI_COMPRA,
+                op_fb.c.FB_OC_COD_PROV,
+                op_fb.c.FB_CC_NRO,
+                op_fb.c.FB_CC_TIPO,
+                op_fb.c.FB_CC_COD_PROV,
+                op_fb.c.FB_CC_IMPORTE_COMPR,
+                op_fb.c.FB_CC_IMPORTE_SIN_IVA,
+                op_fb.c.FB_CC_FECH_COMPROB,
+                op_fb.c.FB_CC_FECH_VENCIM,
+            ])
 
         stmt = select(*select_cols).select_from(from_clause)
         stmt = self._apply_incremental_filters(stmt, orden_pago, cfg, checkpoint)

@@ -353,36 +353,53 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 MAILTO=""
 
 RAFAM_DIR=/home/rafam/rafam-ba-proveedores
-RAFAM_BATCH=500
-RAFAM_LOG_DIR=/home/rafam/rafam-ba-proveedores/logs
 
-# Pipeline oficial cada 15 minutos:
+# Pipeline oficial cada 15 minutos.
+# Cada entidad corre independiente: si una falla, las otras siguen.
+# Logs rotativos por mes en logs/rafam-{entidad}-YYYY-MM.log (gestionado por main.py).
+# flock con lock separado por entidad evita corridas superpuestas.
+
 # 1) PROVEEDORES -> account_proveedores
+*/15 * * * * cd "$RAFAM_DIR" && /usr/bin/flock -n state/prov.lock .venv/bin/python main.py run --entity proveedores --export migrator --batch-size 500
+
 # 2) ORDEN_COMPRA + OC_ITEMS -> compras_pedidos + items
+*/15 * * * * cd "$RAFAM_DIR" && /usr/bin/flock -n state/oc.lock .venv/bin/python main.py run --entity oc_items --export migrator --batch-size 500
+
 # 3) ORDEN_PAGO + CTA_COMPROB + RETENCIONES -> egresos + gastos + retenciones
-*/15 * * * * cd "$RAFAM_DIR" && /usr/bin/flock -n state/cron.lock /bin/bash -lc 'make migrate-proveedores BATCH="$RAFAM_BATCH" >> "$RAFAM_LOG_DIR/proveedores.log" 2>&1 && make migrate-oc BATCH="$RAFAM_BATCH" >> "$RAFAM_LOG_DIR/oc.log" 2>&1 && make migrate-op BATCH="$RAFAM_BATCH" >> "$RAFAM_LOG_DIR/op.log" 2>&1'
+*/15 * * * * cd "$RAFAM_DIR" && /usr/bin/flock -n state/op.lock .venv/bin/python main.py run --entity orden_pago --export migrator --batch-size 500
 ```
+
+Notas sobre el crontab:
+
+- No hace falta redirigir stdout/stderr con `>>`: `main.py` escribe automaticamente a
+  `logs/rafam-{entidad}-YYYY-MM.log` (rotacion mensual). Se puede cambiar la carpeta con
+  la variable de entorno `RAFAM_LOG_DIR`.
+- Cada entidad tiene su propio lock (`prov.lock`, `oc.lock`, `op.lock`). Si una tarda
+  mas de 15 minutos, `flock -n` salta esa entidad sin bloquear las otras.
+- Si una entidad falla (ej: CUIT invalido en proveedores), OC y OP siguen corriendo.
 
 Verificar que quedo instalado:
 
 ```bash
 crontab -l
-tail -f logs/proveedores.log
-tail -f logs/oc.log
-tail -f logs/op.log
+```
+
+Ver logs en vivo (reemplazar `YYYY-MM` por el mes actual):
+
+```bash
+tail -f logs/rafam-proveedores-2026-05.log
+tail -f logs/rafam-oc_items-2026-05.log
+tail -f logs/rafam-orden_pago-2026-05.log
 ```
 
 Para probar exactamente lo que ejecuta cron antes de dejarlo activo:
 
 ```bash
 cd /home/rafam/rafam-ba-proveedores
-make migrate-proveedores-dry BATCH=100
-make migrate-oc-dry BATCH=100
-make migrate-op-dry BATCH=100
+.venv/bin/python main.py run --entity proveedores --export migrator --batch-size 500 --dry-run
+.venv/bin/python main.py run --entity oc_items --export migrator --batch-size 500 --dry-run
+.venv/bin/python main.py run --entity orden_pago --export migrator --batch-size 500 --dry-run
 ```
-
-Si se prefiere una sola salida de log para todo el pipeline, reemplazar los tres redirects por
-`>> "$RAFAM_LOG_DIR/pipeline.log" 2>&1` en cada comando.
 
 ### 6. Verificacion post-importacion
 
@@ -475,10 +492,11 @@ BATCH=500 LIMIT=100 EXPORT=csv CSV_DIR=output/rafam_ultimos_3_meses DEV_DB=state
 | --- | --- |
 | `state/dev_rafam.db` | Snapshot SQLite de RAFAM para desarrollo. |
 | `state/checkpoint.db` | Checkpoints y vinculos RAFAM -> Paxapos. |
-| `state/migrator.lock` | Lock de corridas concurrentes. |
+| `state/migrator.lock` | Lock de corridas concurrentes (migrator). |
+| `state/prov.lock`, `oc.lock`, `op.lock` | Locks de cron por entidad. |
 | `output/*.csv` | Exportaciones CSV por entidad. |
 | `output/rafam_ultimos_3_meses/*.csv` | Snapshots exportados desde Oracle. |
-| `logs/rafam-sync.log` | Log sugerido para cron productivo. |
+| `logs/rafam-{entidad}-YYYY-MM.log` | Logs rotativos mensuales por entidad (auto-generados). |
 
 No commitear `.env`, `state/*.db`, logs ni CSVs productivos.
 

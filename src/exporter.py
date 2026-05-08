@@ -1695,8 +1695,40 @@ class MigratorExporter(BaseExporter):
                 if rafam_ref not in refs:
                     refs.append(rafam_ref)
 
-            # Recolectar CC_NRO de CTA_HOJA_DE_RUTA (nro comprobante del gasto)
+            # Recolectar CC_NRO de CTA_HOJA_DE_RUTA (nro comprobante del gasto).
+            # Si la hoja de ruta no resuelve, usar fallback SG→REG_COMP→CTA_COMPROB
+            # (columnas FB_*) y promover esos valores a las columnas HDR_* del raw
+            # para que el resto del pipeline (build gasto, dedup, etc.) los use
+            # de forma transparente.
             cc_nro = str(raw.get("HDR_CC_NRO") or "").strip()
+            if not cc_nro:
+                fb_cc_nro = str(raw.get("FB_CC_NRO") or "").strip()
+                if fb_cc_nro:
+                    cc_nro = fb_cc_nro
+                    # Promover FB_* → HDR_*/CTA_* (solo si HDR/CTA están vacios,
+                    # para no pisar datos reales de la hoja de ruta).
+                    raw["HDR_CC_NRO"] = raw.get("FB_CC_NRO")
+                    if not raw.get("HDR_CC_TIPO_COMPROB"):
+                        raw["HDR_CC_TIPO_COMPROB"] = raw.get("FB_CC_TIPO")
+                    if not raw.get("HDR_CC_COD_PROV"):
+                        raw["HDR_CC_COD_PROV"] = raw.get("FB_CC_COD_PROV")
+                    if not raw.get("HDR_OC_NRO"):
+                        raw["HDR_OC_NRO"] = raw.get("FB_OC_NRO")
+                    if not raw.get("HDR_OC_UNI_COMPRA"):
+                        raw["HDR_OC_UNI_COMPRA"] = raw.get("FB_OC_UNI_COMPRA")
+                    if not raw.get("HDR_OC_COD_PROV"):
+                        raw["HDR_OC_COD_PROV"] = raw.get("FB_OC_COD_PROV")
+                    if not raw.get("HDR_OC_EJERCICIO"):
+                        # FB no expone OC_EJERCICIO; asumir mismo ejercicio que la SG.
+                        raw["HDR_OC_EJERCICIO"] = raw.get("EJERCICIO")
+                    if raw.get("CTA_IMPORTE_COMPR") is None:
+                        raw["CTA_IMPORTE_COMPR"] = raw.get("FB_CC_IMPORTE_COMPR")
+                    if raw.get("CTA_IMPORTE_SIN_IVA") is None:
+                        raw["CTA_IMPORTE_SIN_IVA"] = raw.get("FB_CC_IMPORTE_SIN_IVA")
+                    if raw.get("CTA_FECH_COMPROB") is None:
+                        raw["CTA_FECH_COMPROB"] = raw.get("FB_CC_FECH_COMPROB")
+                    if raw.get("CTA_FECH_VENCIM") is None:
+                        raw["CTA_FECH_VENCIM"] = raw.get("FB_CC_FECH_VENCIM")
             if cc_nro:
                 cc_nros = grouped_cc_nros.setdefault(key, [])
                 if cc_nro not in cc_nros:
@@ -1849,7 +1881,7 @@ class MigratorExporter(BaseExporter):
             if not cc_nros:
                 skipped_no_gasto += 1
                 logger.debug(
-                    "Migrator [orden_pago] OP %s-%s omitida: sin CC_NRO en CTA_HOJA_DE_RUTA",
+                    "Migrator [orden_pago] OP %s-%s omitida: sin CC_NRO en CTA_HOJA_DE_RUTA ni fallback SG→REG_COMP→CTA_COMPROB",
                     key[0], key[1],
                 )
                 continue
@@ -1894,7 +1926,8 @@ class MigratorExporter(BaseExporter):
 
         if skipped_no_gasto:
             logger.warning(
-                "Migrator [orden_pago]: %d OPs omitidas sin gasto vinculado",
+                "Migrator [orden_pago]: %d OPs omitidas sin gasto vinculado "
+                "(ni CTA_HOJA_DE_RUTA ni fallback SG→REG_COMP→CTA_COMPROB resolvieron)",
                 skipped_no_gasto,
             )
         if skipped_estado:
