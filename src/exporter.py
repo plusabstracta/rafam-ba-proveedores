@@ -1695,6 +1695,26 @@ class MigratorExporter(BaseExporter):
                 if rafam_ref not in refs:
                     refs.append(rafam_ref)
 
+            # Promover columnas OC_* desde el fallback SG→REG_COMP de forma
+            # incondicional. CTA_HOJA_DE_RUTA en RAFAM puede tener CC_NRO
+            # poblado pero dejar OC_NRO/OC_UNI_COMPRA/OC_EJERCICIO en NULL
+            # (vimos OPs migrarse OK como Egreso pero sin pedido_id porque
+            # nunca se enviaba pedido_internal_id). Hacemos el promote ANTES
+            # de la rama CC_NRO para que pedido_internal_id se calcule bien
+            # incluso cuando la hoja de ruta solo trajo el comprobante.
+            if raw.get("HDR_OC_NRO") is None:
+                raw["HDR_OC_NRO"] = raw.get("FB_OC_NRO")
+            if raw.get("HDR_OC_UNI_COMPRA") is None:
+                raw["HDR_OC_UNI_COMPRA"] = raw.get("FB_OC_UNI_COMPRA")
+            if raw.get("HDR_OC_COD_PROV") is None:
+                raw["HDR_OC_COD_PROV"] = raw.get("FB_OC_COD_PROV")
+            if raw.get("HDR_OC_EJERCICIO") is None:
+                # FB_OC_EJERCICIO viene de REG_COMP.EJERCICIO, que en
+                # RAFAM coincide con OC.EJERCICIO por como se modela
+                # el JOIN REG_COMP → ORDEN_COMPRA. Cubre el caso real
+                # OP_2026 → OC_2025 sin asumir mismo ejercicio.
+                raw["HDR_OC_EJERCICIO"] = raw.get("FB_OC_EJERCICIO")
+
             # Recolectar CC_NRO de CTA_HOJA_DE_RUTA (nro comprobante del gasto).
             # Si la hoja de ruta no resuelve, usar fallback SG→REG_COMP→CTA_COMPROB
             # (columnas FB_*) y promover esos valores a las columnas HDR_* del raw
@@ -1702,25 +1722,22 @@ class MigratorExporter(BaseExporter):
             # de forma transparente.
             cc_nro = str(raw.get("HDR_CC_NRO") or "").strip()
             if not cc_nro:
-                fb_cc_nro = str(raw.get("FB_CC_NRO") or "").strip()
+                fb_cc_nro_raw = raw.get("FB_CC_NRO")
+                fb_cc_nro = str(fb_cc_nro_raw or "").strip()
                 if fb_cc_nro:
+                    # CTA_COMPROB.NRO_COMPROB en RAFAM no siempre incluye el
+                    # "PDV-" prefix; CTA_HOJA_DE_RUTA suele traerlo. Dejamos
+                    # el comprobante tal cual y delegamos al backend la
+                    # busqueda por sólo factura_nro cuando no hay PDV.
                     cc_nro = fb_cc_nro
-                    # Promover FB_* → HDR_*/CTA_* (solo si HDR/CTA están vacios,
-                    # para no pisar datos reales de la hoja de ruta).
-                    raw["HDR_CC_NRO"] = raw.get("FB_CC_NRO")
-                    if not raw.get("HDR_CC_TIPO_COMPROB"):
+                    # Promover FB_* → HDR_*/CTA_* solo si HDR/CTA estaban
+                    # explicitamente ausentes (None). Usar `is None` y no
+                    # `not <val>` para no pisar valores legitimos como 0.
+                    raw["HDR_CC_NRO"] = fb_cc_nro_raw
+                    if raw.get("HDR_CC_TIPO_COMPROB") is None:
                         raw["HDR_CC_TIPO_COMPROB"] = raw.get("FB_CC_TIPO")
-                    if not raw.get("HDR_CC_COD_PROV"):
+                    if raw.get("HDR_CC_COD_PROV") is None:
                         raw["HDR_CC_COD_PROV"] = raw.get("FB_CC_COD_PROV")
-                    if not raw.get("HDR_OC_NRO"):
-                        raw["HDR_OC_NRO"] = raw.get("FB_OC_NRO")
-                    if not raw.get("HDR_OC_UNI_COMPRA"):
-                        raw["HDR_OC_UNI_COMPRA"] = raw.get("FB_OC_UNI_COMPRA")
-                    if not raw.get("HDR_OC_COD_PROV"):
-                        raw["HDR_OC_COD_PROV"] = raw.get("FB_OC_COD_PROV")
-                    if not raw.get("HDR_OC_EJERCICIO"):
-                        # FB no expone OC_EJERCICIO; asumir mismo ejercicio que la SG.
-                        raw["HDR_OC_EJERCICIO"] = raw.get("EJERCICIO")
                     if raw.get("CTA_IMPORTE_COMPR") is None:
                         raw["CTA_IMPORTE_COMPR"] = raw.get("FB_CC_IMPORTE_COMPR")
                     if raw.get("CTA_IMPORTE_SIN_IVA") is None:

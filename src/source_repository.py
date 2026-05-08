@@ -515,6 +515,12 @@ class SourceRepository:
                 cols["rc_ej"].label("FB_EJERCICIO"),
                 cols["rc_deleg"].label("FB_DELEG_SOLIC"),
                 cols["rc_nro_sol"].label("FB_NRO_SOLIC"),
+                # FB_OC_EJERCICIO = REG_COMP.EJERCICIO. RAFAM modela el JOIN
+                # REG_COMP→ORDEN_COMPRA por (EJERCICIO + UNI_COMPRA + NRO_OC),
+                # asi que REG_COMP.EJERCICIO == OC.EJERCICIO. Esto evita asumir
+                # que la OP y la OC comparten ejercicio (caso real: OP 2026
+                # pagando una OC 2025).
+                func.min(cols["rc_ej"]).label("FB_OC_EJERCICIO"),
                 func.min(cols["rc_nro_oc"]).label("FB_OC_NRO"),
                 func.min(cols["rc_uni"]).label("FB_OC_UNI_COMPRA"),
                 func.min(cols["rc_prov"]).label("FB_OC_COD_PROV"),
@@ -676,6 +682,7 @@ class SourceRepository:
                 ),
             )
             select_cols.extend([
+                op_fb.c.FB_OC_EJERCICIO,
                 op_fb.c.FB_OC_NRO,
                 op_fb.c.FB_OC_UNI_COMPRA,
                 op_fb.c.FB_OC_COD_PROV,
