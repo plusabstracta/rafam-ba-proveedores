@@ -13,7 +13,7 @@ import csv
 import re
 from pathlib import Path
 
-from sqlalchemy import Column, MetaData, Table, Text, create_engine
+from sqlalchemy import Column, MetaData, Table, Text, create_engine, text
 
 _SNAPSHOT_RE = re.compile(r"^(?P<entity>.+)_\d{8}_\d{6}$")
 
@@ -147,6 +147,7 @@ SELECT DISTINCT
         rc.NRO_REG_COMP AS RC_NRO,
         cc.TIPO         AS CC_TIPO_COMPROB,
         cc.NRO_COMPROB  AS CC_NRO,
+        cc.COD_PROV     AS CC_COD_PROV,
         cc.NRO_REG_COMP AS CC_NRO_REG_COMP,
         cc.IMPORTE_COMPR AS CC_IMPORTE,
         cc.IMPORTE_PAGADO AS CC_IMPORTE_PAG,
@@ -186,8 +187,11 @@ def _ensure_cta_hoja_de_ruta_view(conn) -> None:
     ).scalar()
     if existing == "table":
         count = conn.execute(text("SELECT COUNT(*) FROM CTA_HOJA_DE_RUTA")).scalar()
-        print(f"[CTA_HOJA_DE_RUTA] tabla CSV preservada ({count} filas)")
-        return
+        if count:
+            print(f"[CTA_HOJA_DE_RUTA] tabla CSV preservada ({count} filas)")
+            return
+        print("[CTA_HOJA_DE_RUTA] tabla CSV vacía; se reemplaza por VIEW derivada")
+        conn.execute(text("DROP TABLE CTA_HOJA_DE_RUTA"))
     if existing == "view":
         conn.execute(text("DROP VIEW CTA_HOJA_DE_RUTA"))
     conn.execute(text(_CTA_HOJA_DE_RUTA_VIEW_SQL))
@@ -233,6 +237,13 @@ def load_csvs(csv_dir: Path, output_db: Path) -> None:
                         print(f"[{entity}] columnas JOIN descartadas: {extra}")
                 else:
                     header = list(reader.fieldnames)
+
+                existing = conn.execute(
+                    text("SELECT type FROM sqlite_master WHERE name = :name"),
+                    {"name": table_name},
+                ).scalar()
+                if existing == "view":
+                    conn.execute(text(f'DROP VIEW "{table_name}"'))
 
                 table = _create_table_from_csv(metadata, entity, header)
                 table.drop(conn, checkfirst=True)

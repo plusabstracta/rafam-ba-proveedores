@@ -470,6 +470,10 @@ class SourceRepository:
         # In Oracle it's a pre-built VIEW; in SQLite dev it's a derived VIEW
         # created by load_csv_to_sqlite.py.  Required in both environments.
         cta_hdr = self._reflect_optional_table("CTA_HOJA_DE_RUTA")
+        # CTA_COMPROB aporta los datos fiscales reales del comprobante
+        # (IMPORTE_COMPR, FECH_COMPROB, FECH_VENCIM) para auto-crear el Gasto
+        # en Paxapos cuando la SG aún no fue migrada.
+        cta_comprob = self._reflect_optional_table("CTA_COMPROB")
 
         select_cols = [
             orden_pago,
@@ -509,11 +513,54 @@ class SourceRepository:
             ("SG_EJERCICIO", "HDR_SG_EJERCICIO"),
             ("OC_COD_PROV", "HDR_OC_COD_PROV"),
             ("CC_NRO", "HDR_CC_NRO"),
+            ("CC_COD_PROV", "HDR_CC_COD_PROV"),
             ("CC_TIPO_COMPROB", "HDR_CC_TIPO_COMPROB"),
         ]:
             col = self._safe_column(cta_hdr, col_name) if cta_hdr is not None else None
             if col is not None:
                 select_cols.append(col.label(label))
+
+        # LEFT JOIN CTA_COMPROB para obtener datos fiscales reales del
+        # comprobante (importe, fecha, vencimiento, tipo). Necesario para
+        # auto-crear el Gasto en Paxapos si la SG no se migró todavía.
+        # PK CTA_COMPROB: (EJERCICIO, TIPO, NRO_COMPROB, COD_PROV).
+        # CTA_HOJA_DE_RUTA aporta CC_TIPO_COMPROB / CC_NRO / CC_COD_PROV
+        # para hacer match exacto contra esa PK.
+        if cta_hdr is not None and cta_comprob is not None:
+            hdr_cc_tipo_col = self._safe_column(cta_hdr, "CC_TIPO_COMPROB")
+            hdr_cc_nro_col = self._safe_column(cta_hdr, "CC_NRO")
+            hdr_cc_cod_prov_col = self._safe_column(cta_hdr, "CC_COD_PROV")
+            cta_ej_col = self._safe_column(cta_comprob, "EJERCICIO")
+            cta_tipo_col = self._safe_column(cta_comprob, "TIPO")
+            cta_nro_col = self._safe_column(cta_comprob, "NRO_COMPROB")
+            cta_prov_col = self._safe_column(cta_comprob, "COD_PROV")
+            if (
+                hdr_cc_tipo_col is not None
+                and hdr_cc_nro_col is not None
+                and hdr_cc_cod_prov_col is not None
+                and cta_ej_col is not None
+                and cta_tipo_col is not None
+                and cta_nro_col is not None
+                and cta_prov_col is not None
+            ):
+                from_clause = from_clause.outerjoin(
+                    cta_comprob,
+                    and_(
+                        orden_pago.c.EJERCICIO == cta_ej_col,
+                        hdr_cc_tipo_col == cta_tipo_col,
+                        hdr_cc_nro_col == cta_nro_col,
+                        hdr_cc_cod_prov_col == cta_prov_col,
+                    ),
+                )
+                for cta_col_name, label in [
+                    ("IMPORTE_COMPR", "CTA_IMPORTE_COMPR"),
+                    ("IMPORTE_SIN_IVA", "CTA_IMPORTE_SIN_IVA"),
+                    ("FECH_COMPROB", "CTA_FECH_COMPROB"),
+                    ("FECH_VENCIM", "CTA_FECH_VENCIM"),
+                ]:
+                    cta_col = self._safe_column(cta_comprob, cta_col_name)
+                    if cta_col is not None:
+                        select_cols.append(cta_col.label(label))
 
         stmt = select(*select_cols).select_from(from_clause)
         stmt = self._apply_incremental_filters(stmt, orden_pago, cfg, checkpoint)
@@ -546,7 +593,7 @@ class SourceRepository:
             if ej_col is not None:
                 stmt = stmt.where(ej_col >= cfg.ejercicio_min)
 
-        if cfg.full_load or cp.is_fresh:
+        if cfg.full_load or cp.is_fresh or (cp.last_id is None and cp.last_ts is None):
             return stmt
 
         filters = []

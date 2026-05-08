@@ -705,6 +705,11 @@ class MigratorExporter(BaseExporter):
         grouped_gasto_refs: dict[tuple[int, int, int], list[str]] = {}
         grouped_gasto_linked_refs: dict[tuple[int, int, int], list[str]] = {}
         grouped_cc_nros: dict[tuple[int, int, int], list[str]] = {}
+        # seen_items_per_oc: dedup por ITEM_OC porque el LEFT JOIN a
+        # SOLIC_GASTOS y CTA_HOJA_DE_RUTA puede multiplicar filas (44% multi-
+        # match en SG, 8% en CC). Sin esto, los totales en Paxapos se inflan
+        # porque sum(item.precio) cuenta cada item N veces.
+        seen_items_per_oc: dict[tuple[int, int, int], set[int]] = {}
         skipped_no_prov: set[tuple[int, int, int]] = set()
         unresolved_items = 0
 
@@ -791,11 +796,21 @@ class MigratorExporter(BaseExporter):
                 if cc_nro not in cc_nros:
                     cc_nros.append(cc_nro)
 
+            # Dedup por ITEM_OC: el LEFT JOIN a SOLIC_GASTOS / CTA_HOJA_DE_RUTA
+            # multiplica filas. Sin esto los items se duplican y el total
+            # (sum(precio_unitario x cantidad)) en Paxapos queda inflado.
+            item_oc = self._to_int(raw.get("ITEM_OC"))
+            seen_items = seen_items_per_oc.setdefault(key, set())
+            if item_oc is not None and item_oc in seen_items:
+                continue
+
             item = self._map_oc_item(raw)
             if item is None:
                 unresolved_items += 1
                 self._track_unresolved_item(raw.get("DESCRIPCION"), raw.get("COD_PROV"))
                 continue
+            if item_oc is not None:
+                seen_items.add(item_oc)
             grouped[key]["items"].append(item)
 
         # ── 1b. Asignar gasto_nro_comprobante desde CTA_HOJA_DE_RUTA.CC_NRO ──
@@ -974,6 +989,11 @@ class MigratorExporter(BaseExporter):
         grouped_gasto_refs: dict[tuple[int, int, int], list[str]] = {}
         grouped_gasto_linked_refs: dict[tuple[int, int, int], list[str]] = {}
         grouped_cc_nros: dict[tuple[int, int, int], list[str]] = {}
+        # seen_items_per_oc: dedup por ITEM_OC porque el LEFT JOIN a
+        # SOLIC_GASTOS y CTA_HOJA_DE_RUTA puede multiplicar filas (44% multi-
+        # match en SG, 8% en CC). Sin esto, los totales en Paxapos se inflan
+        # porque sum(item.precio) cuenta cada item N veces.
+        seen_items_per_oc: dict[tuple[int, int, int], set[int]] = {}
         skipped_no_prov: set[tuple[int, int, int]] = set()
         unresolved_items = 0
 
@@ -1059,11 +1079,21 @@ class MigratorExporter(BaseExporter):
                 if cc_nro not in cc_nros:
                     cc_nros.append(cc_nro)
 
+            # Dedup por ITEM_OC: el LEFT JOIN a SOLIC_GASTOS / CTA_HOJA_DE_RUTA
+            # multiplica filas. Sin esto los items se duplican y el total
+            # (sum(precio_unitario x cantidad)) en Paxapos queda inflado.
+            item_oc = self._to_int(raw.get("ITEM_OC"))
+            seen_items = seen_items_per_oc.setdefault(key, set())
+            if item_oc is not None and item_oc in seen_items:
+                continue
+
             item = self._map_oc_item(raw)
             if item is None:
                 unresolved_items += 1
                 self._track_unresolved_item(raw.get("DESCRIPCION"), raw.get("COD_PROV"))
                 continue
+            if item_oc is not None:
+                seen_items.add(item_oc)
             grouped[key]["items"].append(item)
 
         # ── 1b. Asignar gasto_nro_comprobante desde CTA_HOJA_DE_RUTA.CC_NRO ──
@@ -1399,6 +1429,112 @@ class MigratorExporter(BaseExporter):
                 return pedido_id
         return None
 
+    def _build_gasto_from_op_row(
+        self, raw: dict
+    ) -> tuple[dict | None, tuple[int, str, str] | None]:
+        """Construye un bloque Gasto a partir de un row de OP enriquecido con CTA_COMPROB.
+
+        Devuelve (gasto_payload, dedup_key) donde dedup_key es
+        (proveedor_id, punto_de_venta, factura_nro) — la clave de upsert real
+        de Paxapos. Si faltan datos esenciales (factura_nro, proveedor_id,
+        importe o fecha), devuelve (None, None).
+        """
+        cc_nro = str(raw.get("HDR_CC_NRO") or "").strip()
+        if not cc_nro:
+            return None, None
+
+        # proveedor_id: priorizar el del comprobante (CC_COD_PROV) que es el
+        # emisor real de la factura; fallback al de la OC y al de la OP.
+        remote_prov_id: int | None = None
+        for cod_prov in (
+            raw.get("HDR_CC_COD_PROV"),
+            raw.get("HDR_OC_COD_PROV"),
+            raw.get("COD_PROV"),
+        ):
+            if cod_prov is None or str(cod_prov).strip() == "":
+                continue
+            remote_prov = self._link_store.get_remote_id(
+                "proveedores", str(cod_prov).strip()
+            )
+            if remote_prov:
+                remote_prov_id = int(remote_prov)
+                break
+        if remote_prov_id is None:
+            return None, None
+
+        # importe: priorizar CTA_COMPROB.IMPORTE_COMPR (dato fiscal real).
+        importe_raw = raw.get("CTA_IMPORTE_COMPR")
+        if importe_raw is None:
+            return None, None
+        try:
+            importe_total = round(float(importe_raw), 2)
+        except (TypeError, ValueError):
+            return None, None
+
+        # importe_neto: si CTA tiene IMPORTE_SIN_IVA usarlo, si no = total.
+        importe_sin_iva_raw = raw.get("CTA_IMPORTE_SIN_IVA")
+        try:
+            importe_neto = (
+                round(float(importe_sin_iva_raw), 2)
+                if importe_sin_iva_raw is not None
+                else importe_total
+            )
+        except (TypeError, ValueError):
+            importe_neto = importe_total
+
+        # fecha: CTA_COMPROB.FECH_COMPROB; obligatoria en Paxapos.
+        fecha = self._format_date_only(raw.get("CTA_FECH_COMPROB"))
+        if not fecha:
+            return None, None
+
+        gasto_data: dict = {
+            "fecha": fecha,
+            "importe_total": importe_total,
+            "importe_neto": importe_neto,
+            "proveedor_id": remote_prov_id,
+        }
+
+        # tipo_factura_id desde CC_TIPO_COMPROB
+        tipo_factura_id = self._resolve_tipo_factura_id(raw.get("HDR_CC_TIPO_COMPROB"))
+        if tipo_factura_id is not None:
+            gasto_data["tipo_factura_id"] = tipo_factura_id
+
+        # Parsear NRO_COMPROB: si tiene guion, separar punto_de_venta + factura_nro
+        dash_pos = cc_nro.find("-")
+        if dash_pos > 0:
+            punto_de_venta = cc_nro[:dash_pos]
+            factura_nro = cc_nro[dash_pos + 1:]
+        else:
+            punto_de_venta = ""
+            factura_nro = cc_nro
+        gasto_data["punto_de_venta"] = punto_de_venta
+        gasto_data["factura_nro"] = factura_nro
+
+        # fecha_vencimiento opcional
+        fech_venc = self._format_date_only(raw.get("CTA_FECH_VENCIM"))
+        if fech_venc:
+            gasto_data["fecha_vencimiento"] = fech_venc
+
+        # external_id: si tenemos la SG asociada, usar el formato canónico para
+        # poder vincularlo desde el link_store; si no, usar uno basado en CC.
+        sg_ej = self._to_int(raw.get("HDR_SG_EJERCICIO")) or self._to_int(
+            raw.get("EJERCICIO")
+        )
+        sg_deleg = self._to_int(raw.get("HDR_SG_DELEG"))
+        sg_nro = self._to_int(raw.get("HDR_SG_NRO"))
+        if sg_ej is not None and sg_deleg is not None and sg_nro is not None:
+            external_id = self._gasto_external_id(sg_ej, sg_deleg, sg_nro)
+        else:
+            external_id = {
+                "rafam_ref": (
+                    f"CC-{raw.get('EJERCICIO')}-{raw.get('HDR_CC_TIPO_COMPROB') or ''}-"
+                    f"{cc_nro}-{raw.get('HDR_CC_COD_PROV') or ''}"
+                )
+            }
+
+        dedup_key = (remote_prov_id, punto_de_venta, factura_nro)
+        return {"external_id": external_id, "Gasto": gasto_data}, dedup_key
+
     def _write_batch_orden_pago(self, columns: list[str], rows: list[tuple]) -> None:
         # Agrupa por (EJERCICIO, NRO_OP) y acumula las refs de gastos del LEFT JOIN.
         # NOTA: las retenciones NO vienen en este batch — se traen por separado
@@ -1410,6 +1546,10 @@ class MigratorExporter(BaseExporter):
         grouped_pedido_ids: dict[tuple[int, int], list[int]] = {}
         op_to_nro_cance: dict[tuple[int, int], int] = {}
         raw_by_source_key: dict[str, dict] = {}
+        # cc_raw_by_key: dedup por comprobante fiscal real para emitir gastos[]
+        # con datos de CTA_COMPROB (importe, fecha, tipo, vencimiento). La key
+        # es (CC_TIPO, CC_NRO, CC_COD_PROV) — PK lógica del comprobante en RAFAM.
+        cc_raw_by_key: dict[tuple[str, str, str], dict] = {}
         skipped_estado: dict[str, int] = {}
         skipped_confirmado: dict[str, int] = {}
         skipped_no_fech_confirm = 0
@@ -1439,6 +1579,18 @@ class MigratorExporter(BaseExporter):
                 cc_nros = grouped_cc_nros.setdefault(key, [])
                 if cc_nro not in cc_nros:
                     cc_nros.append(cc_nro)
+                # Guardar raw representativo por comprobante para emitir gastos[]
+                # con datos de CTA_COMPROB (importe/fecha/vencimiento/tipo).
+                cc_tipo = str(raw.get("HDR_CC_TIPO_COMPROB") or "").strip()
+                cc_prov = str(raw.get("HDR_CC_COD_PROV") or "").strip()
+                cc_key = (cc_tipo, cc_nro, cc_prov)
+                existing = cc_raw_by_key.get(cc_key)
+                # Preferir el raw que ya trae datos fiscales reales (CTA_COMPROB)
+                if existing is None or (
+                    raw.get("CTA_IMPORTE_COMPR") is not None
+                    and existing.get("CTA_IMPORTE_COMPR") is None
+                ):
+                    cc_raw_by_key[cc_key] = raw
 
             # El script no resuelve pedido_id desde link_orden_compra: si viene
             # en la fila, se reenvia a Paxapos para que el backend vincule OP/Gasto.
@@ -1473,13 +1625,17 @@ class MigratorExporter(BaseExporter):
             # Guardar raw para extras en persist_links
             raw_by_source_key[sk] = raw
 
-            # Resolver proveedor_id via link_store (RAFAM COD_PROV → Paxapos id)
-            cod_prov = raw.get("COD_PROV") or raw.get("HDR_OC_COD_PROV")
+            # Resolver proveedor_id via link_store. En OP, COD_PROV puede ser
+            # el beneficiario de la OP y no necesariamente el proveedor de la
+            # factura; por eso se prioriza el proveedor del comprobante/OC.
             remote_prov_id: int | None = None
-            if cod_prov is not None:
-                remote_prov = self._link_store.get_remote_id("proveedores", str(cod_prov))
+            for cod_prov in (raw.get("HDR_CC_COD_PROV"), raw.get("HDR_OC_COD_PROV"), raw.get("COD_PROV")):
+                if cod_prov is None or str(cod_prov).strip() == "":
+                    continue
+                remote_prov = self._link_store.get_remote_id("proveedores", str(cod_prov).strip())
                 if remote_prov:
                     remote_prov_id = int(remote_prov)
+                    break
 
             importe = raw.get("IMPORTE_TOTAL")
             try:
@@ -1587,7 +1743,34 @@ class MigratorExporter(BaseExporter):
 
         if not ordenes_pago:
             logger.info("Migrator [orden_pago]: lote vacío luego del mapeo")
+            if grouped and skipped_no_gasto:
+                raise RuntimeError(
+                    "orden_pago sin registros enviables: todas las OP del lote carecen de CC_NRO en CTA_HOJA_DE_RUTA"
+                )
             return
+
+        # Construir gastos[] con datos completos desde CTA_COMPROB para que
+        # Paxapos pueda crear el Gasto si aún no existe (auto_create_gasto del
+        # endpoint solo arma un stub mínimo). El upsert en Paxapos dedup por
+        # proveedor_id + factura_nro + punto_de_venta, así que enviar gastos
+        # ya migrados es no-op.
+        gastos_payload: list[dict] = []
+        seen_dedup_keys: set[tuple[int, str, str]] = set()
+        skipped_gastos_incomplete = 0
+        for cc_key, cc_raw in cc_raw_by_key.items():
+            gasto, dedup_key = self._build_gasto_from_op_row(cc_raw)
+            if gasto is None:
+                skipped_gastos_incomplete += 1
+                continue
+            if dedup_key in seen_dedup_keys:
+                continue
+            seen_dedup_keys.add(dedup_key)
+            gastos_payload.append(gasto)
+        if skipped_gastos_incomplete:
+            logger.info(
+                "Migrator [orden_pago]: %d comprobantes sin datos suficientes para auto-crear gasto",
+                skipped_gastos_incomplete,
+            )
 
         payload = {
             "dry_run": self._dry_run,
@@ -1595,14 +1778,14 @@ class MigratorExporter(BaseExporter):
             "proveedores": [],
             "pedidos": [],
             "ordenes_compra": [],
-            "gastos": [],
+            "gastos": gastos_payload,
             "ordenes_pago": ordenes_pago,
         }
 
         url = self._import_url
         logger.debug(
-            "Migrator request [orden_pago] POST %s dry_run=%s ops=%d omitidas=%d",
-            url, self._dry_run, len(ordenes_pago), skipped_no_gasto,
+            "Migrator request [orden_pago] POST %s dry_run=%s ops=%d omitidas=%d gastos=%d",
+            url, self._dry_run, len(ordenes_pago), skipped_no_gasto, len(gastos_payload),
         )
         parsed = self._post_json(url, payload)
 
@@ -1613,6 +1796,11 @@ class MigratorExporter(BaseExporter):
 
         self._persist_links("orden_pago", parsed, raw_by_source_key)
         self._raise_on_migrator_errors(parsed)
+        if skipped_no_gasto:
+            raise RuntimeError(
+                f"orden_pago: {skipped_no_gasto} OPs del lote no tienen CC_NRO en CTA_HOJA_DE_RUTA; "
+                "las OP enviables se procesaron, pero el checkpoint no avanza para reintentar las omitidas"
+            )
         logger.info(
             "Migrator OK [orden_pago]: %d ok, %d error, ops=%d, omitidas=%d, dry_run=%s",
             ok_count, error_count, len(ordenes_pago), skipped_no_gasto, self._dry_run,
@@ -2087,13 +2275,17 @@ class MigratorExporter(BaseExporter):
         if not isinstance(parsed, dict):
             return
 
+        has_errors = False
         errors = parsed.get("errors")
         if isinstance(errors, list) and errors:
             sample = json.dumps(errors[:3], ensure_ascii=False)
             logger.warning("Migrator devolvio errores parciales (%d): %s", len(errors), sample)
+            has_errors = True
 
         stats = parsed.get("stats")
         if not isinstance(stats, dict):
+            if has_errors:
+                raise RuntimeError("Migrator devolvio errores parciales")
             return
 
         failed = []
@@ -2110,6 +2302,11 @@ class MigratorExporter(BaseExporter):
 
         if failed:
             logger.warning("Migrator reporto errores en stats: %s", ", ".join(failed))
+            has_errors = True
+
+        if has_errors:
+            details = ", ".join(failed) if failed else "ver errors en respuesta"
+            raise RuntimeError(f"Migrator devolvio errores parciales: {details}")
 
     def _persist_links(self, entity: str, parsed: dict, raw_by_source_key: dict[str, dict]) -> None:
         if self._dry_run or not isinstance(parsed, dict):

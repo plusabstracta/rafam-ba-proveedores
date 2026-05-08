@@ -345,6 +345,137 @@ class TestWriteBatchOrdenPago:
         exp.write_batch("orden_pago", columns, rows)
         assert sent == []
 
+    def test_op_emite_gasto_completo_desde_cta_comprob(self):
+        """Cuando la OP trae datos de CTA_COMPROB, el payload incluye un Gasto
+        completo en la coleccion gastos[] para que Paxapos lo cree con todos
+        los campos (no solo el stub de auto_create_gasto)."""
+        exp = self._make_exporter()
+        # Pre-popular link_proveedores para que el helper resuelva el id remoto
+        exp._link_store.save_link("proveedores", "555", remote_id="42")
+
+        columns = [
+            "EJERCICIO", "NRO_OP", "ESTADO_OP", "CONFIRMADO", "FECH_CONFIRM",
+            "IMPORTE_TOTAL", "CONCEPTO", "NRO_CANCE", "COD_PROV",
+            "SG_DELEG_SOLIC", "SG_NRO_SOLIC",
+            "HDR_CC_NRO", "HDR_CC_TIPO_COMPROB", "HDR_CC_COD_PROV",
+            "HDR_OC_COD_PROV", "HDR_SG_EJERCICIO", "HDR_SG_DELEG", "HDR_SG_NRO",
+            "CTA_IMPORTE_COMPR", "CTA_IMPORTE_SIN_IVA",
+            "CTA_FECH_COMPROB", "CTA_FECH_VENCIM",
+        ]
+        vals = {
+            "EJERCICIO": "2026", "NRO_OP": "8001",
+            "ESTADO_OP": "C", "CONFIRMADO": "S",
+            "FECH_CONFIRM": "2026-04-15 00:00:00",
+            "IMPORTE_TOTAL": "12100", "CONCEPTO": "Pago factura",
+            "NRO_CANCE": "300", "COD_PROV": "555",
+            "SG_DELEG_SOLIC": "1", "SG_NRO_SOLIC": "300",
+            "HDR_CC_NRO": "0001-00012345",
+            "HDR_CC_TIPO_COMPROB": "FAB",
+            "HDR_CC_COD_PROV": "555",
+            "HDR_OC_COD_PROV": "555",
+            "HDR_SG_EJERCICIO": "2026", "HDR_SG_DELEG": "1", "HDR_SG_NRO": "300",
+            "CTA_IMPORTE_COMPR": "12100.00",
+            "CTA_IMPORTE_SIN_IVA": "10000.00",
+            "CTA_FECH_COMPROB": "2026-04-10 00:00:00",
+            "CTA_FECH_VENCIM": "2026-05-10 00:00:00",
+        }
+        rows = [tuple(vals.get(c, "") for c in columns)]
+
+        sent = []
+        exp._post_json = lambda url, p: sent.append(p) or {
+            "stats": {"ordenes_pago": {"ok": 1, "error": 0}, "gastos": {"ok": 1, "error": 0}}
+        }
+        exp.write_batch("orden_pago", columns, rows)
+
+        assert len(sent) == 1
+        payload = sent[0]
+        # OP enviada con gasto_nro_comprobante
+        assert len(payload["ordenes_pago"]) == 1
+        assert payload["ordenes_pago"][0]["gasto_nro_comprobante"] == "0001-00012345"
+        # Gasto enviado con todos los datos fiscales reales
+        assert len(payload["gastos"]) == 1
+        gasto = payload["gastos"][0]["Gasto"]
+        assert gasto["proveedor_id"] == 42
+        assert gasto["importe_total"] == 12100.00
+        assert gasto["importe_neto"] == 10000.00
+        assert gasto["fecha"] == "2026-04-10"
+        assert gasto["fecha_vencimiento"] == "2026-05-10"
+        assert gasto["punto_de_venta"] == "0001"
+        assert gasto["factura_nro"] == "00012345"
+        # external_id basado en SG cuando esta disponible
+        assert payload["gastos"][0]["external_id"] == {
+            "ejercicio": 2026, "deleg_solic": 1, "nro_solic": 300
+        }
+
+    def test_op_omite_gasto_si_falta_importe_o_fecha(self):
+        """Sin CTA_COMPROB.IMPORTE_COMPR o FECH_COMPROB el gasto no se emite,
+        pero la OP igual se envia con gasto_nro_comprobante (Paxapos hara stub)."""
+        exp = self._make_exporter()
+        exp._link_store.save_link("proveedores", "555", remote_id="42")
+
+        columns = [
+            "EJERCICIO", "NRO_OP", "ESTADO_OP", "CONFIRMADO", "FECH_CONFIRM",
+            "IMPORTE_TOTAL", "NRO_CANCE", "COD_PROV",
+            "SG_DELEG_SOLIC", "SG_NRO_SOLIC",
+            "HDR_CC_NRO", "HDR_CC_TIPO_COMPROB", "HDR_CC_COD_PROV",
+        ]
+        vals = {
+            "EJERCICIO": "2026", "NRO_OP": "8002",
+            "ESTADO_OP": "C", "CONFIRMADO": "S",
+            "FECH_CONFIRM": "2026-04-15", "IMPORTE_TOTAL": "100",
+            "NRO_CANCE": "301", "COD_PROV": "555",
+            "SG_DELEG_SOLIC": "1", "SG_NRO_SOLIC": "301",
+            "HDR_CC_NRO": "0001-00099999", "HDR_CC_TIPO_COMPROB": "FAB",
+            "HDR_CC_COD_PROV": "555",
+        }
+        rows = [tuple(vals.get(c, "") for c in columns)]
+
+        sent = []
+        exp._post_json = lambda url, p: sent.append(p) or {
+            "stats": {"ordenes_pago": {"ok": 1, "error": 0}}
+        }
+        exp.write_batch("orden_pago", columns, rows)
+
+        assert len(sent) == 1
+        assert sent[0]["gastos"] == []
+        assert sent[0]["ordenes_pago"][0]["gasto_nro_comprobante"] == "0001-00099999"
+
+    def test_op_dedup_gasto_por_proveedor_factura(self):
+        """Dos OPs distintas que pagan el mismo comprobante emiten un solo Gasto."""
+        exp = self._make_exporter()
+        exp._link_store.save_link("proveedores", "555", remote_id="42")
+
+        columns = [
+            "EJERCICIO", "NRO_OP", "ESTADO_OP", "CONFIRMADO", "FECH_CONFIRM",
+            "IMPORTE_TOTAL", "NRO_CANCE", "COD_PROV",
+            "SG_DELEG_SOLIC", "SG_NRO_SOLIC",
+            "HDR_CC_NRO", "HDR_CC_TIPO_COMPROB", "HDR_CC_COD_PROV",
+            "CTA_IMPORTE_COMPR", "CTA_FECH_COMPROB",
+        ]
+
+        def row(nro_op):
+            vals = {
+                "EJERCICIO": "2026", "NRO_OP": str(nro_op),
+                "ESTADO_OP": "C", "CONFIRMADO": "S",
+                "FECH_CONFIRM": "2026-04-15", "IMPORTE_TOTAL": "100",
+                "NRO_CANCE": "400", "COD_PROV": "555",
+                "SG_DELEG_SOLIC": "1", "SG_NRO_SOLIC": "400",
+                "HDR_CC_NRO": "0001-00077777", "HDR_CC_TIPO_COMPROB": "FAB",
+                "HDR_CC_COD_PROV": "555",
+                "CTA_IMPORTE_COMPR": "200.00", "CTA_FECH_COMPROB": "2026-04-10",
+            }
+            return tuple(vals.get(c, "") for c in columns)
+
+        rows = [row(9001), row(9002)]
+        sent = []
+        exp._post_json = lambda url, p: sent.append(p) or {
+            "stats": {"ordenes_pago": {"ok": 2, "error": 0}}
+        }
+        exp.write_batch("orden_pago", columns, rows)
+
+        assert len(sent[0]["gastos"]) == 1, "El comprobante repetido se deduplica"
+        assert len(sent[0]["ordenes_pago"]) == 2
+
 
 # ─── tipo_factura lookup ──────────────────────────────────────────────────────
 
@@ -703,3 +834,26 @@ class TestWriteBatchOcItems:
 
         oc = sent[0]["ordenes_compra"][0]
         assert "centro_costo_id" not in oc
+
+    def test_items_se_deduplican_por_item_oc(self):
+        """Si el LEFT JOIN a SOLIC_GASTOS o CTA_HOJA_DE_RUTA duplica filas, los
+        items no deben duplicarse en el payload (sino los totales se inflan)."""
+        exp = self._make_exporter_with_prov()
+        # Misma OC con item_oc=1 repetido 3 veces (simulando multi-match SG/CC)
+        rows = [
+            _oc_row(item_oc="1", cantidad="10", imp_unitario="100", nro_solic="500"),
+            _oc_row(item_oc="1", cantidad="10", imp_unitario="100", nro_solic="501"),
+            _oc_row(item_oc="1", cantidad="10", imp_unitario="100", nro_solic="502"),
+            _oc_row(item_oc="2", cantidad="5", imp_unitario="200", nro_solic="500"),
+            _oc_row(item_oc="2", cantidad="5", imp_unitario="200", nro_solic="501"),
+        ]
+
+        sent = []
+        exp._post_json = lambda url, p: (
+            sent.append(p)
+            or {"stats": {"ordenes_compra": {"ok": 1, "error": 0}}}
+        )
+        exp.write_batch("oc_items", OC_COLUMNS, rows)
+
+        items = sent[0]["ordenes_compra"][0]["items"]
+        assert len(items) == 2, "Solo 2 items distintos (item_oc 1 y 2), sin duplicados"
