@@ -539,7 +539,8 @@ class SourceRepository:
         cp: Checkpoint,
         extra_filters: list | None = None,
     ) -> Select:
-        # Always apply ejercicio_min filter (regardless of full_load / fresh).
+        # Apply ejercicio_min only for entities whose config explicitly enables it.
+        # It is independent from full_load/fresh checkpoint behavior.
         if cfg.ejercicio_min is not None:
             ej_col = self._safe_column(table, "EJERCICIO")
             if ej_col is not None:

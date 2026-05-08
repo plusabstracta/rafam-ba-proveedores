@@ -21,7 +21,21 @@ load_dotenv(_PROJECT_ROOT / ".env")
 
 SCHEMA = "OWNER_RAFAM"
 
-_EJERCICIO_MIN = int(os.getenv("RAFAM_EJERCICIO_MIN", "0")) or None
+_raw_ejercicio_min = os.getenv("RAFAM_EJERCICIO_MIN", "0").strip()
+_EJERCICIO_MIN = int(_raw_ejercicio_min) if _raw_ejercicio_min else None
+_EJERCICIO_MIN = _EJERCICIO_MIN or None
+_EJERCICIO_MIN_ENTITIES = {
+    "pedidos",
+    "ped_items",
+    "orden_compra",
+    "oc_items",
+    "solic_gastos",
+    "orden_pago",
+}
+
+
+def _ejercicio_min_for(entity: str) -> int | None:
+    return _EJERCICIO_MIN if entity in _EJERCICIO_MIN_ENTITIES else None
 
 ENTITY_CONFIGS: dict[str, EntityConfig] = {
     "proveedores": EntityConfig(
@@ -33,13 +47,13 @@ ENTITY_CONFIGS: dict[str, EntityConfig] = {
         name="pedidos",
         table_name="PEDIDOS",
         ts_field="FECH_EMI",
-        ejercicio_min=_EJERCICIO_MIN,
+        ejercicio_min=_ejercicio_min_for("pedidos"),
     ),
     "ped_items": EntityConfig(
         name="ped_items",
         table_name="PED_ITEMS",
         full_load=True,  # no reliable cursor column yet — confirm with explore_schema.py
-        ejercicio_min=_EJERCICIO_MIN,
+        ejercicio_min=_ejercicio_min_for("ped_items"),
     ),
     "orden_compra": EntityConfig(
         name="orden_compra",
@@ -49,13 +63,13 @@ ENTITY_CONFIGS: dict[str, EntityConfig] = {
         pending_state_field="ESTADO_OC",
         pending_state_value="N",
         pending_reprocess_days=30,
-        ejercicio_min=_EJERCICIO_MIN,
+        ejercicio_min=_ejercicio_min_for("orden_compra"),
     ),
     "oc_items": EntityConfig(
         name="oc_items",
         table_name="OC_ITEMS",
         full_load=True,  # no date/timestamp column in table
-        ejercicio_min=_EJERCICIO_MIN,
+        ejercicio_min=_ejercicio_min_for("oc_items"),
     ),
     "solic_gastos": EntityConfig(
         name="solic_gastos",
@@ -66,7 +80,7 @@ ENTITY_CONFIGS: dict[str, EntityConfig] = {
         pending_state_field="ESTADO_SOLIC",
         pending_state_value="C",
         pending_reprocess_days=30,
-        ejercicio_min=_EJERCICIO_MIN,
+        ejercicio_min=_ejercicio_min_for("solic_gastos"),
     ),
     "orden_pago": EntityConfig(
         name="orden_pago",
@@ -77,6 +91,6 @@ ENTITY_CONFIGS: dict[str, EntityConfig] = {
         pending_state_field="ESTADO_OP",
         pending_state_value="N",
         pending_reprocess_days=30,
-        ejercicio_min=_EJERCICIO_MIN,
+        ejercicio_min=_ejercicio_min_for("orden_pago"),
     ),
 }

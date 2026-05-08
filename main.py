@@ -264,9 +264,14 @@ def cmd_run(args) -> None:
         logger.error("Entidad desconocida: '%s'", args.entity)
         sys.exit(1)
 
-    from src.config import _EJERCICIO_MIN
+    from src.config import _EJERCICIO_MIN, _EJERCICIO_MIN_ENTITIES
     if _EJERCICIO_MIN:
-        logger.info("RAFAM_EJERCICIO_MIN=%d — solo se procesarán registros con EJERCICIO >= %d", _EJERCICIO_MIN, _EJERCICIO_MIN)
+        entidades = ", ".join(sorted(_EJERCICIO_MIN_ENTITIES))
+        logger.info(
+            "RAFAM_EJERCICIO_MIN=%d — aplica solo a: %s",
+            _EJERCICIO_MIN,
+            entidades,
+        )
     else:
         logger.info("RAFAM_EJERCICIO_MIN no configurado — se procesarán TODOS los ejercicios")
 

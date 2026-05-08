@@ -416,10 +416,12 @@ PAXAPOS_RAFAM_DEFAULT_UNIDAD_ID=1
 PAXAPOS_RAFAM_DEFAULT_TIPO_FACTURA_ID=
 PAXAPOS_RAFAM_DEFAULT_TIPO_PAGO_ID=1
 RAFAM_SYNC_BATCH_DELAY_SECONDS=2
+RAFAM_EJERCICIO_MIN=2026
 ```
 
 Para producción RAFAM-only que solo genera CSVs, el bloque `PAXAPOS_*` no es necesario.
 Antes de una importación real, confirmar `PAXAPOS_RAFAM_DEFAULT_UNIDAD_ID` con `make migrator-lookups`, porque los IDs de catálogos pueden variar por tenant.
+`RAFAM_EJERCICIO_MIN` aplica solo a `pedidos`, `ped_items`, `orden_compra`, `oc_items`, `solic_gastos` y `orden_pago`.
 
 ### 4. Verificación post-importación
 
