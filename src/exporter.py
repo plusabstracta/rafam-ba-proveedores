@@ -17,7 +17,10 @@ import csv
 import json
 import logging
 import os
+import random
+import re
 import ssl
+import time
 import unicodedata
 from abc import ABC, abstractmethod
 from datetime import datetime
@@ -30,6 +33,83 @@ from .entity_link_store import EntityLinkStore
 from .gateway_mapper import map_proveedor_migrator_row, map_proveedor_row, resolve_centro_costo_id
 
 logger = logging.getLogger(__name__)
+
+
+# Errores HTTP transitorios que vale la pena reintentar.
+_RETRYABLE_HTTP_STATUS = frozenset({408, 425, 429, 500, 502, 503, 504})
+
+
+def _http_request_with_retries(
+    req: request.Request,
+    *,
+    timeout: float,
+    ssl_context=None,
+    max_attempts: int = 3,
+    base_backoff: float = 0.5,
+):
+    """Ejecuta urlopen con retries acotados ante errores transitorios.
+
+    Reintenta solo URLError (red caida, DNS, timeout) y HTTPError con status en
+    `_RETRYABLE_HTTP_STATUS`. Errores 4xx normales (validacion, auth) NO se
+    reintentan — falla rapido para que el caller actue.
+
+    Usa backoff exponencial con jitter aleatorio para evitar thundering herd
+    si varios cron salen al mismo tiempo. Devuelve el response object abierto;
+    el caller debe usarlo dentro de `with`.
+    """
+    last_exc: Exception | None = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return request.urlopen(req, timeout=timeout, context=ssl_context)
+        except error.HTTPError as exc:
+            # Solo reintentamos status transitorios. 4xx no transitorios suben directo.
+            if exc.code not in _RETRYABLE_HTTP_STATUS or attempt == max_attempts:
+                raise
+            last_exc = exc
+        except error.URLError as exc:
+            if attempt == max_attempts:
+                raise
+            last_exc = exc
+
+        backoff = base_backoff * (2 ** (attempt - 1)) + random.uniform(0, 0.25)
+        logger.warning(
+            "HTTP retry %d/%d a %s tras error transitorio: %s (backoff %.2fs)",
+            attempt, max_attempts - 1, req.full_url, last_exc, backoff,
+        )
+        time.sleep(backoff)
+    # Defensa: nunca se alcanza, pero si llega significa que loop salio sin raise.
+    raise RuntimeError("HTTP retries agotados sin excepcion observable") from last_exc
+
+
+# Patron para redactar campos sensibles en dumps de payload.
+_SENSITIVE_FIELDS = re.compile(
+    r'"(cuit|password|token|api_key|authorization|jwt|x[-_]api[-_]key)"\s*:\s*"[^"]*"',
+    re.IGNORECASE,
+)
+
+
+def _redact_payload_for_dump(text: str) -> str:
+    """Enmascara CUIT y secrets en string JSON serializado para no leak en dumps."""
+    return _SENSITIVE_FIELDS.sub(lambda m: f'"{m.group(1)}":"***REDACTED***"', text)
+
+
+def _dump_payload_path() -> str | None:
+    """Devuelve path de DUMP_PAYLOAD si esta habilitado y APP_ENV no es 'prod'.
+
+    En produccion bloqueamos el dump para evitar leak accidental de datos
+    fiscales (CUIT, importes, identificadores). Para forzar dump en prod hay
+    que setear `DUMP_PAYLOAD_FORCE=1` explicitamente.
+    """
+    path = os.environ.get("DUMP_PAYLOAD")
+    if not path:
+        return None
+    app_env = os.environ.get("APP_ENV", "").strip().lower()
+    if app_env == "prod" and os.environ.get("DUMP_PAYLOAD_FORCE", "").strip() != "1":
+        logger.warning(
+            "DUMP_PAYLOAD ignorado en APP_ENV=prod. Setear DUMP_PAYLOAD_FORCE=1 para forzar."
+        )
+        return None
+    return path
 
 
 class AlreadyExistsError(Exception):
@@ -233,7 +313,7 @@ class GatewayExporter(BaseExporter):
             ssl_context = ssl._create_unverified_context()
 
         try:
-            with request.urlopen(req, timeout=self._timeout, context=ssl_context) as resp:
+            with _http_request_with_retries(req, timeout=self._timeout, ssl_context=ssl_context) as resp:
                 status = resp.getcode()
                 final_url = resp.geturl()
                 content_type = (resp.headers.get("Content-Type") or "").lower()
@@ -284,7 +364,7 @@ class GatewayExporter(BaseExporter):
         if not self._verify_ssl:
             ssl_context = ssl._create_unverified_context()
 
-        with request.urlopen(req, timeout=self._timeout, context=ssl_context) as resp:
+        with _http_request_with_retries(req, timeout=self._timeout, ssl_context=ssl_context) as resp:
             status = resp.getcode()
             final_url = resp.geturl()
             content_type = (resp.headers.get("Content-Type") or "").lower()
@@ -2252,13 +2332,17 @@ class MigratorExporter(BaseExporter):
 
     def _post_json(self, url: str, payload: dict) -> dict:
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        # Debug opcional: si DUMP_PAYLOAD esta seteado, vuelca request+response a un archivo.
-        dump_path = os.environ.get("DUMP_PAYLOAD")
+        # Debug opcional: si DUMP_PAYLOAD esta seteado y APP_ENV != prod, vuelca
+        # request+response a un archivo. Campos sensibles (cuit, tokens) son
+        # enmascarados antes de escribir.
+        dump_path = _dump_payload_path()
         if dump_path:
             try:
+                serialized = json.dumps(payload, ensure_ascii=False, indent=2)
+                redacted = _redact_payload_for_dump(serialized)
                 with open(dump_path, "ab") as fh:
                     fh.write(("\n=== POST " + url + " ===\n").encode("utf-8"))
-                    fh.write(json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"))
+                    fh.write(redacted.encode("utf-8"))
                     fh.write(b"\n")
             except OSError:
                 pass
@@ -2268,7 +2352,7 @@ class MigratorExporter(BaseExporter):
             ssl_context = ssl._create_unverified_context()
 
         try:
-            with request.urlopen(req, timeout=self._timeout, context=ssl_context) as resp:
+            with _http_request_with_retries(req, timeout=self._timeout, ssl_context=ssl_context) as resp:
                 status = resp.getcode()
                 final_url = resp.geturl()
                 content_type = (resp.headers.get("Content-Type") or "").lower()
@@ -2292,9 +2376,11 @@ class MigratorExporter(BaseExporter):
                     logger.debug("Migrator response errors=%s", parsed.get("errors"))
                 if dump_path:
                     try:
+                        serialized_resp = json.dumps(parsed, ensure_ascii=False, indent=2)
+                        redacted_resp = _redact_payload_for_dump(serialized_resp)
                         with open(dump_path, "ab") as fh:
                             fh.write(b"--- RESPONSE ---\n")
-                            fh.write(json.dumps(parsed, ensure_ascii=False, indent=2).encode("utf-8"))
+                            fh.write(redacted_resp.encode("utf-8"))
                             fh.write(b"\n")
                     except OSError:
                         pass
@@ -2735,7 +2821,7 @@ def _fetch_migrator_json(endpoint_env: str, default_endpoint: str, query_params:
         ssl_context = ssl._create_unverified_context()
 
     try:
-        with request.urlopen(req, timeout=timeout, context=ssl_context) as resp:
+        with _http_request_with_retries(req, timeout=timeout, ssl_context=ssl_context) as resp:
             content_type = (resp.headers.get("Content-Type") or "").lower()
             body = resp.read().decode("utf-8", errors="replace")
             if "json" not in content_type:
