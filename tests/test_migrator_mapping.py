@@ -151,9 +151,9 @@ class TestMapSolicGasto:
             "CTA_TIPO_COMPROB": "DESCONOCIDO",
         }
         result = exporter._map_solic_gasto(raw)
-        # default es None cuando PAXAPOS_RAFAM_DEFAULT_TIPO_FACTURA_ID no está seteado
+        # Default RAFAM_TIPO_COMPROB_DEFAULT_ID = 7 (Otros) cuando no matchea
         assert result is not None
-        assert "tipo_factura_id" not in result["Gasto"]
+        assert result["Gasto"].get("tipo_factura_id") == 7
 
     def test_sin_cta_comprob_no_mapea(self, exporter):
         raw = {
@@ -494,8 +494,8 @@ class TestResolveTipoFacturaId:
         assert exporter._resolve_tipo_factura_id("Factura B") == 3
 
     def test_sin_match_retorna_default(self, exporter):
-        # default es None cuando PAXAPOS_RAFAM_DEFAULT_TIPO_FACTURA_ID no está seteado
-        assert exporter._resolve_tipo_factura_id("ORDSE") is None
+        # Default RAFAM_TIPO_COMPROB_DEFAULT_ID = 7 (Otros)
+        assert exporter._resolve_tipo_factura_id("ORDSE") == 7
 
     def test_none_retorna_default(self, exporter):
         assert exporter._resolve_tipo_factura_id(None) is None
@@ -785,7 +785,7 @@ class TestWriteBatchOcItems:
         assert item["recibida_cantidad"] == 3.0
         assert "mercaderia_external_ref" in item
         assert item["mercaderia_external_ref"]["entity"] == "oc_items"
-        assert item["unidad_de_medida_id"] == 5  # fallback exporter (link_store vacio)
+        assert item["unidad_de_medida_id"] == 5  # fallback Unidad (id 5, link_store vacio)
 
     # ── Varias OCs en un batch ──
 

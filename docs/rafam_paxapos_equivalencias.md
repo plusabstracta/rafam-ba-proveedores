@@ -3,7 +3,13 @@
 > **Este documento es la única fuente de verdad** sobre qué tablas de RAFAM se migran a Paxapos y cómo se mapean.
 > Cualquier otra documentación que contradiga este archivo está desactualizada y debe corregirse.
 
-El proyecto `rafam-ba-proveedores` migra **6 tablas** desde Oracle RAFAM (schema `OWNER_RAFAM`) hacia el schema tenant de Paxapos (CakePHP 2) vía el endpoint `POST /{tenant}/rafam/migracion/importar.json`.
+El proyecto `rafam-ba-proveedores` migra **6 tablas principales** desde Oracle RAFAM (schema `OWNER_RAFAM`) hacia el schema tenant de Paxapos (CakePHP 2) vía el endpoint `POST /{tenant}/rafam/migracion/importar.json`.
+
+La ejecución operativa del migrator se organiza en **3 pasadas/scripts**, no en 6 procesos independientes. Algunas tablas se migran como datos embebidos dentro de una pasada mayor:
+
+1. `proveedores` migra `PROVEEDORES` → `account_proveedores`.
+2. `oc_items` migra `ORDEN_COMPRA` + `OC_ITEMS` → `compras_pedidos` + `compras_pedido_mercaderias`.
+3. `orden_pago` migra `ORDEN_PAGO` y, en la misma pasada, usa `CTA_COMPROB`, `CTA_HOJA_DE_RUTA`, `RETENCIONES` y `DEDUCCIONES` para crear/vincular `account_gastos`, `account_egresos_gastos` y `account_retenciones`.
 
 Además, hay **tablas de lookup** que se leen para resolver datos (no se migran como entidad propia).
 
@@ -11,14 +17,14 @@ Además, hay **tablas de lookup** que se leen para resolver datos (no se migran 
 
 ## 1. Resumen tabla por tabla
 
-| # | RAFAM (Oracle) | Paxapos (MySQL tenant) | Modo |
+| # | RAFAM (Oracle) | Paxapos (MySQL tenant) | Modo operativo |
 |---|---|---|---|
-| 1 | `PROVEEDORES` | `account_proveedores` | migración directa |
-| 2 | `ORDEN_COMPRA` | `compras_pedidos` (con `tipo='orden_compra'`) | migración directa |
-| 3 | `OC_ITEMS` | `compras_pedido_mercaderias` | migración directa |
-| 4 | `CTA_COMPROB` | `account_gastos` | migración directa |
-| 5 | `ORDEN_PAGO` | `account_egresos` | migración directa |
-| 6 | `RETENCIONES` | `account_retenciones` | migración directa |
+| 1 | `PROVEEDORES` | `account_proveedores` | pasada 1: `proveedores` |
+| 2 | `ORDEN_COMPRA` | `compras_pedidos` (con `tipo='orden_compra'`) | pasada 2: embebida en `oc_items` |
+| 3 | `OC_ITEMS` | `compras_pedido_mercaderias` | pasada 2: `oc_items` |
+| 4 | `CTA_COMPROB` | `account_gastos` | pasada 3: embebida/auto-creada por `orden_pago` |
+| 5 | `ORDEN_PAGO` | `account_egresos` | pasada 3: `orden_pago` |
+| 6 | `RETENCIONES` | `account_retenciones` | pasada 3: embebida en `orden_pago` |
 
 **Tablas RAFAM usadas como lookup (NO se migran):**
 
@@ -102,6 +108,8 @@ Además, hay **tablas de lookup** que se leen para resolver datos (no se migran 
 
 Facturas reales del proveedor (con número fiscal AFIP).
 
+En la ejecución actual no hay una pasada standalone `cta_comprob`. El script `orden_pago` lee los datos de comprobante y el endpoint de Paxapos busca o auto-crea el `Gasto` al importar la OP, usando `gasto_nro_comprobante`.
+
 | RAFAM | Paxapos | Notas |
 |---|---|---|
 | `EJERCICIO` + `NRO_REG_COMP` (vía REG_COMP) | `external_ref` | |
@@ -131,6 +139,8 @@ Facturas reales del proveedor (con número fiscal AFIP).
 
 ### 2.6 `RETENCIONES` → `account_retenciones`
 
+En la ejecución actual no hay una pasada standalone `retenciones`. El script `orden_pago` consulta `RETENCIONES` + `DEDUCCIONES`, mapea las retenciones y las envía embebidas dentro del row de `ordenes_pago[]`.
+
 | RAFAM | Paxapos | Notas |
 |---|---|---|
 | `EJERCICIO` + `NRO_CANCE` + `COD_RET` | `external_ref` | (en RAFAM la columna es `COD_RET`; algunas vistas la exponen como `COD_DEDUC`). |
@@ -152,16 +162,15 @@ Facturas reales del proveedor (con número fiscal AFIP).
 
 ---
 
-## 4. Orden de migración
+## 4. Orden lógico y pasadas operativas
 
-El migrator debe enviar las entidades en este orden para respetar FKs:
+El orden lógico de dependencias sigue siendo de 6 tablas, pero el migrator lo ejecuta en 3 pasadas oficiales:
 
-1. `PROVEEDORES` → crea `account_proveedores`.
-2. `ORDEN_COMPRA` → crea cabecera de `compras_pedidos`.
-3. `OC_ITEMS` → ítems de la OC. Se envían dentro del payload de `ordenes_compra` o en una segunda pasada.
-4. `CTA_COMPROB` → crea `account_gastos` (resolviendo `pedido_id` vía REG_COMP).
-5. `ORDEN_PAGO` → crea `account_egresos` y arma HABTM `account_egresos_gastos` (vía `CTA_HOJA_DE_RUTA`).
-6. `RETENCIONES` → crea `account_retenciones` vinculadas a egresos ya enviados.
+1. `proveedores`: crea/actualiza `account_proveedores` desde `PROVEEDORES`.
+2. `oc_items`: agrupa `ORDEN_COMPRA` + `OC_ITEMS` y envía `ordenes_compra[]` con `items[]` inline. Esto crea la cabecera de OC y sus mercaderías en una sola pasada.
+3. `orden_pago`: procesa `ORDEN_PAGO` y, en la misma pasada, resuelve `CTA_COMPROB` para crear/vincular gastos y `RETENCIONES` + `DEDUCCIONES` para crear `account_retenciones`.
+
+Así, las 6 tablas principales quedan cubiertas, pero no todas tienen un script independiente.
 
 ---
 
@@ -244,7 +253,7 @@ Hardcoded en `_JURISDICCION_CENTRO_COSTO_MAP` (`gateway_mapper.py`):
 
 Cualquier referencia en docs viejas a las siguientes tablas es **obsoleta** y debe ignorarse o eliminarse:
 
-> _(Se omiten intencionalmente. El proyecto migra exclusivamente las 6 tablas listadas en §1 más los lookups documentados.)_
+> _(Se omiten intencionalmente. El proyecto cubre exclusivamente las 6 tablas principales listadas en §1, distribuidas en 3 pasadas operativas, más los lookups documentados.)_
 
 ---
 

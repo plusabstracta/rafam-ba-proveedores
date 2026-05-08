@@ -1664,6 +1664,7 @@ class MigratorExporter(BaseExporter):
         grouped_gasto_refs: dict[tuple[int, int], list[str]] = {}
         grouped_cc_nros: dict[tuple[int, int], list[str]] = {}
         grouped_pedido_ids: dict[tuple[int, int], list[int]] = {}
+        grouped_pedido_internal_ids: dict[tuple[int, int], list[str]] = {}
         op_to_nro_cance: dict[tuple[int, int], int] = {}
         raw_by_source_key: dict[str, dict] = {}
         # cc_raw_by_key: dedup por comprobante fiscal real para emitir gastos[]
@@ -1723,6 +1724,20 @@ class MigratorExporter(BaseExporter):
                 pedido_ids = grouped_pedido_ids.setdefault(key, [])
                 if pedido_id not in pedido_ids:
                     pedido_ids.append(pedido_id)
+
+            # pedido_internal_id: fallback robusto. Cuando link_store no tiene
+            # el OC (ej. corrida fresca, OC migrada por otro proceso) el backend
+            # puede resolverlo via Pedido.internal_id = rafam-oc-{ej}-{uni}-{nro}.
+            # Toda OP siempre tiene una OC (regla de negocio RAFAM), asi que
+            # siempre que CTA_HOJA_DE_RUTA tenga las columnas OC_*, se envia.
+            oc_ej = self._to_int(raw.get("HDR_OC_EJERCICIO"))
+            oc_uni = self._to_int(raw.get("HDR_OC_UNI_COMPRA"))
+            oc_nro = self._to_int(raw.get("HDR_OC_NRO"))
+            if oc_ej is not None and oc_uni is not None and oc_nro is not None:
+                internal_id = f"rafam-oc-{oc_ej}-{oc_uni}-{oc_nro}"
+                internals = grouped_pedido_internal_ids.setdefault(key, [])
+                if internal_id not in internals:
+                    internals.append(internal_id)
 
             estado = str(raw.get("ESTADO_OP", "")).strip().upper()
             if estado != "C":
@@ -1826,6 +1841,19 @@ class MigratorExporter(BaseExporter):
                 logger.warning(
                     "Migrator [orden_pago] OP %s-%s: multiples pedido_id recibidos (%s), se omite pedido_id",
                     key[0], key[1], pedido_ids,
+                )
+
+            # Fallback: pedido_internal_id para que el backend resuelva la OC
+            # via Pedido.internal_id cuando el script no pudo via link_store.
+            # Si la OP toca una sola OC se envia el internal_id; si toca varias
+            # se omite (el backend no puede vincular a multiples OC desde una OP).
+            internal_ids = grouped_pedido_internal_ids.get(key, [])
+            if "pedido_id" not in op and len(internal_ids) == 1:
+                op["pedido_internal_id"] = internal_ids[0]
+            elif "pedido_id" not in op and len(internal_ids) > 1:
+                logger.debug(
+                    "Migrator [orden_pago] OP %s-%s: multiples OC vinculadas (%s), se omite pedido_internal_id",
+                    key[0], key[1], internal_ids,
                 )
 
             # Mapear retenciones (de fetch separado)
@@ -2030,37 +2058,51 @@ class MigratorExporter(BaseExporter):
         return item
 
     def _resolve_tipo_factura_id(self, tipo_doc) -> int | None:
+        """Mapea un codigo RAFAM CTA_COMPROB.TIPO al tipo_factura.id de Paxapos.
+
+        Estrategia:
+        1) Mapping directo a ID via RAFAM_TIPO_COMPROB_TO_PAXAPOS_ID (fuente de verdad).
+        2) Fallback a lookup por codename/name del tenant (por si el catalogo difiere).
+        3) Default fijo (RAFAM_TIPO_COMPROB_DEFAULT_ID = 7 "Otros") o env override.
+        """
         if tipo_doc:
+            from .gateway_mapper import (
+                RAFAM_TIPO_COMPROB_TO_PAXAPOS_ID,
+                RAFAM_TIPO_COMPROB_DEFAULT_ID,
+            )
+            code = str(tipo_doc).strip().upper()
+            mapped_id = RAFAM_TIPO_COMPROB_TO_PAXAPOS_ID.get(code)
+            if mapped_id is not None:
+                return mapped_id
+            # Fallback: lookup en catalogo del tenant por codename / name
             text = self._normalize_text(tipo_doc)
-            # Primero intentar por codename directo (el RAFAM code)
             by_codename = self._tipos_factura_by_codename.get(text)
             if by_codename and self._to_int(by_codename.get("id")) is not None:
                 return int(by_codename.get("id"))
-            # Segundo: mapear RAFAM code → nombre Paxapos y buscar por name
-            from .gateway_mapper import RAFAM_TIPO_COMPROB_TO_PAXAPOS_NAME
-            paxapos_name = RAFAM_TIPO_COMPROB_TO_PAXAPOS_NAME.get(str(tipo_doc).strip().upper())
-            if paxapos_name:
-                normalized_name = self._normalize_text(paxapos_name)
-                by_name = self._tipos_factura_by_name.get(normalized_name)
-                if by_name and self._to_int(by_name.get("id")) is not None:
-                    return int(by_name.get("id"))
-            # Tercero: buscar por name directo
             by_name = self._tipos_factura_by_name.get(text)
             if by_name and self._to_int(by_name.get("id")) is not None:
                 return int(by_name.get("id"))
+            # Default mapper si nada matchea
+            if self._default_tipo_factura_id is not None:
+                return self._default_tipo_factura_id
+            return RAFAM_TIPO_COMPROB_DEFAULT_ID
         return self._default_tipo_factura_id
 
     def _resolve_tipo_pago_id(self, raw: dict | None = None) -> int:
+        """Mapea ORDEN_PAGO.TIPO_CANCE al tipo_de_pago.id de Paxapos.
+
+        Mapeo via RAFAM_TIPO_CANCE_TO_PAXAPOS_PAGO_ID; default 1 (Transferencia bancaria).
+        """
         if raw:
-            from .gateway_mapper import RAFAM_TIPO_CANCE_TO_PAXAPOS_PAGO_NAME, RAFAM_TIPO_CANCE_DEFAULT_PAGO_NAME
-            tipo_cance = str(raw.get("TIPO_CANCE") or "").strip().upper()
-            pago_name = RAFAM_TIPO_CANCE_TO_PAXAPOS_PAGO_NAME.get(
-                tipo_cance, RAFAM_TIPO_CANCE_DEFAULT_PAGO_NAME
+            from .gateway_mapper import (
+                RAFAM_TIPO_CANCE_TO_PAXAPOS_PAGO_ID,
+                RAFAM_TIPO_CANCE_DEFAULT_PAGO_ID,
             )
-            normalized = self._normalize_text(pago_name)
-            by_name = self._tipos_de_pago_by_name.get(normalized)
-            if by_name and self._to_int(by_name.get("id")) is not None:
-                return int(by_name.get("id"))
+            tipo_cance = str(raw.get("TIPO_CANCE") or "").strip().upper()
+            mapped_id = RAFAM_TIPO_CANCE_TO_PAXAPOS_PAGO_ID.get(tipo_cance)
+            if mapped_id is not None:
+                return mapped_id
+            return RAFAM_TIPO_CANCE_DEFAULT_PAGO_ID
         return self._default_tipo_pago_id
 
     def _map_retencion(self, raw: dict, ejercicio: int, nro_op: int) -> dict | None:
@@ -2290,7 +2332,9 @@ class MigratorExporter(BaseExporter):
                 remote = self._link_store.get_remote_id("unidad_medida", uni_med_str)
                 if remote and self._to_int(remote) is not None:
                     return int(remote)
-        return 5  # Unidad (fallback por defecto)
+        # Default = 5 (Unidad) — id en compras_unidad_de_medidas del tenant.
+        from .gateway_mapper import _UM_DEFAULT
+        return _UM_DEFAULT
 
 
 

@@ -97,7 +97,7 @@ ENTITY_CONFIGS: dict[str, EntityConfig] = {
         # Re-process confirmed normal payments from recent days in case their
         # linked gastos became available after the first attempt.
         pending_state_field="ESTADO_OP",
-        pending_state_value="N",
+        pending_state_value="C",
         pending_reprocess_days=30,
         ejercicio_min=_ejercicio_min_for("orden_pago"),
     ),

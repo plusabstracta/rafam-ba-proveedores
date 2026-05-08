@@ -51,47 +51,59 @@ _JURISDICCION_CENTRO_COSTO_MAP: dict[str, int] = {
 _JURISDICCION_CENTRO_COSTO_DEFAULT = 8  # CentroCosto "Otro"
 
 _UM: dict[str, int] = {
-    "UNIDAD": 1,
-    "KILOGRAMO": 2,
-    "LITRO": 3,
-    "METRO": 4,
-    "PAQUETE": 5,
-    "HORAS": 6,
-    "DIA": 7,
+    "UNIDAD": 5,
+    "KILOGRAMO": 3,   # Kilo
+    "LITRO": 20,
+    "METRO": 5,       # no hay equivalente directo, fallback a Unidad
+    "PAQUETE": 11,    # Pack
+    "HORAS": 5,       # no hay UM "hora", fallback a Unidad
+    "DIA": 5,         # idem
 }
-_UM_DEFAULT = 1  # Unidad (id 1 en compras_unidad_de_medidas)
+_UM_DEFAULT = 5  # Unidad (id 5 en compras_unidad_de_medidas)
 
-# Mapeo RAFAM CTA_COMPROB.TIPO → nombre de tipo_factura en Paxapos.
-# Se usa para buscar dinámicamente en el lookup por name (normalizado).
-RAFAM_TIPO_COMPROB_TO_PAXAPOS_NAME: dict[str, str] = {
-    "FAA": "A",
-    "FAS": "A",
-    "FAB": "B",
-    "FAC": "C",
-    "FAM": "M",
-    "TKT": "Otros",
-    "NCB": "NCB",
-    "NDB": "NDB",
-    "NDC": "NDC",
-    "EXB": "B",
-    "REB": "B",
-    "REA": "A",
-    "LIQ": "Otros",
-    "COM": "Otros",
-    "VIA": "Otros",
-    "REC": "Otros",
-    "CEO": "Otros",
-    "LIR": "Otros",
+# Mapeo RAFAM CTA_COMPROB.TIPO -> Paxapos tipo_factura.id (tabla risto_tenant.tipo_facturas)
+# Catalogo Paxapos:
+#   1=A, 2=B, 3=X, 4=M, 5=C, 6=Vale, 7=Otros
+#   8=NCB, 9=NCC, 10=NCA, 11=NDB, 12=NDC, 13=NDA, 14=NCM
+RAFAM_TIPO_COMPROB_TO_PAXAPOS_ID: dict[str, int] = {
+    # Facturas
+    "FAA": 1,    # Factura A
+    "FAS": 1,    # Factura A (alias suplente)
+    "FAB": 2,    # Factura B
+    "FAC": 5,    # Factura C
+    "FAM": 4,    # Factura M
+    "REA": 1,    # Recibo A
+    "REB": 2,    # Recibo B
+    "EXB": 2,    # Exento B
+    # Notas de credito / debito
+    "NCA": 10,
+    "NCB": 8,
+    "NCC": 9,
+    "NCM": 14,
+    "NDA": 13,
+    "NDB": 11,
+    "NDC": 12,
+    # Otros (cae en "Otros" id=7)
+    "TKT": 7,
+    "LIQ": 7,
+    "COM": 7,
+    "VIA": 7,
+    "REC": 7,
+    "CEO": 7,
+    "LIR": 7,
 }
+RAFAM_TIPO_COMPROB_DEFAULT_ID = 7  # "Otros"
 
-# Mapeo RAFAM ORDEN_PAGO.TIPO_CANCE (ORIGEN TIPO) → nombre de tipo_de_pago en Paxapos.
-# CA/CM = Cheque, NO = Transferencia bancaria.
-RAFAM_TIPO_CANCE_TO_PAXAPOS_PAGO_NAME: dict[str, str] = {
-    "CA": "Cheque",
-    "CM": "Cheque",
-    "NO": "Transferencia bancaria",
+# Mapeo RAFAM ORDEN_PAGO.TIPO_CANCE -> Paxapos tipo_de_pago.id (tabla risto_tenant.tipo_de_pagos)
+# Catalogo Paxapos relevante:
+#   1 = Transferencia bancaria (default)
+#   9 = Cheque
+RAFAM_TIPO_CANCE_TO_PAXAPOS_PAGO_ID: dict[str, int] = {
+    "CA": 9,   # Cheque al dia
+    "CM": 9,   # Cheque diferido
+    "NO": 1,   # Transferencia bancaria
 }
-RAFAM_TIPO_CANCE_DEFAULT_PAGO_NAME = "Transferencia bancaria"
+RAFAM_TIPO_CANCE_DEFAULT_PAGO_ID = 1  # Transferencia bancaria
 
 
 def resolve_centro_costo_id(jurisdiccion: Any) -> int:
