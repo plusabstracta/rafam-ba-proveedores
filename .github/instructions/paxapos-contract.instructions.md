@@ -69,12 +69,12 @@ Pedido (solicitud) → [Aprobación interna] → Orden de Compra → [Envío mai
 ### 2.1 Cadena de vínculos en Paxapos
 
 ```
-OC (compras_pedidos.gasto_id) ──HABTM──► Gasto ◄──HABTM (account_egresos_gastos)── Egreso (OP)
+OC (compras_pedidos.id) ◄── account_gastos.pedido_id ── Gasto ◄──HABTM (account_egresos_gastos)── Egreso (OP)
 ```
 
-- **OC→Gasto**: se establece enviando `gasto_ids` en el payload de la OC
-- **Gasto→OC**: no hay forma desde `_importGasto`
-- **OP→Gasto**: se establece enviando `gasto_ids` en el payload de la OP
+- **OC/OP→Gasto**: se establece enviando `gasto_nro_comprobante`; si no existe, el endpoint auto-crea el gasto.
+- **Gasto→OC**: se establece con `Gasto.pedido_id` cuando el row trae `pedido_id`.
+- **OP→Gasto**: se persiste en `account_egresos_gastos` con los gastos resueltos/creados.
 
 ### 2.2 Cadena de vínculos en RAFAM (fuente)
 
@@ -284,7 +284,7 @@ Pedidos y Órdenes de Compra comparten la misma tabla, diferenciados por `tipo`.
 
 **Sin proveedor o sin factura_nro** → siempre INSERT nuevo (sin posibilidad de dedup).
 
-**NO necesita que la OC ya exista**. El gasto es independiente; el vínculo Gasto↔OC solo se establece desde el lado de la OC (via `gasto_ids`).
+El gasto puede vincularse a la OC con `pedido_id` (`account_gastos.pedido_id`). Cuando OP/OC envian `gasto_nro_comprobante`, Paxapos busca o auto-crea el gasto; si viene `pedido_id`, lo usa para asociar ese gasto a la OC.
 
 **No existe mecanismo de anulación** — omitir gastos con `ESTADO_SOLIC=A`.
 
@@ -315,11 +315,11 @@ Pedidos y Órdenes de Compra comparten la misma tabla, diferenciados por `tipo`.
 
 **Join table** (`account_egresos_gastos`): `egreso_id`, `gasto_id`, `importe decimal(14,2)`, `deleted`.
 
-**Campos obligatorios**: `identificador_pago`, `total`, `gasto_ids` (array con al menos 1 ID).
+**Campos obligatorios**: `identificador_pago`, `total`, `gasto_nro_comprobante` (string o array con al menos 1 comprobante).
 
 **Upsert**: por `identificador_pago`. Si ya existe → `skip_existing` (NO actualiza, solo devuelve el existente). No hay forma de hacer N→C post-creación.
 
-**Usa `gasto_ids`** (IDs numéricos internos de Paxapos). Alternativa: `gasto_external_ids` para resolver automáticamente buscando traza `RAFAM:{...}` en `Gasto.observacion`.
+**Usa `gasto_nro_comprobante`** para buscar `Gasto` por `proveedor_id + punto_de_venta + factura_nro`; si no existe, lo auto-crea siempre. Si viene `pedido_id`, Paxapos lo guarda en `Gasto.pedido_id` cuando está vacío.
 
 **Allowed fields** del save: `identificador_pago, fecha, tipo_de_pago_id, total, observacion, estado, fecha_programada, cuenta_bancaria_id, numero_operacion`. Notar que `proveedor_id` NO está en la whitelist.
 
@@ -657,7 +657,8 @@ Filtrable con `?only=proveedores,tipos_factura` (CSV). Gastos paginados con `?pa
     "estado": 3,
     "fecha": "FECH_CONFIRM"
   },
-  "gasto_external_ids": ["SG-{ej}-{deleg}-{nro}"]
+  "gasto_nro_comprobante": "0001-00000456",
+  "pedido_id": 789
 }
 ```
 
@@ -712,9 +713,9 @@ El upsert de OPs es `skip_existing`: si `identificador_pago` ya existe, devuelve
 
 Sin `fecha` → `estado=0` (pendiente); con `fecha` → `estado=3` (pagado). Si se envía `estado: 3` pero sin `fecha`, el `beforeSave` lo sobrescribe a `estado=0`. **Siempre enviar `fecha` cuando `estado=3`.**
 
-### 14.7 `gasto_external_ids` busca por LIKE en `observacion`
+### 14.7 `gasto_nro_comprobante` resuelve o auto-crea gastos
 
-Resuelve buscando la traza `RAFAM:{json}` que el propio migrador graba en `Gasto.observacion`. Funciona tanto en requests separados (gastos primero, OPs después) como en el mismo request (el orden interno garantiza que gastos se graban antes que OPs).
+Resuelve por `proveedor_id + punto_de_venta + factura_nro`. Si no encuentra el `Gasto`, lo auto-crea siempre. Si el row trae `pedido_id`, Paxapos lo usa para dejar el gasto existente o auto-creado vinculado con la OC.
 
 ### 14.8 `mercaderia_external_ref` agrupa por clasificación presupuestaria
 

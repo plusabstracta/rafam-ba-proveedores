@@ -507,7 +507,6 @@ class SourceRepository:
             ("SG_NRO", "HDR_SG_NRO"),
             ("SG_DELEG_SOLIC", "HDR_SG_DELEG"),
             ("SG_EJERCICIO", "HDR_SG_EJERCICIO"),
-            ("OC_NRO", "HDR_OC_NRO_OC"),
             ("OC_COD_PROV", "HDR_OC_COD_PROV"),
             ("CC_NRO", "HDR_CC_NRO"),
             ("CC_TIPO_COMPROB", "HDR_CC_TIPO_COMPROB"),

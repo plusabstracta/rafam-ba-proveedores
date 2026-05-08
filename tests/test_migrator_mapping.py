@@ -254,6 +254,36 @@ class TestWriteBatchOrdenPago:
         for op in ops:
             assert op["Egreso"]["estado"] == 3
             assert op["Egreso"]["fecha"] == "2026-03-11"
+        assert sent_payloads[0]["options"]["auto_create_gasto"] is True
+
+    def test_op_reenvia_pedido_id_sin_resolverlo(self):
+        exp = self._make_exporter()
+
+        columns = [
+            "EJERCICIO", "NRO_OP", "FECH_OP", "ESTADO_OP",
+            "IMPORTE_TOTAL", "CONCEPTO", "NRO_CANCE",
+            "SG_DELEG_SOLIC", "SG_NRO_SOLIC",
+            "HDR_CC_NRO", "pedido_id", "FECH_CONFIRM", "CONFIRMADO", "COD_PROV",
+        ]
+        vals = {
+            "EJERCICIO": "2026", "NRO_OP": "1001",
+            "FECH_OP": "2026-03-10 00:00:00", "ESTADO_OP": "C",
+            "IMPORTE_TOTAL": "500", "CONCEPTO": "Pago servicios", "NRO_CANCE": "100",
+            "SG_DELEG_SOLIC": "1", "SG_NRO_SOLIC": "100",
+            "HDR_CC_NRO": "0001-00000100",
+            "pedido_id": "789",
+            "CONFIRMADO": "S", "FECH_CONFIRM": "2026-03-11 00:00:00",
+        }
+        rows = [tuple(vals.get(c, "") for c in columns)]
+
+        sent = []
+        exp._post_json = lambda url, p: sent.append(p) or {"stats": {"ordenes_pago": {"ok": 1, "error": 0}}}
+        exp.write_batch("orden_pago", columns, rows)
+
+        assert len(sent) == 1
+        op = sent[0]["ordenes_pago"][0]
+        assert op["gasto_nro_comprobante"] == "0001-00000100"
+        assert op["pedido_id"] == 789
 
     def test_op_anulada_no_se_envia(self):
         exp = self._make_exporter()

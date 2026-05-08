@@ -524,10 +524,8 @@ class MigratorExporter(BaseExporter):
         self._source_repo = source_repo
 
     def _payload_options(self) -> dict:
-        # auto_create_gasto: por default false (uso normal). El operador carga
-        # el Gasto en Paxapos antes que la OP llegue desde RAFAM. Si la OP llega
-        # antes, el server responde gasto_no_encontrado y se reintenta luego.
-        # Activar con RAFAM_AUTO_CREATE_GASTO=true SOLO en carga historica inicial.
+        # auto_create_gasto queda siempre activo: las OP vinculan/crean gastos
+        # desde el numero de comprobante RAFAM cuando Paxapos aun no lo tiene.
         return {
             "upsert": True,
             "atomic": False,
@@ -535,7 +533,7 @@ class MigratorExporter(BaseExporter):
             "send_oc_mail": False,
             "strict_mail": False,
             "auto_create_mercaderia": True,
-            "auto_create_gasto": _env_bool("RAFAM_AUTO_CREATE_GASTO", "false"),
+            "auto_create_gasto": True,
             "auto_calcular_retenciones": False,
             "notificar_proveedor_pago": False,
         }
@@ -1393,6 +1391,14 @@ class MigratorExporter(BaseExporter):
                     refs.append(ref)
         return refs
 
+    def _pedido_id_from_op_row(self, raw: dict) -> int | None:
+        """Devuelve el pedido_id si la fila ya lo trae; no resuelve links locales."""
+        for field in ("pedido_id", "PEDIDO_ID", "PAXAPOS_PEDIDO_ID"):
+            pedido_id = self._to_int(raw.get(field))
+            if pedido_id is not None:
+                return pedido_id
+        return None
+
     def _write_batch_orden_pago(self, columns: list[str], rows: list[tuple]) -> None:
         # Agrupa por (EJERCICIO, NRO_OP) y acumula las refs de gastos del LEFT JOIN.
         # NOTA: las retenciones NO vienen en este batch — se traen por separado
@@ -1401,6 +1407,7 @@ class MigratorExporter(BaseExporter):
         grouped: dict[tuple[int, int], dict] = {}
         grouped_gasto_refs: dict[tuple[int, int], list[str]] = {}
         grouped_cc_nros: dict[tuple[int, int], list[str]] = {}
+        grouped_pedido_ids: dict[tuple[int, int], list[int]] = {}
         op_to_nro_cance: dict[tuple[int, int], int] = {}
         raw_by_source_key: dict[str, dict] = {}
         skipped_estado: dict[str, int] = {}
@@ -1432,6 +1439,14 @@ class MigratorExporter(BaseExporter):
                 cc_nros = grouped_cc_nros.setdefault(key, [])
                 if cc_nro not in cc_nros:
                     cc_nros.append(cc_nro)
+
+            # El script no resuelve pedido_id desde link_orden_compra: si viene
+            # en la fila, se reenvia a Paxapos para que el backend vincule OP/Gasto.
+            pedido_id = self._pedido_id_from_op_row(raw)
+            if pedido_id is not None:
+                pedido_ids = grouped_pedido_ids.setdefault(key, [])
+                if pedido_id not in pedido_ids:
+                    pedido_ids.append(pedido_id)
 
             estado = str(raw.get("ESTADO_OP", "")).strip().upper()
             if estado != "C":
@@ -1523,6 +1538,15 @@ class MigratorExporter(BaseExporter):
                 op["gasto_nro_comprobante"] = cc_nros[0]
             else:
                 op["gasto_nro_comprobante"] = cc_nros
+
+            pedido_ids = grouped_pedido_ids.get(key, [])
+            if len(pedido_ids) == 1:
+                op["pedido_id"] = pedido_ids[0]
+            elif len(pedido_ids) > 1:
+                logger.warning(
+                    "Migrator [orden_pago] OP %s-%s: multiples pedido_id recibidos (%s), se omite pedido_id",
+                    key[0], key[1], pedido_ids,
+                )
 
             # Mapear retenciones (de fetch separado)
             ret_payload = []

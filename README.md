@@ -219,11 +219,11 @@ Comportamiento actual del modo `migrator`:
 - Soporta `ped_items` (genera bloque `pedidos` con items para migrator).
 - Soporta `oc_items` (genera bloque `ordenes_compra` con items para migrator).
 - Soporta `solic_gastos` (genera bloque `gastos` — facturas del proveedor).
-- Soporta `orden_pago` (genera bloque `ordenes_pago` — vinculadas a gastos vía `gasto_ids` y fallback `gasto_external_ids`).
+- Soporta `orden_pago` (genera bloque `ordenes_pago` — vinculadas a gastos vía `gasto_nro_comprobante`; si la fila ya trae `pedido_id`, lo reenvía a Paxapos).
 - Si existen tablas RAFAM `RETENCIONES`/`DEDUCCIONES`, agrega retenciones al payload de `ordenes_pago`.
 - Envía payload batch al endpoint `/rafam/migracion/importar.json`.
 - Si Paxapos devuelve errores parciales (`errors` o `stats.*.error > 0`), la corrida falla y no avanza checkpoint.
-- Las opciones batch del migrator activan `auto_create_mercaderia=true` y desactivan el cálculo/notificación automática de retenciones/pagos.
+- Las opciones batch del migrator activan `auto_create_mercaderia=true` y `auto_create_gasto=true`; desactivan el cálculo/notificación automática de retenciones/pagos.
 - `--dry-run` manda `dry_run=true` y no avanza checkpoints.
 - En modo real, persiste el vínculo RAFAM -> Paxapos usando `results.proveedores[].id`.
 
@@ -250,10 +250,10 @@ Notas de mapeo `solic_gastos` -> `gastos`:
 
 Notas de mapeo `orden_pago` -> `ordenes_pago`:
 
-- `gasto_ids`: IDs internos de Paxapos resueltos desde `link_gasto`.
-- `gasto_external_ids`: referencia estructurada `{ejercicio, deleg_solic, nro_solic}` que el migrator puede resolver como fallback.
+- `gasto_nro_comprobante`: número fiscal RAFAM resuelto desde `CTA_HOJA_DE_RUTA.CC_NRO`; Paxapos busca o auto-crea el `Gasto` con ese comprobante.
+- `pedido_id`: ID de la OC en Paxapos (`compras_pedidos.id`) si la fila ya lo trae. El script no lo resuelve con `link_orden_compra`; Paxapos lo usa para vincular el `Gasto` encontrado o auto-creado por comprobante.
 - `retenciones`: si el origen tiene `RETENCIONES`, se mapean por `COD_RET`/`IMPORTE`; el tipo se resuelve desde `link_tipo_retencion`, lookup `tipos_retencion`, o alias (`ganancias`, `iva`, `iibb`, `suss`).
-- Requiere que los gastos (solic_gastos) estén importados previamente.
+- No requiere que el gasto exista previamente: `auto_create_gasto=true` va siempre en el payload y el endpoint lo fuerza activo.
 - `identificador_pago`: formato `RAFAM-OP-{ejercicio}-{nro_op}` para upsert.
 - `estado`: se envía `3` solo para OPs con `ESTADO_OP=N`, `CONFIRMADO=S` y `FECH_CONFIRM` presente.
 - `fecha`: se envía desde `FECH_CONFIRM`.
@@ -379,16 +379,16 @@ make run-ped_items-migrator BATCH=500
 # Paso 3: Órdenes de compra (necesitan proveedor)
 make run-oc_items-migrator BATCH=500
 
-# Paso 4: Gastos/Facturas (necesitan existir para vincular con OPs)
+# Paso 4: Gastos/Facturas (opcional si se usa autocreacion desde OP)
 make run-solic_gastos-migrator BATCH=500
 
-# Paso 5: Órdenes de pago (necesitan gastos ya importados)
+# Paso 5: Órdenes de pago (vinculan o autocrean gastos por nro de comprobante)
 make run-orden_pago-migrator BATCH=500
 ```
 
-**Importante:** `orden_pago` DEBE ejecutarse después de `solic_gastos` porque
-resuelve sus gastos vía `gasto_external_ids` buscando la traza RAFAM:{...}
-que el migrator guarda en la observación de cada gasto importado.
+**Importante:** `orden_pago` se vincula por `gasto_nro_comprobante` y el endpoint
+auto-crea el gasto si no existe. Si el script recibe `pedido_id`, lo reenvía sin
+resolverlo y Paxapos deja el gasto asociado a la OC.
 
 ### 3. Variables de entorno para producción con importación Paxapos
 

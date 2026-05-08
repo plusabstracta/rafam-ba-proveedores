@@ -94,7 +94,7 @@ Estado real del migrator actual:
 | `oc_items` | Envia `ordenes_compra`. |
 | `orden_compra` | Envia `ordenes_compra` usando la misma logica que `oc_items`. |
 | `solic_gastos` | Envia `gastos`, solo si el gasto esta vinculado a una OC ya enviada. |
-| `orden_pago` | Envia `ordenes_pago`, solo si puede resolver al menos un gasto importado. |
+| `orden_pago` | Envia `ordenes_pago` con `gasto_nro_comprobante`; Paxapos vincula o auto-crea el gasto. |
 
 ## Evidencia Oracle: volumen de tablas
 
@@ -313,6 +313,7 @@ Opciones enviadas por el script:
   "send_oc_mail": false,
   "strict_mail": false,
   "auto_create_mercaderia": true,
+  "auto_create_gasto": true,
   "auto_calcular_retenciones": false,
   "notificar_proveedor_pago": false
 }
@@ -394,8 +395,7 @@ Cabecera enviada:
 | `Pedido.observacion` | observaciones OC | solo si existe texto real. |
 | `Pedido.created` | `OC_FECH_OC` | `YYYY-MM-DD 00:00:00` si existe. |
 | `centro_costo_id` | `SG_JURISDICCION` | resuelto desde links/lookups de jurisdiccion. |
-| `gasto_external_ids` | `OC_ITEMS.DELEG_SOLIC, NRO_SOLIC` | refs SG estructuradas. |
-| `gasto_ids` | link local de gastos | si ya fueron importados. |
+| `gasto_nro_comprobante` | `CTA_HOJA_DE_RUTA.CC_NRO` | nro fiscal para vincular o auto-crear `Gasto`. |
 
 Item enviado:
 
@@ -462,19 +462,19 @@ Campos enviados:
 | `Egreso.estado` | `ESTADO_OP`, `CONFIRMADO` | `3` solo si `ESTADO_OP = N`, `CONFIRMADO = S` y `FECH_CONFIRM` existe; `A` y `C` se omiten. |
 | `Egreso.fecha` | `FECH_CONFIRM` | obligatoria para enviar la OP; Paxapos la usa como fecha del egreso y confirma `estado=3`. |
 | `Egreso.observacion` | `CONCEPTO`, fallback `OBSERVACIONES` | max 255. |
-| `gasto_ids` | links locales de gastos | obligatorio para enviar la OP. |
-| `gasto_external_ids` | refs SG | fallback para migrator. |
+| `gasto_nro_comprobante` | `CTA_HOJA_DE_RUTA.CC_NRO` | obligatorio para enviar la OP; Paxapos busca o auto-crea el gasto por comprobante. |
+| `pedido_id` | campo ya disponible en la fila | opcional; el script no lo resuelve contra `link_orden_compra`. Si viene, Paxapos lo usa para vincular el `Gasto` encontrado o auto-creado con la OC por `Gasto.pedido_id`. |
 | `retenciones` | `RETENCIONES` + `DEDUCCIONES` | si hay `RET_COD_RET` e importe no cero. |
 
 Resolucion actual de gastos para OP:
 
-1. `ORDEN_PAGO.NRO_CANCE -> SOLIC_GASTOS.NRO_SOLIC` en mismo `EJERCICIO`, con `SG_DELEG_SOLIC`/`SG_NRO_SOLIC` tomados del join.
-2. `CTA_HOJA_DE_RUTA`, si la query devuelve `HDR_SG_*`.
-3. Fallback por `RECO_DEU_COMPRA -> link_orden_compra.gasto_refs`.
+1. `CTA_HOJA_DE_RUTA.CC_NRO` aporta `gasto_nro_comprobante`, que Paxapos usa para buscar o auto-crear el gasto por `proveedor_id + punto_de_venta + factura_nro`.
+2. Si la fila trae `pedido_id`, el script lo reenvia sin resolverlo. Paxapos lo usa para vincular el gasto encontrado o auto-creado con la OC.
+3. `ORDEN_PAGO.NRO_CANCE -> SOLIC_GASTOS.NRO_SOLIC` sigue siendo evidencia fuerte del puente OP -> SG, pero el envio actual al migrator usa comprobante fiscal (`CC_NRO`) como nexo Paxapos.
 
 Evidencia real del periodo:
 
-- Camino 1 cubre 92,71% de OPs.
+- El camino OP -> SG por `NRO_CANCE` cubre 92,71% de OPs.
 - Camino 3 no aporto nada en el reporte Oracle porque `RECO_DEU_COMPRA` esta 100% vacio en `EJERCICIO >= 2024`.
 - Cualquier doc que diga que `RECO_DEU_COMPRA` cubre la mayoria no aplica a esta evidencia.
 
@@ -500,7 +500,7 @@ SQLite local con tablas `link_*`.
 | `link_tipo_pago` | `name`, `codigo` | Overrides de tipos de pago. |
 | `link_tipo_retencion` | `name`, `codigo` | Overrides de tipos de retencion. |
 | `link_pedido` | ninguno | Pedidos si se reactiva envio. |
-| `link_orden_compra` | `fech_confirm`, `estado_oc`, `cod_prov`, `importe_tot`, `gasto_refs`, `gasto_linked_refs` | Estado OC, refs SG conocidas y refs SG ya enviadas como `gasto_ids` para no reenviar la misma OC indefinidamente. |
+| `link_orden_compra` | `fech_confirm`, `estado_oc`, `cod_prov`, `importe_tot`, `gasto_refs`, `gasto_linked_refs`, `paxapos_gasto_ids` | Estado OC y refs SG/comprobantes conocidos. No se usa para resolver `pedido_id` de OP. |
 | `link_gasto` | `estado_solic`, `importe_tot`, `cod_prov` | Resolver OP -> gastos. |
 | `link_orden_pago` | `estado_op`, `confirmado`, `fech_confirm`, `importe_total` | Control de OPs enviadas. |
 
