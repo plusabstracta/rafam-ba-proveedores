@@ -13,10 +13,12 @@ import argparse
 import fcntl
 import json
 import logging
+import logging.handlers
 import os
 import sys
 import time
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -184,6 +186,11 @@ def _sync_entity(
     cfg = ENTITY_CONFIGS[entity]
     mode = "FULL LOAD" if (cp.is_fresh or cfg.full_load) else "INCREMENTAL"
     batch_delay = float(os.getenv("RAFAM_SYNC_BATCH_DELAY_SECONDS", "0"))
+    # Si un batch individual falla queremos seguir con los proximos batches
+    # de la misma entidad (no cortar la corrida). Acumulamos errores y al
+    # final marcamos la entidad como con errores para que el caller decida.
+    failed_batches = 0
+    last_batch_error: str | None = None
 
     try:
         stmt = source_repo.build_statement(entity, cp)
@@ -198,7 +205,7 @@ def _sync_entity(
         batch_count = 0
 
         def process_batch(batch: list[tuple]) -> None:
-            nonlocal last_id, last_ts, total, batch_count
+            nonlocal last_id, last_ts, total, batch_count, failed_batches, last_batch_error
             bid, bts = engine.extract_cursor_values(columns, batch, entity)
             if bid is not None:
                 last_id = max(last_id, bid) if last_id is not None else bid
@@ -208,7 +215,24 @@ def _sync_entity(
             if batch_delay > 0 and batch_count > 0:
                 time.sleep(batch_delay)
 
-            exporter.write_batch(entity, columns, batch)
+            try:
+                exporter.write_batch(entity, columns, batch)
+            except Exception as exc:
+                # Aislamiento por batch: si el POST falla (HTTP 5xx, validacion
+                # del backend, JSON parse, etc.) NO cortamos la entidad. Logueamos
+                # el error con stack trace y seguimos con el proximo batch. El
+                # watermark NO se avanza para este batch (esta logica ya esta abajo:
+                # solo se avanza despues del write exitoso).
+                failed_batches += 1
+                last_batch_error = str(exc)
+                logger.error(
+                    "[%-11s] %s — batch #%d (%d filas) FALLO: %s. Continuando con el siguiente batch.",
+                    mode, entity, batch_count + 1, len(batch), exc,
+                    exc_info=True,
+                )
+                batch_count += 1
+                return
+
             total += len(batch)
             batch_count += 1
 
@@ -248,6 +272,17 @@ def _sync_entity(
         if dry_run:
             logger.info("[DRY RUN   ] %s — %d registros (sin avanzar checkpoint)", entity, total)
         else:
+            if failed_batches > 0:
+                # Hubo batches que fallaron pero la corrida siguió. Marcamos la
+                # entidad como con errores para que el caller devuelva exit!=0
+                # y el cron/operador se entere, pero no perdimos las filas OK.
+                msg = f"{failed_batches} batch(es) fallaron; ultimo error: {last_batch_error}"
+                engine.mark_error(entity, msg)
+                logger.error(
+                    "[%-11s] %s — %d registros OK, %d batch(es) con error. Ultimo: %s",
+                    mode, entity, total, failed_batches, last_batch_error,
+                )
+                return False
             engine.mark_success(entity, last_id, last_ts, total)
             logger.info("[%-11s] %s — %d registros", mode, entity, total)
         return True
@@ -413,6 +448,61 @@ def cmd_lookups(args) -> None:
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
+
+def _setup_file_logging(args) -> None:
+    """
+    Adjunta un FileHandler con rotacion mensual al logger raiz.
+
+    - Directorio: $RAFAM_LOG_DIR (default: ./logs).
+    - Un archivo por script/entidad: rafam-{entity}-YYYY-MM.log.
+      Para cmd_run usa el --entity (proveedores | oc_items | orden_pago).
+      Para los otros comandos (status/reset/spec/lookups) usa el nombre del comando.
+      Si --entity esta vacio en run (corrida full) usa 'all'.
+    - Rotacion mensual: cada vez que se ejecuta se abre el archivo del mes en
+      curso (rafam-proveedores-2026-05.log). Al cambiar de mes se crea el del
+      mes siguiente automaticamente. Codificar el nombre del archivo en YYYY-MM
+      da rotacion real, predecible y sin riesgo de perdida (no dependemos del
+      TimedRotatingFileHandler que solo rota dentro de un proceso vivo).
+    - Override completo via $RAFAM_LOG_FILE (un solo archivo, sin rotacion).
+    - Si $RAFAM_LOG_DIR='' o $RAFAM_LOG_DISABLE=true: no escribe a archivo.
+    """
+    if _env_bool("RAFAM_LOG_DISABLE", "false"):
+        return
+
+    log_dir = os.getenv("RAFAM_LOG_DIR", "logs").strip()
+    log_file_override = os.getenv("RAFAM_LOG_FILE", "").strip()
+
+    if log_file_override:
+        log_path = Path(log_file_override)
+    else:
+        if not log_dir:
+            return
+        cmd = getattr(args, "command", "app") or "app"
+        if cmd == "run":
+            entity = (getattr(args, "entity", None) or "all").strip() or "all"
+            base_name = f"rafam-{entity}"
+        else:
+            base_name = f"rafam-{cmd}"
+        month_suffix = datetime.now().strftime("%Y-%m")
+        log_path = Path(log_dir) / f"{base_name}-{month_suffix}.log"
+
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        handler = logging.FileHandler(str(log_path), mode="a", encoding="utf-8")
+        handler.setFormatter(
+            logging.Formatter(
+                "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+                datefmt="%Y-%m-%d %H:%M:%S",
+            )
+        )
+        # Heredar el nivel del root logger (configurado por LOG_LEVEL)
+        handler.setLevel(logging.getLogger().level)
+        logging.getLogger().addHandler(handler)
+        logger.info("Logging a archivo: %s", log_path)
+    except OSError as exc:
+        logger.warning("No se pudo abrir archivo de log %s: %s", log_path, exc)
+
+
 def main() -> None:
     app_env = os.getenv("APP_ENV", "dev").strip().lower()
     default_level = "DEBUG" if app_env == "dev" else "INFO"
@@ -479,6 +569,7 @@ def main() -> None:
     )
 
     args = parser.parse_args()
+    _setup_file_logging(args)
     {"status": cmd_status, "reset": cmd_reset, "run": cmd_run, "spec": cmd_spec, "lookups": cmd_lookups}[args.command](args)
 
 

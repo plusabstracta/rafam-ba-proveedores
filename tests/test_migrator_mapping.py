@@ -523,11 +523,23 @@ class TestMapRetencion:
 
 class TestMigratorErrors:
 
-    def test_stats_con_error_falla(self):
+    def test_stats_con_error_no_falla_por_defecto(self):
+        """Comportamiento default: log warning, NO raise (no corta la corrida)."""
+        # No debe lanzar excepcion
+        MigratorExporter._raise_on_migrator_errors({"stats": {"proveedores": {"error": 1}}})
+
+    def test_errors_array_no_falla_por_defecto(self):
+        """Comportamiento default: log warning, NO raise."""
+        MigratorExporter._raise_on_migrator_errors({"errors": [{"message": "fallo"}]})
+
+    def test_stats_con_error_falla_en_modo_estricto(self, monkeypatch):
+        """Modo estricto opt-in via RAFAM_STRICT_PARTIAL_ERRORS=true."""
+        monkeypatch.setenv("RAFAM_STRICT_PARTIAL_ERRORS", "true")
         with pytest.raises(RuntimeError):
             MigratorExporter._raise_on_migrator_errors({"stats": {"proveedores": {"error": 1}}})
 
-    def test_errors_array_falla(self):
+    def test_errors_array_falla_en_modo_estricto(self, monkeypatch):
+        monkeypatch.setenv("RAFAM_STRICT_PARTIAL_ERRORS", "true")
         with pytest.raises(RuntimeError):
             MigratorExporter._raise_on_migrator_errors({"errors": [{"message": "fallo"}]})
 

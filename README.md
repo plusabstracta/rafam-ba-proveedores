@@ -324,19 +324,67 @@ Tambien se puede usar:
 make migrate-all BATCH=500
 ```
 
-Ejemplo de cron cada 15 minutos:
+### 5. Crontab Debian sin sudo para las 3 pasadas oficiales
 
-```cron
-*/15 * * * * cd /opt/rafam-ba-proveedores && .venv/bin/python main.py run --export migrator --batch-size 500 >> logs/rafam-sync.log 2>&1
-```
+Si no hay acceso `sudo` al servidor, configurar el cron del usuario que tiene el proyecto y la
+`.env` productiva. El ejemplo usa `flock` para evitar corridas superpuestas si una importacion
+tarda mas que el intervalo.
 
-Crear la carpeta de logs si se usa ese cron:
+Preparar carpetas una vez, desde el usuario que ejecuta el migrator:
 
 ```bash
-mkdir -p logs
+cd /home/rafam/rafam-ba-proveedores
+mkdir -p logs state
 ```
 
-### 5. Verificacion post-importacion
+Reemplazar `/home/rafam/rafam-ba-proveedores` por la ruta real del proyecto en el servidor.
+
+Editar el crontab del usuario:
+
+```bash
+crontab -e
+```
+
+Agregar:
+
+```cron
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+MAILTO=""
+
+RAFAM_DIR=/home/rafam/rafam-ba-proveedores
+RAFAM_BATCH=500
+RAFAM_LOG_DIR=/home/rafam/rafam-ba-proveedores/logs
+
+# Pipeline oficial cada 15 minutos:
+# 1) PROVEEDORES -> account_proveedores
+# 2) ORDEN_COMPRA + OC_ITEMS -> compras_pedidos + items
+# 3) ORDEN_PAGO + CTA_COMPROB + RETENCIONES -> egresos + gastos + retenciones
+*/15 * * * * cd "$RAFAM_DIR" && /usr/bin/flock -n state/cron.lock /bin/bash -lc 'make migrate-proveedores BATCH="$RAFAM_BATCH" >> "$RAFAM_LOG_DIR/proveedores.log" 2>&1 && make migrate-oc BATCH="$RAFAM_BATCH" >> "$RAFAM_LOG_DIR/oc.log" 2>&1 && make migrate-op BATCH="$RAFAM_BATCH" >> "$RAFAM_LOG_DIR/op.log" 2>&1'
+```
+
+Verificar que quedo instalado:
+
+```bash
+crontab -l
+tail -f logs/proveedores.log
+tail -f logs/oc.log
+tail -f logs/op.log
+```
+
+Para probar exactamente lo que ejecuta cron antes de dejarlo activo:
+
+```bash
+cd /home/rafam/rafam-ba-proveedores
+make migrate-proveedores-dry BATCH=100
+make migrate-oc-dry BATCH=100
+make migrate-op-dry BATCH=100
+```
+
+Si se prefiere una sola salida de log para todo el pipeline, reemplazar los tres redirects por
+`>> "$RAFAM_LOG_DIR/pipeline.log" 2>&1` en cada comando.
+
+### 6. Verificacion post-importacion
 
 ```bash
 make status

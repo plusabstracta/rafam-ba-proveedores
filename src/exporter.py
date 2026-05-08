@@ -2498,19 +2498,47 @@ class MigratorExporter(BaseExporter):
 
     @staticmethod
     def _raise_on_migrator_errors(parsed: dict) -> None:
+        """
+        Procesa la respuesta del migrator y reporta errores parciales.
+
+        Comportamiento por defecto (NO ESTRICTO): los errores parciales por fila
+        (validacion, datos invalidos, etc.) NO levantan excepcion. Las filas OK
+        del batch ya fueron persistidas; reintentar el batch entero solo
+        reprocesaria las filas validas (potencialmente generando duplicados o
+        cargando trabajo al backend) y las filas invalidas seguirian fallando.
+        Solo logueamos los errores con detalle para que el operador los corrija
+        en el origen (ej: CUIT mal cargado en RAFAM).
+
+        Comportamiento ESTRICTO (opt-in via RAFAM_STRICT_PARTIAL_ERRORS=true):
+        levanta RuntimeError si hay cualquier error parcial. Util para tests
+        o entornos donde se quiere abortar ante el primer error.
+
+        En ambos modos los errores se logean con full detail (errors[] y stats).
+        """
         if not isinstance(parsed, dict):
             return
+
+        strict = _env_bool("RAFAM_STRICT_PARTIAL_ERRORS", False)
 
         has_errors = False
         errors = parsed.get("errors")
         if isinstance(errors, list) and errors:
-            sample = json.dumps(errors[:3], ensure_ascii=False)
-            logger.warning("Migrator devolvio errores parciales (%d): %s", len(errors), sample)
+            # Loguear TODOS los errores (no solo sample) para diagnostico en prod.
+            # En general son pocos y vale la pena tener trazabilidad completa.
+            log_fn = logger.error if strict else logger.warning
+            log_fn(
+                "Migrator devolvio %d error(es) parcial(es) (filas individuales fallaron, "
+                "el resto del batch SI se proceso): %s",
+                len(errors),
+                json.dumps(errors[:20], ensure_ascii=False),
+            )
+            if len(errors) > 20:
+                logger.warning("... y %d error(es) mas omitidos del log", len(errors) - 20)
             has_errors = True
 
         stats = parsed.get("stats")
         if not isinstance(stats, dict):
-            if has_errors:
+            if has_errors and strict:
                 raise RuntimeError("Migrator devolvio errores parciales")
             return
 
@@ -2527,10 +2555,15 @@ class MigratorExporter(BaseExporter):
                 failed.append(f"{section}={error_count}")
 
         if failed:
-            logger.warning("Migrator reporto errores en stats: %s", ", ".join(failed))
+            log_fn = logger.error if strict else logger.warning
+            log_fn(
+                "Migrator stats: %s fila(s) fallaron pero el batch continuo. "
+                "Las filas OK ya fueron persistidas.",
+                ", ".join(failed),
+            )
             has_errors = True
 
-        if has_errors:
+        if has_errors and strict:
             details = ", ".join(failed) if failed else "ver errors en respuesta"
             raise RuntimeError(f"Migrator devolvio errores parciales: {details}")
 
@@ -2939,7 +2972,10 @@ def _fetch_migrator_json(endpoint_env: str, default_endpoint: str, query_params:
         raise RuntimeError(f"URL error: {exc.reason}") from exc
 
 
-def _env_bool(name: str, default: str = "true") -> bool:
+def _env_bool(name: str, default="true") -> bool:
+    """Lee env var como bool. default puede ser str (ej: 'true') o bool."""
+    if isinstance(default, bool):
+        default = "true" if default else "false"
     value = os.getenv(name, default)
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
