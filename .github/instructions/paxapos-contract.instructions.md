@@ -456,7 +456,7 @@ Proveedor↔Clasificación: NO existe relación.
       { "success": true, "external_id": {"cod_prov": 984}, "id": 123, "mode": "create" }
     ],
     "ordenes_compra": [
-      { "success": true, "external_id": {...}, "id": 789, "mode": "create", "items": 2, "internal_id": "rafam-oc-...", "public_url": "https://...", "gasto_ids": [1] }
+      { "success": true, "external_id": {...}, "id": 789, "mode": "create", "items": 2, "internal_id": "{ej}-{nro}", "public_url": "https://...", "gasto_ids": [1] }
     ]
   }
 }
@@ -566,7 +566,7 @@ El mapping debe coincidir con los IDs reales de `centros_costo` del tenant desti
 {
   "external_id": { "ejercicio": int, "uni_compra": int, "nro_oc": int },
   "Pedido": {
-    "internal_id": "rafam-oc-{ejercicio}-{uni_compra}-{nro_oc}",
+    "internal_id": "{ejercicio}-{nro_oc}",
     "tipo": "orden_compra",
     "proveedor_id": int(lookup COD_PROV),
     "observacion": "Migrado RAFAM OC {ejercicio}-{uni_compra}-{nro_oc}"
@@ -687,7 +687,7 @@ El seed base tiene ~33 tipos, pero cada tenant puede tener tipos adicionales o d
 
 ### 14.11 `internal_id` auto-generado es determinístico
 
-Si no se envía `Pedido.internal_id` pero sí `external_id` con los campos esperados, el controller genera el `internal_id` para OCs como `rafam-oc-{ejercicio}-{uni_compra}-{nro_oc}`.
+Si no se envía `Pedido.internal_id` pero sí `external_id` con los campos esperados, el controller genera el `internal_id` para OCs como `{ejercicio}-{nro_oc}`.
 
 Si se quiere control total del upsert, enviar `internal_id` propio. Si no, dejar que lo genere pero asegurar que `external_id` tenga los campos necesarios.
 

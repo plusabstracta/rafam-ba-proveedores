@@ -836,7 +836,7 @@ class MigratorExporter(BaseExporter):
                     continue
 
                 pedido: dict = {
-                    "internal_id": f"rafam-oc-{ejercicio}-{uni_compra}-{nro_oc}",
+                    "internal_id": f"{ejercicio % 100}-{nro_oc}",
                     "tipo": "orden_compra",
                     "estado_aprobacion": 2,
                     "proveedor_id": remote_prov_id,
@@ -1120,7 +1120,7 @@ class MigratorExporter(BaseExporter):
                     continue
 
                 pedido: dict = {
-                    "internal_id": f"rafam-oc-{ejercicio}-{uni_compra}-{nro_oc}",
+                    "internal_id": f"{ejercicio % 100}-{nro_oc}",
                     "tipo": "orden_compra",
                     "estado_aprobacion": 2,
                     "proveedor_id": remote_prov_id,
@@ -1777,14 +1777,13 @@ class MigratorExporter(BaseExporter):
 
             # pedido_internal_id: fallback robusto. Cuando link_store no tiene
             # el OC (ej. corrida fresca, OC migrada por otro proceso) el backend
-            # puede resolverlo via Pedido.internal_id = rafam-oc-{ej}-{uni}-{nro}.
+            # puede resolverlo via Pedido.internal_id = {ej}-{nro}.
             # Toda OP siempre tiene una OC (regla de negocio RAFAM), asi que
             # siempre que CTA_HOJA_DE_RUTA tenga las columnas OC_*, se envia.
             oc_ej = self._to_int(raw.get("HDR_OC_EJERCICIO"))
-            oc_uni = self._to_int(raw.get("HDR_OC_UNI_COMPRA"))
             oc_nro = self._to_int(raw.get("HDR_OC_NRO"))
-            if oc_ej is not None and oc_uni is not None and oc_nro is not None:
-                internal_id = f"rafam-oc-{oc_ej}-{oc_uni}-{oc_nro}"
+            if oc_ej is not None and oc_nro is not None:
+                internal_id = f"{oc_ej % 100}-{oc_nro}"
                 internals = grouped_pedido_internal_ids.setdefault(key, [])
                 if internal_id not in internals:
                     internals.append(internal_id)

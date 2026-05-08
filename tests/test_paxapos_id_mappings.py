@@ -245,7 +245,7 @@ class TestPedidoInternalIdEnOrdenPago:
         op = ops[0]
         # Sin link_store -> no hay pedido_id, pero SI pedido_internal_id
         assert "pedido_id" not in op
-        assert op["pedido_internal_id"] == "rafam-oc-2026-1-777"
+        assert op["pedido_internal_id"] == "26-777"
 
     def test_no_envia_pedido_internal_id_si_pedido_id_resuelto(self):
         """OC ya migrada por este script -> link_store devuelve pedido_id."""
@@ -274,7 +274,7 @@ class TestPedidoInternalIdEnOrdenPago:
         assert "pedido_internal_id" not in op
 
     def test_internal_id_es_lowercase_y_formato_canonico(self):
-        """El formato debe coincidir con lo que el OC migra: rafam-oc-{ej}-{uni}-{nro}."""
+        """El formato debe coincidir con lo que el OC migra: {ej}-{nro}."""
         exp = self._make_exporter()
         rows = [self._row(
             self._columns(),
@@ -282,7 +282,7 @@ class TestPedidoInternalIdEnOrdenPago:
         )]
         sent = self._send_and_capture(exp, rows)
         op = sent[0]["ordenes_pago"][0]
-        assert op["pedido_internal_id"] == "rafam-oc-2025-3-42"
+        assert op["pedido_internal_id"] == "25-42"
 
     def test_tipo_pago_se_setea_desde_tipo_cance(self):
         """TIPO_CANCE='CA' -> tipo_de_pago_id=9 (Cheque)."""

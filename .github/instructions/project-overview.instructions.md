@@ -158,7 +158,7 @@ Se pueden enviar todas las entidades en un solo payload y el endpoint respeta el
 #### Órdenes de Compra (`_importPedido`)
 
 - Modelo: `Compras.Pedido` → tabla `compras_pedidos` (con `tablePrefix = 'compras_'`).
-- Upsert por `Pedido.internal_id` (formato: `rafam-oc-{ej}-{uni}-{nro}`).
+- Upsert por `Pedido.internal_id` (formato: `{ej}-{nro}`).
 - Estado: `estado_aprobacion` — valor `4` para anular una OC existente.
 - Acepta `gasto_nro_comprobante` para vincular OC↔Gasto por número fiscal; si el gasto no existe, el endpoint lo auto-crea.
 - Respuesta: `{success, id, mode: create|update, external_id}`.
