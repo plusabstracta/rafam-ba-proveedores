@@ -1521,6 +1521,31 @@ class MigratorExporter(BaseExporter):
                 return pedido_id
         return None
 
+    def _resolve_pedido_id_from_oc_link(self, raw: dict) -> int | None:
+        """Resuelve pedido_id consultando link_store con la clave de OC RAFAM
+        presente en CTA_HOJA_DE_RUTA (HDR_OC_EJERCICIO/UNI_COMPRA/NRO).
+
+        El backend usa pedido_id para vincular el Gasto auto-creado por la OP
+        a la OC original. Sin esta resolución, el Gasto queda huérfano de OC.
+        """
+        ej = self._to_int(raw.get("HDR_OC_EJERCICIO"))
+        uni = self._to_int(raw.get("HDR_OC_UNI_COMPRA"))
+        nro = self._to_int(raw.get("HDR_OC_NRO"))
+        if ej is None or uni is None or nro is None:
+            return None
+        source_key = json.dumps(
+            {"ejercicio": ej, "nro_oc": nro, "uni_compra": uni},
+            sort_keys=True,
+        )
+        link = self._link_store.get_link("orden_compra", source_key)
+        if not link:
+            return None
+        remote_id = link.get("remote_id")
+        try:
+            return int(remote_id) if remote_id is not None else None
+        except (TypeError, ValueError):
+            return None
+
     def _build_gasto_from_op_row(
         self, raw: dict
     ) -> tuple[dict | None, tuple[int, str, str] | None]:
@@ -1687,9 +1712,13 @@ class MigratorExporter(BaseExporter):
                 ):
                     cc_raw_by_key[cc_key] = raw
 
-            # El script no resuelve pedido_id desde link_orden_compra: si viene
-            # en la fila, se reenvia a Paxapos para que el backend vincule OP/Gasto.
+            # pedido_id: prioridad a la fila (override manual). Si no viene,
+            # se intenta resolver via link_store usando la clave OC RAFAM
+            # (HDR_OC_EJERCICIO/UNI_COMPRA/NRO) provista por CTA_HOJA_DE_RUTA.
+            # Esto permite que el backend vincule el Gasto auto-creado a la OC.
             pedido_id = self._pedido_id_from_op_row(raw)
+            if pedido_id is None:
+                pedido_id = self._resolve_pedido_id_from_oc_link(raw)
             if pedido_id is not None:
                 pedido_ids = grouped_pedido_ids.setdefault(key, [])
                 if pedido_id not in pedido_ids:

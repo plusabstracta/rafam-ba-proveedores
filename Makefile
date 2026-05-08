@@ -4,6 +4,7 @@ SHELL := /usr/bin/env bash
 PY := .venv/bin/python
 PIP := $(PY) -m pip
 PYTEST := $(PY) -m pytest
+COVERAGE := $(PY) -m coverage
 
 CSV_DIR ?= output
 DEV_DB ?= state/dev_rafam.db
@@ -11,7 +12,7 @@ BATCH ?= 500
 LIMIT ?=
 EXPORT ?= csv
 
-.PHONY: help setup install env load-dev update-mapping explore-schema extract-cat-uni-med rafam-context status run-all test reset-all \
+.PHONY: help setup install env load-dev update-mapping explore-schema extract-cat-uni-med rafam-context status run-all test coverage reset-all \
 	run-proveedores run-pedidos run-ped_items run-solic_gastos \
 	run-orden_compra run-oc_items run-orden_pago \
 	run-proveedores-migrator run-proveedores-migrator-dry \
@@ -64,6 +65,7 @@ help:
 	@echo "  make reset-proveedores  Resetea checkpoint de proveedores"
 	@echo "  make reset-all          Resetea todos los checkpoints"
 	@echo "  make test               Corre tests"
+	@echo "  make coverage           Corre tests y exige 80%+ de cobertura en src/"
 	@echo ""
 	@echo "Variables opcionales:"
 	@echo "  BATCH=500 LIMIT=1000 EXPORT=csv CSV_DIR=output DEV_DB=state/dev_rafam.db RAFAM_CONTEXT_ARGS='--years 1'"
@@ -224,3 +226,7 @@ reset-orden_pago:
 
 test:
 	$(PYTEST) -q
+
+coverage:
+	$(COVERAGE) run --source=src -m pytest -q
+	$(COVERAGE) report --fail-under=80 -m
