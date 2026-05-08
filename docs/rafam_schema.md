@@ -2,6 +2,10 @@
 
 > Generado automáticamente por `scripts/explore_schema.py` el 2026-05-02 10:55:56
 > **No editar manualmente** — regenerar ejecutando el script.
+>
+> **Alcance del proyecto:** este dump incluye el schema raw de Oracle. La migración a Paxapos sólo usa estas tablas:
+> `PROVEEDORES`, `ORDEN_COMPRA`, `OC_ITEMS`, `CTA_COMPROB`, `ORDEN_PAGO`, `RETENCIONES` (+ lookups `CTA_HOJA_DE_RUTA`, `DEDUCCIONES`, `REG_COMP`).
+> Cualquier otra tabla listada abajo es referencia contextual y no se sincroniza. Ver [`rafam_paxapos_equivalencias.md`](rafam_paxapos_equivalencias.md) (fuente de verdad).
 
 ## Índice de tablas
 

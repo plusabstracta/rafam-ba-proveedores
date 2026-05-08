@@ -36,8 +36,17 @@ class EntityLinkStore:
             db_path = os.getenv("LOCAL_STATE_DB_PATH", "state/checkpoint.db")
         self._db_path = Path(db_path)
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(self._db_path))
+        # timeout=5: tolera locks transitorios. WAL + busy_timeout aplicados
+        # explicitamente porque sqlite3.connect() crudo no comparte los pragmas
+        # de SQLAlchemy (db.py) — son procesos/conexiones distintas.
+        self._conn = sqlite3.connect(str(self._db_path), timeout=5.0)
         self._conn.row_factory = sqlite3.Row
+        try:
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA synchronous=NORMAL")
+            self._conn.execute("PRAGMA busy_timeout=5000")
+        except sqlite3.Error:
+            pass
         self._schemas = schemas if schemas is not None else DEFAULT_LINK_SCHEMAS
         self._created_tables: set[str] = set()
         self._ensure_all_tables()

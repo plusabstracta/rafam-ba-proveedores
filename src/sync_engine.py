@@ -55,12 +55,60 @@ class SyncEngine:
             )
         )
 
+    def advance_partial(
+        self,
+        entity: str,
+        last_id: Optional[int],
+        last_ts: Optional[datetime],
+        records_added: int,
+    ) -> None:
+        """Persist watermark progress after a successful batch.
+
+        A diferencia de `mark_success`, esto se invoca POR BATCH durante una
+        corrida en curso. Si el proceso muere a mitad (kill, OOM, network),
+        el siguiente run reanuda desde el ultimo batch confirmado en vez de
+        rebobinar al inicio. El status se deja como `running`.
+
+        El cursor solo avanza si los nuevos valores son >= a los persistidos
+        (proteccion ante batches con cursor menor por orden de scan).
+        """
+        existing = self._store.get(entity)
+        new_id = existing.last_id
+        if last_id is not None and (existing.last_id is None or last_id > existing.last_id):
+            new_id = last_id
+        new_ts = existing.last_ts
+        # Normalizar ambos a UTC-aware antes de comparar para evitar el clasico
+        # TypeError 'can't compare offset-naive and offset-aware datetimes'.
+        norm_existing_ts = self._normalize_utc(existing.last_ts)
+        norm_new_ts = self._normalize_utc(last_ts)
+        if norm_new_ts is not None and (norm_existing_ts is None or norm_new_ts > norm_existing_ts):
+            new_ts = norm_new_ts
+        self._store.save(
+            Checkpoint(
+                entity=entity,
+                last_id=new_id,
+                last_ts=new_ts,
+                last_run=datetime.now(timezone.utc),
+                records_sent=(existing.records_sent or 0) + records_added,
+                status="running",
+            )
+        )
+
     def mark_error(self, entity: str, error: str) -> None:
         """Record an error WITHOUT advancing the cursor (safe to retry)."""
         cp = self._store.get(entity)
         cp.status = f"error: {error[:200]}"
         cp.last_run = datetime.now(timezone.utc)
         self._store.save(cp)
+
+    @staticmethod
+    def _normalize_utc(value):
+        """Convierte datetime naive (asumido UTC) o aware a aware-UTC. None -> None."""
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        return None
 
     # ─── Utility ─────────────────────────────────────────────────────────────
 
@@ -97,23 +145,42 @@ class SyncEngine:
             if key in col_idx:
                 vals = [r[col_idx[key]] for r in rows if r[col_idx[key]] is not None]
                 if vals:
-                    raw = max(vals)
-                    if isinstance(raw, datetime):
-                        last_ts = raw
-                    elif isinstance(raw, str):
-                        last_ts = self._parse_ts(raw)
+                    # Normalizar a datetime ANTES de max() — mezclar str+datetime
+                    # rompe la comparacion en Python 3.
+                    parsed = [self._coerce_datetime(v) for v in vals]
+                    parsed = [p for p in parsed if p is not None]
+                    if parsed:
+                        last_ts = max(parsed)
 
         return last_id, last_ts
 
     @staticmethod
+    def _coerce_datetime(value) -> Optional[datetime]:
+        """Convierte datetime/str a datetime aware en UTC. Tolera ISO con/sin tz, microsegundos y formatos legacy."""
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        if isinstance(value, str):
+            return SyncEngine._parse_ts(value)
+        return None
+
+    @staticmethod
     def _parse_ts(value: str) -> Optional[datetime]:
-        """Parse common timestamp string formats from SQLite TEXT columns."""
+        """Parse comunes: ISO 8601 (con o sin tz/microsegundos) y formatos legacy."""
         text = value.strip()
         if not text:
             return None
+        # ISO con/sin tz, con/sin microsegundos. fromisoformat acepta 'YYYY-MM-DD HH:MM:SS[.ffffff][+HH:MM]'.
+        try:
+            dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+        except ValueError:
+            pass
         for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
             try:
-                return datetime.strptime(text, fmt)
+                dt = datetime.strptime(text, fmt)
+                return dt.replace(tzinfo=timezone.utc)
             except ValueError:
                 continue
         return None

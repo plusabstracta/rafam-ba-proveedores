@@ -10,11 +10,14 @@ Usage:
 """
 
 import argparse
+import fcntl
 import json
 import logging
 import os
 import sys
 import time
+from contextlib import contextmanager
+from pathlib import Path
 
 from dotenv import load_dotenv
 from sqlalchemy.exc import SQLAlchemyError
@@ -53,6 +56,45 @@ _ENTITY_LINK_NAMES: dict[str, str] = {
 
 def _build_engine() -> SyncEngine:
     return SyncEngine(CheckpointStore())
+
+
+_LOCK_PATH = Path(__file__).resolve().parent / "state" / "migrator.lock"
+
+
+@contextmanager
+def _exclusive_run_lock():
+    """Lock exclusivo via fcntl.flock para que dos cron concurrentes no se pisen.
+
+    Si otro proceso esta corriendo `main.py run`, este sale con codigo 75
+    (EX_TEMPFAIL) en vez de avanzar checkpoints en paralelo. El lock se libera
+    automaticamente al cerrar el FD (fin de proceso o context exit).
+    """
+    _LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    fd = open(_LOCK_PATH, "w")
+    try:
+        try:
+            fcntl.flock(fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            logger.error(
+                "Otro proceso ya esta ejecutando el sync (lock: %s). Saliendo sin avanzar checkpoints.",
+                _LOCK_PATH,
+            )
+            sys.exit(75)
+        # Marca PID del owner para diagnostico.
+        try:
+            fd.seek(0)
+            fd.truncate()
+            fd.write(f"{os.getpid()}\n")
+            fd.flush()
+        except OSError:
+            pass
+        yield
+    finally:
+        try:
+            fcntl.flock(fd.fileno(), fcntl.LOCK_UN)
+        except OSError:
+            pass
+        fd.close()
 
 
 # ─── status ──────────────────────────────────────────────────────────────────
@@ -132,8 +174,12 @@ def _sync_entity(
     batch_size: int,
     limit: int | None,
     dry_run: bool,
-) -> None:
-    """Execute the incremental sync for a single entity."""
+) -> bool:
+    """Execute the incremental sync for a single entity.
+
+    Returns True si la entidad se sincronizo OK, False si hubo error. El caller
+    usa este flag para devolver exit code != 0 al SO/cron.
+    """
     cp  = engine.get_checkpoint(entity)
     cfg = ENTITY_CONFIGS[entity]
     mode = "FULL LOAD" if (cp.is_fresh or cfg.full_load) else "INCREMENTAL"
@@ -166,6 +212,18 @@ def _sync_entity(
             total += len(batch)
             batch_count += 1
 
+            # Watermark incremental: persistir progreso por batch para que un
+            # crash a mitad de corrida no rebobine al inicio. Solo cuando la
+            # entidad tiene cursor real (no full_load) y no estamos en dry-run.
+            if not dry_run and not cfg.full_load and (bid is not None or bts is not None):
+                try:
+                    engine.advance_partial(entity, bid, bts, len(batch))
+                except Exception as cp_exc:  # pragma: no cover - defensive
+                    logger.warning(
+                        "[%s] No se pudo persistir watermark parcial: %s",
+                        entity, cp_exc,
+                    )
+
         group_fields = _GROUPED_BATCH_FIELDS.get(entity)
         if group_fields:
             for batch in _iter_grouped_batches(result, columns, group_fields, batch_size):
@@ -192,11 +250,13 @@ def _sync_entity(
         else:
             engine.mark_success(entity, last_id, last_ts, total)
             logger.info("[%-11s] %s — %d registros", mode, entity, total)
+        return True
 
     except Exception as exc:
         if not dry_run:
             engine.mark_error(entity, str(exc))
         logger.error("[%-11s] %s — ERROR: %s", mode, entity, exc, exc_info=True)
+        return False
 
 
 def _warn_missing_cursor_fields(cfg, columns: list[str], entity: str) -> None:
@@ -264,6 +324,11 @@ def cmd_run(args) -> None:
         logger.error("Entidad desconocida: '%s'", args.entity)
         sys.exit(1)
 
+    with _exclusive_run_lock():
+        _cmd_run_locked(args)
+
+
+def _cmd_run_locked(args) -> None:
     from src.config import _EJERCICIO_MIN, _EJERCICIO_MIN_ENTITIES
     if _EJERCICIO_MIN:
         entidades = ", ".join(sorted(_EJERCICIO_MIN_ENTITIES))
@@ -279,18 +344,17 @@ def cmd_run(args) -> None:
     engine   = _build_engine()
     targets  = [args.entity] if args.entity else list(ENTITY_CONFIGS.keys())
 
-    # solic_gastos: solo se migra explícitamente (--entity solic_gastos) o
-    # cuando RAFAM_MIGRATE_SOLIC_GASTOS=true (carga histórica inicial).
-    # En runs incrementales los gastos los crean humanos en Paxapos y RAFAM
-    # solo manda los pagos vinculados via NRO_COMPROBANTE.
-    if not args.entity and not _env_bool("RAFAM_MIGRATE_SOLIC_GASTOS", "false"):
-        if "solic_gastos" in targets:
-            targets.remove("solic_gastos")
-            logger.info(
-                "solic_gastos OMITIDO (RAFAM_MIGRATE_SOLIC_GASTOS=false). "
-                "Para incluir: --entity solic_gastos o exportar RAFAM_MIGRATE_SOLIC_GASTOS=true",
-            )
+    # En modo migrator, sin --entity explicito, restringir a las 3 entidades oficiales
+    # (proveedores, oc_items, orden_pago) en orden de FKs. Las demás no se migran:
+    #   - orden_compra (header) → reemplazado por oc_items (incluye items embebidos)
+    #   - solic_gastos          → los gastos los crean humanos en Paxapos / auto-crea el endpoint de OP
+    #   - pedidos / ped_items   → deshabilitados, los pedidos llegan como OCs via oc_items
+    if not args.entity and args.export == "migrator":
+        official = ["proveedores", "oc_items", "orden_pago"]
+        targets = [e for e in official if e in ENTITY_CONFIGS]
+        logger.info("Modo migrator: ejecutando solo las 3 entidades oficiales en orden → %s", targets)
 
+    failed_entities: list[str] = []
     try:
         source_engine = create_source_engine()
         with source_engine.connect() as conn:
@@ -301,13 +365,22 @@ def cmd_run(args) -> None:
             if hasattr(exporter, "attach_source"):
                 exporter.attach_source(source_repo)
             for entity in targets:
-                _sync_entity(source_repo, engine, exporter, entity, args.batch_size, args.limit, args.dry_run)
+                ok = _sync_entity(source_repo, engine, exporter, entity, args.batch_size, args.limit, args.dry_run)
+                if not ok:
+                    failed_entities.append(entity)
     except (SQLAlchemyError, ValueError) as exc:
         logger.error("Error en la ejecución: %s", exc)
         sys.exit(1)
     finally:
         exporter.close()
         logger.info("Proceso finalizado.")
+
+    if failed_entities:
+        logger.error(
+            "Sincronización con errores en %d/%d entidades: %s",
+            len(failed_entities), len(targets), ", ".join(failed_entities),
+        )
+        sys.exit(1)
 
 
 def cmd_spec(args) -> None:

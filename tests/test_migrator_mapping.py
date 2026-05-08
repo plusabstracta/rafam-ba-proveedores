@@ -27,6 +27,12 @@ def exporter():
             "tipos_de_pago": [
                 {"id": "4", "name": "Transferencia"}
             ],
+            "tipos_retencion": [
+                {"id": "102", "name": "Retención de IVA"},
+                {"id": "103", "name": "Retención de Ganancias"},
+                {"id": "104", "name": "Retención de IIBB"},
+                {"id": "105", "name": "Retención SUSS"},
+            ],
         }
         with patch.dict("os.environ", {
             "PAXAPOS_URL": "https://example.com",
@@ -775,11 +781,11 @@ class TestWriteBatchOcItems:
 
         item = sent[0]["ordenes_compra"][0]["items"][0]
         assert item["cantidad"] == 10.0
-        assert item["precio"] == 50.5
+        assert item["precio_unitario"] == 50.5
         assert item["recibida_cantidad"] == 3.0
         assert "mercaderia_external_ref" in item
         assert item["mercaderia_external_ref"]["entity"] == "oc_items"
-        assert item["unidad_de_medida_id"] == 5  # Unidad
+        assert item["unidad_de_medida_id"] == 5  # fallback exporter (link_store vacio)
 
     # ── Varias OCs en un batch ──
 

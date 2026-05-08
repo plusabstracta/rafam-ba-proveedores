@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """update_field_mapping.py — Genera un dump legacy de mapeo de campos.
 
-La documentacion canonica vive en docs/rafam_paxapos_source_of_truth.md.
+La documentacion canonica vive en docs/rafam_paxapos_equivalencias.md.
 
 Combina las columnas reales leídas desde la base de datos con el mapeo
 RAFAM→Paxapos definido en PAXAPOS_MAPPINGS (fuente de verdad en este script).
@@ -106,42 +106,6 @@ PAXAPOS_MAPPINGS: dict[str, list[tuple[str, str, str, str]]] = {
         ("FECHA_ALTA",     "proveedores", "created_at",       "ninguna"),
         ("FECHA_ULT_COMP", "proveedores", "updated_at",       "ninguna"),
     ],
-    "JURISDICCIONES": [
-        ("JURISDICCION",  "jurisdicciones", "id_externo",    "ninguna"),
-        ("DENOMINACION",  "jurisdicciones", "nombre",        "trim()"),
-        ("SELECCIONABLE", "jurisdicciones", "seleccionable", "ninguna"),
-        ("VIGENTE_DESDE", "jurisdicciones", "vigente_desde", "ninguna"),
-        ("VIGENTE_HASTA", "jurisdicciones", "vigente_hasta", "ninguna"),
-    ],
-    "PEDIDOS": [
-        ("EJERCICIO",    "pedidos", "ejercicio",      "ninguna"),
-        ("NUM_PED",      "pedidos", "numero_pedido",  "ninguna"),
-        ("JURISDICCION", "pedidos", "jurisdiccion_id","lookup por id_externo (FK → JURISDICCIONES)"),
-        ("FECH_EMI",     "pedidos", "fecha",          "ninguna"),
-        ("COSTO_TOT",    "pedidos", "importe_total",  "ninguna"),
-        ("PED_ESTADO",   "pedidos", "estado",         "mapeo de código"),
-        ("OBSERVACIONES","pedidos", "observaciones",  "trim()"),
-    ],
-    "PED_ITEMS": [
-        ("EJERCICIO",    "pedido_items", "ejercicio",       "parte de FK → PEDIDOS"),
-        ("NUM_PED",      "pedido_items", "pedido_id",       "lookup por ejercicio+numero_pedido (FK → PEDIDOS)"),
-        ("ORDEN",        "pedido_items", "nro_item",        "ninguna"),
-        ("JURISDICCION", "pedido_items", "jurisdiccion_id", "lookup por id_externo (FK → JURISDICCIONES)"),
-        ("DESCRIP_BIE",  "pedido_items", "descripcion",     "trim()"),
-        ("CANTIDAD",     "pedido_items", "cantidad",        "ninguna"),
-        ("COSTO_UNI",    "pedido_items", "precio_unitario", "ninguna"),
-    ],
-    "SOLIC_GASTOS": [
-        ("EJERCICIO",    "solicitudes_gasto", "ejercicio",         "ninguna"),
-        ("DELEG_SOLIC",  "solicitudes_gasto", "deleg_solic",       "ninguna"),
-        ("NRO_SOLIC",    "solicitudes_gasto", "numero_solicitud",  "ninguna"),
-        ("NRO_PED",      "solicitudes_gasto", "pedido_id",         "lookup ejercicio+numero_pedido (FK → PEDIDOS; NRO_PED → NUM_PED)"),
-        ("JURISDICCION", "solicitudes_gasto", "jurisdiccion_id",   "lookup por id_externo (FK → JURISDICCIONES)"),
-        ("OP_COD_PROV",  "solicitudes_gasto", "proveedor_id",      "lookup por id_externo (FK → PROVEEDORES)"),
-        ("FECH_SOLIC",   "solicitudes_gasto", "fecha",             "ninguna"),
-        ("IMPORTE_TOT",  "solicitudes_gasto", "importe",           "ninguna"),
-        ("ESTADO_SOLIC", "solicitudes_gasto", "estado",            "mapeo de código"),
-    ],
     "ORDEN_COMPRA": [
         ("EJERCICIO",   "ordenes_compra", "ejercicio",       "ninguna"),
         ("UNI_COMPRA",  "ordenes_compra", "uni_compra",      "ninguna"),
@@ -156,11 +120,8 @@ PAXAPOS_MAPPINGS: dict[str, list[tuple[str, str, str, str]]] = {
         ("EJERCICIO",      "oc_items", "ejercicio",       "parte de FK → ORDEN_COMPRA"),
         ("UNI_COMPRA",     "oc_items", "uni_compra",      "parte de FK → ORDEN_COMPRA"),
         ("NRO_OC",         "oc_items", "orden_compra_id", "lookup por clave compuesta (FK → ORDEN_COMPRA)"),
-        ("DELEG_SOLIC",    "oc_items", "deleg_solic",     "parte de FK → SOLIC_GASTOS"),
-        ("NRO_SOLIC",      "oc_items", "solic_gasto_id",  "lookup por clave compuesta (FK → SOLIC_GASTOS)"),
         ("ITEM_OC",        "oc_items", "nro_item",        "ninguna"),
         ("COD_PROV",       "oc_items", "proveedor_id",    "lookup por id_externo (FK → PROVEEDORES)"),
-        ("SG_JURISDICCION","oc_items", "jurisdiccion_id", "lookup por id_externo (FK → JURISDICCIONES)"),
         ("DESCRIPCION",    "oc_items", "descripcion",     "trim()"),
         ("CANTIDAD",       "oc_items", "cantidad",        "ninguna"),
         ("IMP_UNITARIO",   "oc_items", "precio_unitario", "ninguna"),
@@ -169,11 +130,6 @@ PAXAPOS_MAPPINGS: dict[str, list[tuple[str, str, str, str]]] = {
         ("EJERCICIO",           "ordenes_pago", "ejercicio",              "ninguna"),
         ("NRO_OP",              "ordenes_pago", "numero_op",              "ninguna"),
         ("COD_PROV",            "ordenes_pago", "proveedor_id",           "lookup por id_externo (FK → PROVEEDORES)"),
-        ("JURISDICCION",        "ordenes_pago", "jurisdiccion_id",        "lookup por id_externo (FK → JURISDICCIONES)"),
-        ("SG_DELEG_SOLIC",      "ordenes_pago", "deleg_solic",            "parte de FK → SOLIC_GASTOS"),
-        ("SG_NRO_SOLIC",        "ordenes_pago", "solic_gasto_id",         "lookup por clave compuesta (FK → SOLIC_GASTOS)"),
-        ("RECO_DEU_COMPRA_EJER","ordenes_pago", "orden_compra_ejercicio", "parte de FK → ORDEN_COMPRA"),
-        ("RECO_DEU_COMPRA",     "ordenes_pago", "orden_compra_id",        "lookup por clave compuesta (FK → ORDEN_COMPRA; confirmar UNI_COMPRA)"),
         ("FECH_CONFIRM",        "ordenes_pago", "fecha",                  "solo si ESTADO_OP=N y CONFIRMADO=S"),
         ("IMPORTE_TOTAL",       "ordenes_pago", "importe",                "ninguna"),
         ("IMPORTE_LIQUIDO",     "ordenes_pago", "importe_liquido",        "ninguna"),
@@ -183,69 +139,36 @@ PAXAPOS_MAPPINGS: dict[str, list[tuple[str, str, str, str]]] = {
 
 # ─── Claves primarias ─────────────────────────────────────────────────────────
 PK_DEFINITIONS: dict[str, list[str]] = {
-    "JURISDICCIONES": ["JURISDICCION"],
     "PROVEEDORES":    ["COD_PROV"],
-    "PEDIDOS":        ["EJERCICIO", "NUM_PED"],
-    "PED_ITEMS":      ["EJERCICIO", "NUM_PED", "ORDEN"],
-    "SOLIC_GASTOS":   ["EJERCICIO", "DELEG_SOLIC", "NRO_SOLIC"],
     "ORDEN_COMPRA":   ["EJERCICIO", "UNI_COMPRA", "NRO_OC"],
     "OC_ITEMS":       ["EJERCICIO", "UNI_COMPRA", "NRO_OC", "ITEM_OC"],
     "ORDEN_PAGO":     ["EJERCICIO", "NRO_OP"],
 }
 
 # ─── Relaciones FK ────────────────────────────────────────────────────────────
-# Incluye relaciones lógicas confirmadas por análisis de CSV + diccionario Oracle.
-# "note" se muestra en la columna extra de la tabla generada.
 FK_RELATIONSHIPS: list[dict[str, Any]] = [
-    {"child": "PEDIDOS",      "child_cols": ["JURISDICCION"],
-     "parent": "JURISDICCIONES", "parent_cols": ["JURISDICCION"]},
-    {"child": "PED_ITEMS",    "child_cols": ["EJERCICIO", "NUM_PED"],
-     "parent": "PEDIDOS",        "parent_cols": ["EJERCICIO", "NUM_PED"]},
-    {"child": "PED_ITEMS",    "child_cols": ["JURISDICCION"],
-     "parent": "JURISDICCIONES", "parent_cols": ["JURISDICCION"]},
-    {"child": "SOLIC_GASTOS", "child_cols": ["EJERCICIO", "NRO_PED"],
-     "parent": "PEDIDOS",        "parent_cols": ["EJERCICIO", "NUM_PED"],
-     "note": "NRO_PED → NUM_PED (nombres distintos en cada tabla)"},
-    {"child": "SOLIC_GASTOS", "child_cols": ["JURISDICCION"],
-     "parent": "JURISDICCIONES", "parent_cols": ["JURISDICCION"]},
-    {"child": "SOLIC_GASTOS", "child_cols": ["OP_COD_PROV"],
-     "parent": "PROVEEDORES",    "parent_cols": ["COD_PROV"]},
     {"child": "ORDEN_COMPRA", "child_cols": ["COD_PROV"],
      "parent": "PROVEEDORES",    "parent_cols": ["COD_PROV"]},
     {"child": "OC_ITEMS",     "child_cols": ["EJERCICIO", "UNI_COMPRA", "NRO_OC"],
      "parent": "ORDEN_COMPRA",   "parent_cols": ["EJERCICIO", "UNI_COMPRA", "NRO_OC"]},
-    {"child": "OC_ITEMS",     "child_cols": ["EJERCICIO", "DELEG_SOLIC", "NRO_SOLIC"],
-     "parent": "SOLIC_GASTOS",   "parent_cols": ["EJERCICIO", "DELEG_SOLIC", "NRO_SOLIC"]},
     {"child": "OC_ITEMS",     "child_cols": ["COD_PROV"],
      "parent": "PROVEEDORES",    "parent_cols": ["COD_PROV"]},
-    {"child": "OC_ITEMS",     "child_cols": ["SG_JURISDICCION"],
-     "parent": "JURISDICCIONES", "parent_cols": ["JURISDICCION"]},
     {"child": "ORDEN_PAGO",   "child_cols": ["COD_PROV"],
      "parent": "PROVEEDORES",    "parent_cols": ["COD_PROV"]},
-    {"child": "ORDEN_PAGO",   "child_cols": ["JURISDICCION"],
-     "parent": "JURISDICCIONES", "parent_cols": ["JURISDICCION"]},
-    {"child": "ORDEN_PAGO",   "child_cols": ["EJERCICIO", "SG_DELEG_SOLIC", "SG_NRO_SOLIC"],
-     "parent": "SOLIC_GASTOS",   "parent_cols": ["EJERCICIO", "DELEG_SOLIC", "NRO_SOLIC"]},
-    {"child": "ORDEN_PAGO",   "child_cols": ["RECO_DEU_COMPRA_EJER", "RECO_DEU_COMPRA"],
-     "parent": "ORDEN_COMPRA",   "parent_cols": ["EJERCICIO", "NRO_OC"],
-     "note": "confirmar UNI_COMPRA"},
 ]
 
 # ─── Secciones del documento (en orden de aparición) ─────────────────────────
 SECTIONS: list[dict[str, Any]] = [
-    # Core
-    {"num": 1,  "title": "Proveedores",                             "tables": ["PROVEEDORES"]},
-    {"num": 2,  "title": "Jurisdicciones",                          "tables": ["JURISDICCIONES"]},
-    {"num": 3,  "title": "Pedidos",                                 "tables": ["PEDIDOS", "PED_ITEMS"]},
-    {"num": 4,  "title": "Solicitudes de gasto",                    "tables": ["SOLIC_GASTOS"]},
-    {"num": 5,  "title": "Órdenes de compra",                       "tables": ["ORDEN_COMPRA", "OC_ITEMS"]},
-    {"num": 6,  "title": "Órdenes de pago",                        "tables": ["ORDEN_PAGO"]},
-    # Adiciones core
-    {"num": 7,  "title": "Retenciones, deducciones y comprobantes", "tables": ["RG_COMP", "CTA_HOJA_DE_RUTA", "RETENCIONES", "DEDUCCIONES"]},
+    # Core (sólo tablas migradas a Paxapos)
+    {"num": 1, "title": "Proveedores",                             "tables": ["PROVEEDORES"]},
+    {"num": 2, "title": "Órdenes de compra",                       "tables": ["ORDEN_COMPRA", "OC_ITEMS"]},
+    {"num": 3, "title": "Órdenes de pago",                         "tables": ["ORDEN_PAGO"]},
+    # Adiciones core (lookups y comprobantes)
+    {"num": 4, "title": "Comprobantes, retenciones y deducciones", "tables": ["REG_COMP", "CTA_COMPROB", "CTA_HOJA_DE_RUTA", "RETENCIONES", "DEDUCCIONES"]},
     # Relacionadas con PROVEEDORES
-    {"num": 8,  "title": "Tablas relacionadas — Proveedores",        "tables": [
+    {"num": 7,  "title": "Tablas relacionadas — Proveedores",        "tables": [
         "ACT_IMP_PROV", "ADJUDICACIONES", "BENEFICIARIOS", "CESIONARIOS",
-        "COTIZA_PROV", "COTIZA_PROV_ITEMS", "CTA_COMPROB", "CTA_CTACTE_MOVS",
+        "COTIZA_PROV", "COTIZA_PROV_ITEMS", "CTA_CTACTE_MOVS",
         "CTA_PROVEEDORES_ALICUOTAS", "CTA_UTE", "CTR_DOCUM_PROV",
         "DATOS_PART_CONS", "DATOS_PART_CONT", "DEUFLO_PROV", "DEVOLUCION",
         "EGRESOS", "EMBARGOS", "HISTO_ESTADOS", "NOMINA_PROV",
@@ -254,34 +177,21 @@ SECTIONS: list[dict[str, Any]] = [
         "REGUL_CAMBIO_OCEA", "REGUL_CORREC_IMPUT", "REGUL_DESAF",
         "TES_DEPOSITOS_GARANTIAS", "VI_SUBRUB_PROV",
     ]},
-    # Relacionadas con JURISDICCIONES
-    {"num": 9,  "title": "Tablas relacionadas — Jurisdicciones",     "tables": [
-        "CALCULO_MODIF", "CUOTAS_JURISDIC", "CTA_TMP_REG_DEVEN_IMP",
-        "DEPENDENCIAS", "DEVENGAMIENTOS", "ESTRUC_PROG",
-        "FORMULARIO1", "FORMULARIO2", "FORMULARIO4",
-        "FORMULARIOC1", "FORMULARIOC2", "FORMULARIOP4",
-        "INGRESOS", "ING_COD_INGRESOS_DET", "METAS_PROG",
-        "MOV_PRES_COMP", "MOV_PRES_REC_DEV", "PER_CONCEPTOS_GASTOS_M",
-        "PER_SELECCION_DET", "PRE_JURIS_RECURSOS",
-        "REGUL_CORREC_RECUR_IMPUT", "REGUL_RECURSOS_EX_IMPUT",
-        "REGUL_RETENCIONES", "SOLIC_GASTOS_ITEMS", "USUARIOS_JURISDICCIONES",
-    ]},
     # Relacionadas con ORDEN_COMPRA / ORDEN_PAGO
-    {"num": 10, "title": "Tablas relacionadas — Órdenes de compra y pago", "tables": [
+    {"num": 8, "title": "Tablas relacionadas — Órdenes de compra y pago", "tables": [
         "CTA_IMPUT_PERSONAL", "MOV_PRES_PAG", "REGUL_CAMBIO",
         "OC_PLAN_ENT", "RECEPCION",
     ]},
-    # Relacionadas con PEDIDOS / DEDUCCIONES
-    {"num": 11, "title": "Tablas relacionadas — Pedidos y deducciones", "tables": [
-        "PED_COTIZACIONES",
+    # Relacionadas con DEDUCCIONES / RETENCIONES
+    {"num": 5, "title": "Tablas relacionadas — Retenciones y deducciones", "tables": [
         "ORDEN_PAGOEA_DEDUC", "ORDEN_PAGO_DEDUC",
         "REGUL_RETENCIONES_IMPUT", "RETENCIONES_REGDED",
     ]},
     # Múltiples relaciones
-    {"num": 12, "title": "Tablas con múltiples relaciones",           "tables": [
+    {"num": 6, "title": "Tablas con múltiples relaciones",           "tables": [
         "MOV_EXTRAPRES_DEV", "MOV_EXTRAPRES_PAG", "MOV_EXTRAPRES_REC", "MOV_PRES_DEV",
         "ORDEN_DEVOL", "ORDEN_PAGOEA", "ORDEN_REINT",
-        "REG_COMP", "REG_DEVEN",
+        "REG_DEVEN",
         "REGUL_CAMBIO_PE_IMPUT", "REGUL_CORREC_EX_IMPUT",
         "REGUL_GASTOS", "REGUL_GASTOS_EX", "REGUL_OPE_DEVOL",
     ]},

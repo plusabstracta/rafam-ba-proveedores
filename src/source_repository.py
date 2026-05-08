@@ -598,13 +598,18 @@ class SourceRepository:
 
         filters = []
 
+        # Cursor `>=` (no `>`): si dos filas comparten timestamp en el borde de
+        # un batch, `>` las pierde silenciosamente. Con `>=` puede haber un re-envio
+        # de la ultima fila procesada, pero el endpoint Paxapos es idempotente
+        # (Pedido.internal_id / Egreso.identificador_pago / Gasto unique key) y
+        # descarta el duplicado. Trade-off correcto para no perder datos.
         id_col = self._safe_column(table, cfg.id_field)
         if id_col is not None and cp.last_id is not None:
-            filters.append(id_col > cp.last_id)
+            filters.append(id_col >= cp.last_id)
 
         ts_col = self._safe_column(table, cfg.ts_field)
         if ts_col is not None and cp.last_ts is not None:
-            filters.append(ts_col > cp.last_ts)
+            filters.append(ts_col >= cp.last_ts)
 
         if (
             cfg.pending_reprocess_days
@@ -615,8 +620,15 @@ class SourceRepository:
             state_col = self._safe_column(table, cfg.pending_state_field)
             if state_col is not None:
                 window_start = datetime.now(timezone.utc) - timedelta(days=cfg.pending_reprocess_days)
+                # Soportar pending_state_value como string o lista/tuple para
+                # cubrir multiples estados a re-evaluar (ej: ('N', 'A')).
+                pending_value = cfg.pending_state_value
+                if isinstance(pending_value, (list, tuple, set)):
+                    state_filter = state_col.in_(list(pending_value))
+                else:
+                    state_filter = state_col == pending_value
                 filters.append(
-                    and_(state_col == cfg.pending_state_value, ts_col > window_start)
+                    and_(state_filter, ts_col >= window_start)
                 )
 
         if extra_filters:

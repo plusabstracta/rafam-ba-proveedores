@@ -32,14 +32,15 @@ a un portal de proveedores basado en **Paxapos** (CakePHP 2) a través de APIs R
 
 ### Entidades sincronizadas (orden de dependencia)
 
-1. `jurisdicciones` → `rubros` + `clasificaciones` — catálogo base, cada jurisdicción agrupa sus propios proveedores
-2. `proveedores` — dependen de jurisdicciones/rubros
-3. `ped_items` → `pedidos` — solicitudes internas
-4. `oc_items` → `ordenes_compra` — requieren proveedor
-5. `solic_gastos` → `gastos` — facturas del proveedor
-6. `orden_pago` → `ordenes_pago` — requieren gastos ya importados
+1. `proveedores` (tabla RAFAM `PROVEEDORES`)
+2. `orden_compra` + `oc_items` (tablas RAFAM `ORDEN_COMPRA`/`OC_ITEMS`) — requieren proveedor
+3. `cta_comprob` (tabla RAFAM `CTA_COMPROB`) — facturas reales del proveedor; resuelve OC vía `REG_COMP`
+4. `orden_pago` (tabla RAFAM `ORDEN_PAGO`) — requieren gasto/factura ya importado; vincula gastos vía `CTA_HOJA_DE_RUTA`
+5. `retenciones` (tabla RAFAM `RETENCIONES`) — vinculadas al pago; tipo resuelto por `DEDUCCIONES.DESCRIPCION`
 
-**Regla:** el orden de ejecución es estricto. Cada entidad depende de las anteriores.
+**Regla:** el orden de ejecución es estricto. Cada entidad depende de las anteriores. El campo `JURISDICCION` no es una entidad: se mapea a `centro_costo_id` vía `_JURISDICCION_CENTRO_COSTO_MAP` en `gateway_mapper.py`.
+
+> Mapeo completo RAFAM ↔ Paxapos: ver [docs/rafam_paxapos_equivalencias.md](../../docs/rafam_paxapos_equivalencias.md) (fuente de verdad).
 
 ---
 
@@ -127,8 +128,7 @@ No agregar aliases ni fallbacks legacy a `DB_*`, `SQLITE_DB_PATH`, `CHECKPOINT_D
 
 - `README.md` explica uso diario y perfiles operativos.
 - `.env.example` es la plantilla única por roles y debe listar solo variables runtime vigentes.
-- `docs/rafam_paxapos_source_of_truth.md` es la fuente canónica de RAFAM real, script Python, contrato Paxapos, mapeos, operación y pendientes verificados.
-- `docs/rafam_der.drawio` se conserva solo como vista gráfica del modelo RAFAM.
+- `docs/rafam_paxapos_equivalencias.md` es la **única fuente de verdad** sobre qué tablas RAFAM se migran y cómo se mapean a Paxapos.
 - `.github/instructions/*.instructions.md` debe reflejar las mismas reglas que los docs para evitar drift de ingeniería.
 - Todo cambio de configuración, contrato Paxapos, orden de entidades, payload o comandos Makefile debe actualizar docs e instrucciones relacionadas en el mismo commit.
 
@@ -151,9 +151,9 @@ Controller: `Plugin/Account/Controller/RafamMigracionesController.php`
 
 Orden interno de procesamiento (hardcodeado en foreach):
 ```
-rubros → clasificaciones → proveedores → pedidos → ordenes_compra → gastos → ordenes_pago
+proveedores → ordenes_compra → gastos → ordenes_pago
 ```
-Se pueden enviar todas las entidades en un solo payload y el endpoint respeta el orden.
+Se pueden enviar todas las entidades en un solo payload y el endpoint respeta el orden. Las retenciones viajan dentro del bloque de la OP correspondiente.
 
 #### Órdenes de Compra (`_importPedido`)
 
@@ -201,15 +201,16 @@ OC (compras_pedidos.id) ◄── account_gastos.pedido_id ── Gasto ◄─�
 #### Cadena de vínculos en RAFAM (fuente)
 
 ```
-OC_ITEMS ──(DELEG_SOLIC, NRO_SOLIC)──► SOLIC_GASTOS ◄── ORDEN_PAGO.NRO_CANCE
+CTA_COMPROB ◄──(REG_COMP)──► ORDEN_COMPRA
+      ▲
+      │ (CTA_HOJA_DE_RUTA: vista desnormalizada)
+      │
+  ORDEN_PAGO ──► RETENCIONES (EJERCICIO + NRO_CANCE = ORDEN_PAGO.EJERCICIO + NRO_OP)
 ```
 
-El Gasto (SOLIC_GASTOS) es el puente entre OC y OP. Tres niveles de resolución:
-1. SG directo: `ORDEN_PAGO.NRO_CANCE -> SOLIC_GASTOS.NRO_SOLIC` con mismo `EJERCICIO` — 92,71% en evidencia 2024+.
-2. CTA_HOJA_DE_RUTA JOIN — vista desnormalizada PE→SG→OC→OP con nombres reales (`OP_NRO`, `SG_DELEG_SOLIC`, `OC_NRO`).
-3. RECO_DEU_COMPRA → OC link_store → gasto_refs — fallback residual; en evidencia 2024+ vino 100% vacío.
-
-> `NRO_CANCE` no es nexo OP↔OC; en esta evidencia sirve como camino OP→SOLIC_GASTOS. Para retenciones se usa `RETENCIONES.EJERCICIO + NRO_CANCE`.
+- **CTA_COMPROB ↔ ORDEN_COMPRA:** vía `REG_COMP`. Permite setear `account_gastos.pedido_id`.
+- **ORDEN_PAGO ↔ CTA_COMPROB:** se lee desde `CTA_HOJA_DE_RUTA` para armar el HABTM `account_egresos_gastos`.
+- **RETENCIONES ↔ ORDEN_PAGO:** match directo por `EJERCICIO + NRO_CANCE`. El tipo de retención se resuelve por substring sobre `DEDUCCIONES.DESCRIPCION`.
 
 #### Colisión de columnas en JOINs
 
@@ -226,12 +227,10 @@ Cada entidad tiene una tabla `link_<entity>` en SQLite con columnas base (`sourc
 | Entidad | Extras | source_key format |
 |---|---|---|
 | `proveedores` | `cuit`, `cod_estado` | `"<COD_PROV>"` |
-| `clasificacion` | — | `json({"jurisdiccion": "..."}`) |
-| `rubro` | — | `json({"jurisdiccion": "..."})` |
-| `pedido` | — | `json({"ejercicio": N, "num_ped": N})` |
 | `orden_compra` | `fech_confirm`, `estado_oc`, `cod_prov`, `importe_tot`, `gasto_refs`, `gasto_linked_refs` | `json({"ejercicio": N, "nro_oc": N, "uni_compra": N})` |
-| `gasto` | `estado_solic`, `importe_tot`, `cod_prov` | `json({"rafam_ref": "SG-ej-deleg-nro"})` |
+| `gasto` | `estado_comprob`, `importe_tot`, `cod_prov` | `json({"ejercicio": N, "nro_reg_comp": N})` |
 | `orden_pago` | `estado_op`, `confirmado`, `fech_confirm`, `importe_total` | `json({"ejercicio": N, "nro_op": N})` |
+| `retencion` | `cod_deduc`, `importe` | `json({"ejercicio": N, "nro_cance": N, "cod_deduc": N})` |
 
 Los extras permiten detectar cambios de estado entre corridas (ej: `estado_oc` guardado vs actual).
 

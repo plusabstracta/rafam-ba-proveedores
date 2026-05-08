@@ -19,6 +19,9 @@ EXPORT ?= csv
 	run-oc_items-migrator run-oc_items-migrator-dry \
 	run-solic_gastos-migrator run-solic_gastos-migrator-dry \
 	run-orden_pago-migrator run-orden_pago-migrator-dry \
+	migrate-proveedores migrate-proveedores-dry \
+	migrate-oc migrate-oc-dry \
+	migrate-op migrate-op-dry migrate-all migrate-all-dry \
 	migrator-spec migrator-lookups \
 	reset-proveedores reset-pedidos reset-ped_items reset-solic_gastos \
 	reset-orden_compra reset-oc_items reset-orden_pago
@@ -48,6 +51,16 @@ help:
 	@echo "  make run-orden_pago-migrator  Migra ordenes_pago"
 	@echo "  make migrator-spec      Consulta spec.json del migrator RAFAM"
 	@echo "  make migrator-lookups   Consulta lookups.json del migrator RAFAM"
+	@echo ""
+	@echo "  --- Migracion RAFAM -> Paxapos (3 scripts oficiales) ---"
+	@echo "  make migrate-proveedores       Migra PROVEEDORES"
+	@echo "  make migrate-proveedores-dry   Idem en dry-run"
+	@echo "  make migrate-oc                Migra ORDEN_COMPRA + OC_ITEMS (sin pagos)"
+	@echo "  make migrate-oc-dry            Idem en dry-run"
+	@echo "  make migrate-op                Migra ORDEN_PAGO + RETENCIONES (con comprobantes)"
+	@echo "  make migrate-op-dry            Idem en dry-run"
+	@echo "  make migrate-all               Pipeline completo: proveedores -> OC -> OP"
+	@echo "  make migrate-all-dry           Pipeline completo en dry-run"
 	@echo "  make reset-proveedores  Resetea checkpoint de proveedores"
 	@echo "  make reset-all          Resetea todos los checkpoints"
 	@echo "  make test               Corre tests"
@@ -128,6 +141,44 @@ run-orden_pago-migrator-dry:
 
 run-orden_pago-migrator:
 	$(PY) main.py run --entity orden_pago --batch-size $(BATCH) $(if $(LIMIT),--limit $(LIMIT),) --export migrator
+
+# ───────────────────────────────────────────────────────────────────────────
+# Migracion RAFAM -> Paxapos (los 3 scripts oficiales)
+#
+# Cada target migra exactamente UN dominio del flujo RAFAM -> Paxapos via
+# POST /:tenant/rafam/migracion/importar.json (RafamMigracionesController).
+# Ver docs/rafam_paxapos_equivalencias.md para el detalle de mapeos.
+# ───────────────────────────────────────────────────────────────────────────
+
+# 1. PROVEEDORES (PROVEEDORES -> account_proveedores)
+migrate-proveedores:
+	$(PY) main.py run --entity proveedores --batch-size $(BATCH) $(if $(LIMIT),--limit $(LIMIT),) --export migrator
+
+migrate-proveedores-dry:
+	$(PY) main.py run --entity proveedores --batch-size $(BATCH) $(if $(LIMIT),--limit $(LIMIT),) --export migrator --dry-run
+
+# 2. ORDENES DE COMPRA (ORDEN_COMPRA + OC_ITEMS -> compras_pedidos + items)
+#    El exporter despacha por --entity oc_items y arma el payload ordenes_compra[]
+#    con items embebidos (un POST por OC). Sin pagos ni gastos.
+migrate-oc:
+	$(PY) main.py run --entity oc_items --batch-size $(BATCH) $(if $(LIMIT),--limit $(LIMIT),) --export migrator
+
+migrate-oc-dry:
+	$(PY) main.py run --entity oc_items --batch-size $(BATCH) $(if $(LIMIT),--limit $(LIMIT),) --export migrator --dry-run
+
+# 3. ORDENES DE PAGO (ORDEN_PAGO + RETENCIONES -> account_egresos + retenciones)
+#    Envia gasto_nro_comprobante (PDV-NRO_COMPROB) por OP. Si Paxapos no encuentra
+#    el gasto, lo crea desde los datos de CTA_COMPROB embebidos en gastos[].
+migrate-op:
+	$(PY) main.py run --entity orden_pago --batch-size $(BATCH) $(if $(LIMIT),--limit $(LIMIT),) --export migrator
+
+migrate-op-dry:
+	$(PY) main.py run --entity orden_pago --batch-size $(BATCH) $(if $(LIMIT),--limit $(LIMIT),) --export migrator --dry-run
+
+# Pipeline completo: respeta orden de FKs (proveedores -> OC -> OP)
+migrate-all: migrate-proveedores migrate-oc migrate-op
+
+migrate-all-dry: migrate-proveedores-dry migrate-oc-dry migrate-op-dry
 
 run-pedidos:
 	$(PY) main.py run --entity pedidos --batch-size $(BATCH) $(if $(LIMIT),--limit $(LIMIT),) --export $(EXPORT)

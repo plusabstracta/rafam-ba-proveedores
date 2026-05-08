@@ -22,7 +22,15 @@ load_dotenv(_PROJECT_ROOT / ".env")
 SCHEMA = "OWNER_RAFAM"
 
 _raw_ejercicio_min = os.getenv("RAFAM_EJERCICIO_MIN", "0").strip()
-_EJERCICIO_MIN = int(_raw_ejercicio_min) if _raw_ejercicio_min else None
+try:
+    _EJERCICIO_MIN = int(_raw_ejercicio_min) if _raw_ejercicio_min else None
+except ValueError:
+    import logging as _logging
+    _logging.getLogger(__name__).warning(
+        "RAFAM_EJERCICIO_MIN invalido: %r — ignorado (sin filtro de ejercicio)",
+        _raw_ejercicio_min,
+    )
+    _EJERCICIO_MIN = None
 _EJERCICIO_MIN = _EJERCICIO_MIN or None
 _EJERCICIO_MIN_ENTITIES = {
     "pedidos",

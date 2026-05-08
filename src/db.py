@@ -2,10 +2,29 @@ import os
 from pathlib import Path
 
 import oracledb
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
 
 _STATE_DIR = Path(__file__).resolve().parent.parent / "state"
+
+
+def _enable_sqlite_wal(engine: Engine) -> None:
+    """Activa WAL + busy_timeout en cada conexion SQLite.
+
+    WAL evita bloquear lecturas mientras se escribe (util si `status` corre
+    mientras hay un `run` en curso) y `busy_timeout` da margen ante locks
+    transitorios sin fallar inmediatamente.
+    """
+
+    @event.listens_for(engine, "connect")
+    def _set_sqlite_pragmas(dbapi_conn, _record):  # pragma: no cover - hook trivial
+        cursor = dbapi_conn.cursor()
+        try:
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA synchronous=NORMAL")
+            cursor.execute("PRAGMA busy_timeout=5000")
+        finally:
+            cursor.close()
 
 
 def create_source_engine() -> Engine:
@@ -20,7 +39,9 @@ def create_source_engine() -> Engine:
     if backend == "sqlite":
         sqlite_path = os.getenv("RAFAM_SOURCE_SQLITE_DB_PATH", str(_STATE_DIR / "dev_rafam.db"))
         Path(sqlite_path).parent.mkdir(parents=True, exist_ok=True)
-        return create_engine(f"sqlite+pysqlite:///{sqlite_path}", future=True)
+        engine = create_engine(f"sqlite+pysqlite:///{sqlite_path}", future=True)
+        _enable_sqlite_wal(engine)
+        return engine
 
     if backend != "oracle":
         raise ValueError(f"RAFAM_SOURCE_BACKEND no soportado: '{backend}'. Usar oracle|sqlite")
@@ -46,4 +67,6 @@ def create_checkpoint_engine() -> Engine:
     """Build SQLAlchemy engine for checkpoint persistence."""
     db_path = os.getenv("LOCAL_STATE_DB_PATH", str(_STATE_DIR / "checkpoint.db"))
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-    return create_engine(f"sqlite+pysqlite:///{db_path}", future=True)
+    engine = create_engine(f"sqlite+pysqlite:///{db_path}", future=True)
+    _enable_sqlite_wal(engine)
+    return engine

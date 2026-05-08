@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Sequence, Union
 
 
 @dataclass
@@ -30,7 +30,8 @@ class EntityConfig:
     ts_field: Optional[str] = None          # timestamp cursor column
     full_load: bool = False                 # always full scan (small/static tables)
     pending_state_field: Optional[str] = None
-    pending_state_value: Optional[str] = None
+    # Acepta string (legacy) o sequence (ej: ('N','A')) para reprocesar varios estados.
+    pending_state_value: Optional[Union[str, Sequence[str]]] = None
     pending_reprocess_days: Optional[int] = None
     ejercicio_min: Optional[int] = None         # optional filter: EJERCICIO >= value
 

@@ -550,10 +550,19 @@ class MigratorExporter(BaseExporter):
             return self._write_batch_oc_items(columns, rows)
 
         if entity == "orden_compra":
-            return self._write_batch_orden_compra(columns, rows)
+            logger.warning(
+                "Migrator [orden_compra]: entidad deshabilitada en migrator — las OCs se migran via 'oc_items' "
+                "(que envia header + items embebidos). El header-only generaba OCs vacias en Paxapos."
+            )
+            return
 
         if entity == "solic_gastos":
-            return self._write_batch_solic_gastos(columns, rows)
+            logger.warning(
+                "Migrator [solic_gastos]: entidad deshabilitada en migrator — los gastos NO se migran desde RAFAM. "
+                "En Paxapos los crean los usuarios al subir la factura del proveedor; el endpoint de OP los auto-crea "
+                "si todavia no existen al momento de pagar (via gasto_nro_comprobante PDV-NRO_COMPROB)."
+            )
+            return
 
         if entity == "orden_pago":
             return self._write_batch_orden_pago(columns, rows)
@@ -565,7 +574,10 @@ class MigratorExporter(BaseExporter):
             )
             return
 
-        raise ValueError("Modo migrator soporta por ahora: proveedores, ped_items, oc_items, orden_compra, solic_gastos, orden_pago")
+        raise ValueError(
+            "Modo migrator soporta solo 3 entidades oficiales: proveedores, oc_items, orden_pago. "
+            f"Recibido: {entity!r}"
+        )
 
     def _write_batch_proveedores(self, columns: list[str], rows: list[tuple]) -> None:
         proveedores = []
@@ -1532,7 +1544,10 @@ class MigratorExporter(BaseExporter):
                 )
             }
 
-        dedup_key = (remote_prov_id, punto_de_venta, factura_nro)
+        # tipo_factura_id forma parte del dedup_key porque un mismo proveedor puede
+        # tener Factura A y Nota de Credito A con identico PDV+factura_nro (RAFAM
+        # CC_TIPO_COMPROB FAA vs NCA), y son comprobantes distintos en Paxapos.
+        dedup_key = (remote_prov_id, punto_de_venta, factura_nro, tipo_factura_id)
         return {"external_id": external_id, "Gasto": gasto_data}, dedup_key
 
     def _write_batch_orden_pago(self, columns: list[str], rows: list[tuple]) -> None:
@@ -1743,10 +1758,6 @@ class MigratorExporter(BaseExporter):
 
         if not ordenes_pago:
             logger.info("Migrator [orden_pago]: lote vacío luego del mapeo")
-            if grouped and skipped_no_gasto:
-                raise RuntimeError(
-                    "orden_pago sin registros enviables: todas las OP del lote carecen de CC_NRO en CTA_HOJA_DE_RUTA"
-                )
             return
 
         # Construir gastos[] con datos completos desde CTA_COMPROB para que
@@ -1796,11 +1807,10 @@ class MigratorExporter(BaseExporter):
 
         self._persist_links("orden_pago", parsed, raw_by_source_key)
         self._raise_on_migrator_errors(parsed)
-        if skipped_no_gasto:
-            raise RuntimeError(
-                f"orden_pago: {skipped_no_gasto} OPs del lote no tienen CC_NRO en CTA_HOJA_DE_RUTA; "
-                "las OP enviables se procesaron, pero el checkpoint no avanza para reintentar las omitidas"
-            )
+        # Nota: si hubo OPs omitidas por falta de CC_NRO, se registran como warning
+        # arriba pero NO se levanta excepción: las OPs enviables se procesaron OK,
+        # y los reintentos se manejan via pending_state_field=N + reprocess_days=30
+        # configurado en ENTITY_CONFIGS['orden_pago'].
         logger.info(
             "Migrator OK [orden_pago]: %d ok, %d error, ops=%d, omitidas=%d, dry_run=%s",
             ok_count, error_count, len(ordenes_pago), skipped_no_gasto, self._dry_run,
@@ -1943,6 +1953,31 @@ class MigratorExporter(BaseExporter):
             if by_name and self._to_int(by_name.get("id")) is not None:
                 return int(by_name.get("id"))
         return self._default_tipo_pago_id
+
+    def _map_retencion(self, raw: dict, ejercicio: int, nro_op: int) -> dict | None:
+        """Mapea una retencion RAFAM cruda (claves RET_*) al formato Paxapos.
+
+        Wrapper conveniente sobre `_map_retencion_dict`: traduce los nombres de
+        columna RAFAM (RET_COD_RET / RET_IMPORTE / RET_DESCRIPCION) al dict
+        canonico esperado y agrega `tipo` (alias normalizado: ganancias/iibb/
+        suss/iva) al payload resultante.
+        """
+        cod_ret = raw.get("RET_COD_RET") if raw.get("RET_COD_RET") is not None else raw.get("COD_RET")
+        importe = raw.get("RET_IMPORTE") if raw.get("RET_IMPORTE") is not None else raw.get("IMPORTE")
+        descripcion = raw.get("RET_DESCRIPCION") if raw.get("RET_DESCRIPCION") is not None else raw.get("DESCRIPCION")
+
+        if cod_ret is None or importe is None:
+            return None
+
+        ret_dict = {"cod_ret": cod_ret, "importe": importe, "descripcion": descripcion or ""}
+        result = self._map_retencion_dict(ret_dict, ejercicio, nro_op)
+        if result is None:
+            return None
+
+        alias = self._retencion_alias(descripcion or str(cod_ret))
+        if alias:
+            result["tipo"] = alias
+        return result
 
     def _map_retencion_dict(self, ret: dict, ejercicio: int, nro_op: int) -> dict | None:
         """Mapea una retencion (dict con cod_ret/importe/descripcion) al formato Paxapos.

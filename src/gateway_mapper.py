@@ -59,7 +59,7 @@ _UM: dict[str, int] = {
     "HORAS": 6,
     "DIA": 7,
 }
-_UM_DEFAULT = 5 # Unidad
+_UM_DEFAULT = 1  # Unidad (id 1 en compras_unidad_de_medidas)
 
 # Mapeo RAFAM CTA_COMPROB.TIPO → nombre de tipo_factura en Paxapos.
 # Se usa para buscar dinámicamente en el lookup por name (normalizado).

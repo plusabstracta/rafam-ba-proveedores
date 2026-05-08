@@ -1,52 +1,41 @@
 ---
-description: "Use when implementing mappers, exporters, payload construction, entity linking, docs, env templates, or any code that sends data TO Paxapos. Covers the full RAFAM lifecycle, the Paxapos data model, API contract, authentication, validation rules, upsert behavior, env contract, and field-level mapping for every entity."
-applyTo: "src/exporter.py,src/gateway_mapper.py,src/entity_link_store.py,README.md,.env.example,docs/rafam_paxapos_source_of_truth.md,tests/test_migrator_mapping.py"
+description: "Use when implementing mappers, exporters, payload construction, entity linking, docs, env templates, or any code that sends data TO Paxapos. Covers el flujo RAFAM real, el modelo de datos Paxapos, contrato API, autenticación, validaciones, upsert, contrato de env y mapeo campo a campo de cada entidad migrada."
+applyTo: "src/exporter.py,src/gateway_mapper.py,src/entity_link_store.py,README.md,.env.example,docs/rafam_paxapos_equivalencias.md,tests/test_migrator_mapping.py"
 ---
 
 # Contrato Paxapos + Flujo RAFAM — Referencia Completa
 
-## 1. Ciclo de vida de una compra en RAFAM
+> **Fuente de verdad de qué tablas se migran:** [docs/rafam_paxapos_equivalencias.md](../../docs/rafam_paxapos_equivalencias.md).
+> Este documento profundiza en contrato HTTP, schema Paxapos y mapeo de payloads de las **6 tablas migradas**.
+
+## 1. Ciclo de vida real (sólo tablas migradas)
 
 ### 1.1 Flujo lineal
 
 ```
-JURISDICCIONES → PEDIDOS → PED_ITEMS
-                    ↓
-              SOLIC_GASTOS ← PROVEEDORES
-                    ↓              ↓
-               OC_ITEMS → ORDEN_COMPRA
-                    ↓
-               ORDEN_PAGO
+PROVEEDORES ──► ORDEN_COMPRA ──► OC_ITEMS
+                     │
+                     ▼
+              CTA_COMPROB (factura del proveedor)
+                     │
+                     ▼
+              ORDEN_PAGO ──► RETENCIONES
 ```
 
 ### 1.2 Conexiones FK en el flujo
 
 | Paso | Tabla origen | Tabla destino | FK en origen | PK referenciada en destino | Qué representa |
 |------|-------------|---------------|--------------|---------------------------|----------------|
-| 1 | PEDIDOS | JURISDICCIONES | `JURISDICCION` | `JURISDICCION` | Jurisdicción que emite el pedido |
-| 2 | PED_ITEMS | PEDIDOS | `EJERCICIO` + `NUM_PED` | `EJERCICIO` + `NUM_PED` | Líneas del pedido |
-| 3 | SOLIC_GASTOS | PEDIDOS | `EJERCICIO` + `NRO_PED` | `EJERCICIO` + `NUM_PED` | Solicitud que formaliza el pedido *(NRO_PED → NUM_PED, nombres distintos)* |
-| 4 | SOLIC_GASTOS | JURISDICCIONES | `JURISDICCION` | `JURISDICCION` | Jurisdicción de la solicitud |
-| 5 | SOLIC_GASTOS | PROVEEDORES | `OP_COD_PROV` | `COD_PROV` | Proveedor asociado a la solicitud |
-| 6 | ORDEN_COMPRA | PROVEEDORES | `COD_PROV` | `COD_PROV` | Proveedor al que se le compra |
-| 7 | OC_ITEMS | ORDEN_COMPRA | `EJERCICIO` + `UNI_COMPRA` + `NRO_OC` | `EJERCICIO` + `UNI_COMPRA` + `NRO_OC` | Líneas de la OC |
-| 8 | OC_ITEMS | SOLIC_GASTOS | `EJERCICIO` + `DELEG_SOLIC` + `NRO_SOLIC` | `EJERCICIO` + `DELEG_SOLIC` + `NRO_SOLIC` | Vincula cada ítem de OC con su solicitud de gasto |
-| 9 | OC_ITEMS | PROVEEDORES | `COD_PROV` | `COD_PROV` | Proveedor a nivel ítem (desnormalizado) |
-| 10 | ORDEN_PAGO | SOLIC_GASTOS | `EJERCICIO` + `SG_DELEG_SOLIC` + `SG_NRO_SOLIC` | `EJERCICIO` + `DELEG_SOLIC` + `NRO_SOLIC` | Solicitud que origina el pago *(prefijo SG_ en los nombres)* |
-| 11 | ORDEN_PAGO | ORDEN_COMPRA | `RECO_DEU_COMPRA_EJER` + `RECO_DEU_COMPRA` | `EJERCICIO` + `NRO_OC` | OC que se está pagando *(falta confirmar UNI_COMPRA)* |
-| 12 | ORDEN_PAGO | PROVEEDORES | `COD_PROV` | `COD_PROV` | Proveedor que cobra |
-| 13 | ORDEN_PAGO | JURISDICCIONES | `JURISDICCION` | `JURISDICCION` | Jurisdicción que paga |
+| 1 | ORDEN_COMPRA | PROVEEDORES | `COD_PROV` | `COD_PROV` | Proveedor al que se le compra |
+| 2 | OC_ITEMS | ORDEN_COMPRA | `EJERCICIO` + `UNI_COMPRA` + `NRO_OC` | `EJERCICIO` + `UNI_COMPRA` + `NRO_OC` | Líneas de la OC |
+| 3 | CTA_COMPROB | PROVEEDORES | `COD_PROV` | `COD_PROV` | Factura del proveedor |
+| 4 | CTA_COMPROB → ORDEN_COMPRA | (vía `REG_COMP`) | `EJERCICIO + NRO_REG_COMP` | `EJERCICIO + UNI_COMPRA + NRO_OC` | Vincula factura con la OC originante |
+| 5 | ORDEN_PAGO | PROVEEDORES | `COD_PROV` | `COD_PROV` | Proveedor que cobra |
+| 6 | ORDEN_PAGO ↔ CTA_COMPROB | (vía `CTA_HOJA_DE_RUTA`) | `EJERCICIO + NRO_OP` | `EJERCICIO + NRO_REG_COMP` | Pago vinculado a una o varias facturas |
+| 7 | RETENCIONES | ORDEN_PAGO | `EJERCICIO` + `NRO_CANCE` | `EJERCICIO` + `NRO_OP` | Retención asociada al pago |
+| 8 | RETENCIONES | DEDUCCIONES | `COD_DEDUC` | `COD_DEDUC` | Catálogo del tipo de retención (lookup, no se migra) |
 
-### 1.3 Etapas del ciclo
-
-| Etapa | Tabla RAFAM | PK | Qué pasa |
-|-------|------------|-----|----------|
-| 1. Pedido | `PEDIDOS` | `EJERCICIO` + `NUM_PED` | Una jurisdicción genera un pedido interno con sus ítems (`PED_ITEMS`) |
-| 2. Solicitud de gasto | `SOLIC_GASTOS` | `EJERCICIO` + `DELEG_SOLIC` + `NRO_SOLIC` | Se formaliza el pedido como solicitud presupuestaria; se asigna proveedor |
-| 3. Orden de compra | `ORDEN_COMPRA` | `EJERCICIO` + `UNI_COMPRA` + `NRO_OC` | Se emite la OC al proveedor; sus ítems (`OC_ITEMS`) referencian la solicitud de gasto |
-| 4. Orden de pago | `ORDEN_PAGO` | `EJERCICIO` + `NRO_OP` | Se paga al proveedor; referencia tanto la solicitud de gasto como la OC |
-
-> `EJERCICIO` (año fiscal) es el hilo conductor que atraviesa **todas** las tablas del flujo.
+> `EJERCICIO` (año fiscal) es el hilo conductor que atraviesa todas las tablas. `JURISDICCION` es **un campo** en cabeceras (no una tabla migrada): se usa para resolver `centro_costo_id` en Paxapos.
 
 ---
 
@@ -79,18 +68,17 @@ OC (compras_pedidos.id) ◄── account_gastos.pedido_id ── Gasto ◄─�
 ### 2.2 Cadena de vínculos en RAFAM (fuente)
 
 ```
-OC_ITEMS ──(DELEG_SOLIC, NRO_SOLIC)──► SOLIC_GASTOS ◄── ORDEN_PAGO.NRO_CANCE
+CTA_COMPROB ◄──(REG_COMP)──► ORDEN_COMPRA
+      ▲
+      │ (CTA_HOJA_DE_RUTA: vista desnormalizada)
+      │
+  ORDEN_PAGO ──► RETENCIONES (EJERCICIO + NRO_CANCE = ORDEN_PAGO.EJERCICIO + NRO_OP)
 ```
 
-El Gasto (`SOLIC_GASTOS`) es el puente entre OC y OP. La FK de `OC_ITEMS` a `SOLIC_GASTOS` permite resolver qué gastos pertenecen a cada OC.
-
-**Resolución de gasto_refs para OP** — tres niveles de fallback:
-
-1. **SG directo:** `ORDEN_PAGO.NRO_CANCE -> SOLIC_GASTOS.NRO_SOLIC` con mismo `EJERCICIO` cubre 92,71% en la evidencia 2024+.
-2. **CTA_HOJA_DE_RUTA JOIN:** vista desnormalizada PE→SG→OC→OP. Usar columnas reales (`OP_NRO`, `SG_DELEG_SOLIC`, `OC_NRO`); SQLite dev debe preservar el CSV real si existe.
-3. **RECO_DEU_COMPRA → OC link_store:** fallback residual. En la evidencia 2024+ vino 100% vacío; no usar como camino principal.
-
-> `NRO_CANCE` no es nexo OP↔OC; en esta evidencia sirve como camino OP→SOLIC_GASTOS. Para retenciones se usa `RETENCIONES.EJERCICIO + NRO_CANCE`.
+- **CTA_COMPROB ↔ ORDEN_COMPRA:** se resuelve por `REG_COMP` (tabla puente). Permite setear `account_gastos.pedido_id` al migrar la factura.
+- **ORDEN_PAGO ↔ CTA_COMPROB:** se lee desde la vista `CTA_HOJA_DE_RUTA` para armar el HABTM `account_egresos_gastos` al crear el egreso en Paxapos.
+- **RETENCIONES ↔ ORDEN_PAGO:** match directo por `EJERCICIO + NRO_CANCE`.
+- **DEDUCCIONES:** sólo lookup; resuelve `tipo_impuesto_id` de la retención por substring en `DESCRIPCION` (IVA→102, GANANCIAS→103, IIBB→104, SUSS→105, MEDICOS→110).
 
 ---
 
@@ -154,17 +142,16 @@ El `beforeFilter` del controller habilita ambos: `allowAgentApiAccess` + `Auth->
     "send_oc_mail": false,
     "strict_mail": false
   },
-  "rubros": [],
-  "clasificaciones": [],
   "proveedores": [],
-  "pedidos": [],
   "ordenes_compra": [],
   "gastos": [],
   "ordenes_pago": []
 }
 ```
 
-**Orden interno de procesamiento** (hardcodeado): `rubros → clasificaciones → proveedores → pedidos → ordenes_compra → gastos → ordenes_pago`. Se pueden enviar todas en un solo payload.
+**Orden interno de procesamiento** (hardcodeado): `proveedores → ordenes_compra → gastos → ordenes_pago`. Se pueden enviar todas en un solo payload.
+
+> Las retenciones viajan dentro del bloque de la OP correspondiente (ver §12.5).
 
 ---
 
@@ -205,9 +192,9 @@ El `beforeFilter` del controller habilita ambos: `allowAgentApiAccess` + `Auth->
 - `iva_condicion_id`: inList [1-6]
 - Requiere `name` o `razon_social` (validación del controller)
 
-### 5.2 Pedidos y OCs (`compras_pedidos`)
+### 5.2 Órdenes de Compra (`compras_pedidos`)
 
-Pedidos y Órdenes de Compra comparten la misma tabla, diferenciados por `tipo`.
+La tabla `compras_pedidos` se usa con `tipo='orden_compra'`. Otros valores de `tipo` no se sincronizan desde RAFAM.
 
 | Columna | Tipo | Nullable | Notas |
 |---------|------|----------|-------|
@@ -240,7 +227,7 @@ Pedidos y Órdenes de Compra comparten la misma tabla, diferenciados por `tipo`.
 | `es_ajuste_precio` | tinyint(1) | — | default 0 |
 | `proveedor_id` | int | SÍ | hereda de cabecera |
 | `pedido_estado_id` | int | — | default 1. 1=Pendiente, 2=Completado, 3=Pedido |
-| `unidad_de_medida_id` | int | NO | Decision del tenant: enviar fijo `5`, que en Paxapos representa `Unidad` para todos los items OC |
+| `unidad_de_medida_id` | int | NO | Default `1` (Unidad). Antes había un bug que enviaba `5` (Paquete); corregido en `gateway_mapper.py`. |
 | `cantidad` | decimal(10,2) | NO | Obligatorio |
 | `observacion` | text | SÍ | |
 | `recibida_unidad_de_medida_id` | int | SÍ | |
@@ -442,7 +429,7 @@ Proveedor↔Clasificación: NO existe relación.
 | Proveedores | `cuit` (o `name` si no hay cuit) | **Actualiza** datos | `update` |
 | Rubros | `name` (case-sensitive, trim) | **Actualiza** | `update` |
 | Clasificaciones | `name + parent_id` | **Actualiza** | `update` |
-| Pedidos/OCs | `internal_id` | **Actualiza** cabecera, **reemplaza** todos los items (delete+insert) | `update` |
+| OCs | `internal_id` | **Actualiza** cabecera, **reemplaza** todos los items (delete+insert) | `update` |
 | Gastos | `proveedor_id + factura_nro` (+ `punto_de_venta`) | **Actualiza** | `update` |
 | Órdenes de pago | `identificador_pago` | **NO actualiza** — devuelve existente | `skip_existing` |
 
@@ -481,11 +468,11 @@ Proveedor↔Clasificación: NO existe relación.
 {
   "success": false,
   "errors": [
-    { "section": "pedidos", "index": 0, "external_id": {...}, "message": "Pedido sin items" }
+    { "section": "ordenes_compra", "index": 0, "external_id": {...}, "message": "OC sin items" }
   ],
   "results": {
-    "pedidos": [
-      { "success": false, "external_id": {...}, "message": "Pedido sin items" }
+    "ordenes_compra": [
+      { "success": false, "external_id": {...}, "message": "OC sin items" }
     ]
   }
 }
@@ -533,15 +520,14 @@ Filtrable con `?only=proveedores,tipos_factura` (CSV). Gastos paginados con `?pa
 ## 11. Orden de migración (dependencias estrictas)
 
 ```
-1. jurisdicciones → escribe `rubro` + `clasificacion` en entity_link_store
-2. proveedores    → escribe `proveedores` en entity_link_store
-3. ped_items      → lee `rubro` + escribe `pedido` (solicitudes de bienes)
-4. oc_items       → lee `rubro` + `proveedores` + escribe `orden_compra`
-5. solic_gastos   → lee `clasificacion` + `proveedores` + escribe `gasto`
-6. orden_pago     → lee `gasto` + escribe `orden_pago`
+1. proveedores  → escribe `proveedores` en entity_link_store
+2. orden_compra → lee `proveedores` + escribe `orden_compra` (cabecera + OC_ITEMS)
+3. cta_comprob  → lee `proveedores` + (vía REG_COMP) `orden_compra` + escribe `gasto`
+4. orden_pago   → lee `gasto` + escribe `orden_pago` (con HABTM gastos vía CTA_HOJA_DE_RUTA)
+5. retenciones  → lee `orden_pago` + escribe `retenciones`
 ```
 
-> El orden es **estricto**. Cada entidad depende de que las anteriores ya hayan sido importadas y sus IDs remotos guardados en el entity_link_store.
+> El orden es **estricto**. Cada entidad depende de que las anteriores ya hayan sido importadas y sus IDs remotos guardados en el entity_link_store. El campo `JURISDICCION` se resuelve a `centro_costo_id` por mapeo hardcodeado en `gateway_mapper.py`.
 
 ---
 
@@ -568,44 +554,13 @@ Filtrable con `?only=proveedores,tipos_factura` (CSV). Gastos paginados con `?pa
 }
 ```
 
-### 12.2 Jurisdicciones → Rubros + Clasificaciones
+### 12.2 Centros de Costo (resolución del campo `JURISDICCION`)
 
-```json
-{
-  "rubros": [{
-    "external_id": { "jurisdiccion": "JURISDICCION" },
-    "Rubro": { "name": "DENOMINACION o JURISDICCION" }
-  }],
-  "clasificaciones": [{
-    "external_id": { "jurisdiccion": "JURISDICCION" },
-    "Clasificacion": { "name": "DENOMINACION o JURISDICCION", "parent_id": null }
-  }]
-}
-```
+No se envía como entidad separada. El campo `JURISDICCION` (en cabeceras de OC, OP, CTA_COMPROB) se resuelve a `centro_costo_id` mediante `_JURISDICCION_CENTRO_COSTO_MAP` en `src/gateway_mapper.py` (default `8 = "Otro"`).
 
-### 12.3 Pedidos
+El mapping debe coincidir con los IDs reales de `centros_costo` del tenant destino.
 
-```json
-{
-  "external_id": { "ejercicio": int, "num_ped": int },
-  "Pedido": {
-    "internal_id": "rafam-ped-{ejercicio}-{num_ped}",
-    "tipo": "solicitud",
-    "observacion": "Migrado RAFAM PED {ejercicio}-{num_ped}",
-    "monto_presupuestado": float(PED_COSTO_TOT)
-  },
-  "items": [{
-    "mercaderia_external_ref": { "source": "rafam", "entity": "ped_items", "ejercicio": ..., "num_ped": ..., "orden": ... },
-    "cantidad": float(CANTIDAD),
-    "precio": float(COSTO_UNI),
-    "unidad_de_medida_id": 5,
-    "descripcion": "DESCRIP_BIE (max 255)",
-    "observacion": "DESCRIP_BIE"
-  }]
-}
-```
-
-### 12.4 Órdenes de Compra
+### 12.3 Órdenes de Compra
 
 ```json
 {
@@ -621,31 +576,32 @@ Filtrable con `?only=proveedores,tipos_factura` (CSV). Gastos paginados con `?pa
     "cantidad": float(CANTIDAD),
     "precio": float(IMP_UNITARIO),
     "recibida_cantidad": float(CANT_RECIB),
-    "unidad_de_medida_id": 5
+    "unidad_de_medida_id": 1
   }]
 }
 ```
 
-### 12.5 Gastos (Solicitudes de Gasto)
+### 12.4 Gastos (facturas reales del proveedor — `CTA_COMPROB`)
 
 ```json
 {
-  "external_id": { "rafam_ref": "SG-{ejercicio}-{deleg_solic}-{nro_solic}" },
+  "external_id": { "ejercicio": int, "nro_reg_comp": int },
   "Gasto": {
     "fecha": "YYYY-MM-DD",
     "importe_total": float(IMPORTE_TOT),
-    "importe_neto": float(IMPORTE_TOT),
-    "punto_de_venta": "RAFAM",
-    "tipo_factura_id": int(lookup CTA_COMPROB.TIPO, fallback TIPO_DOC),
-    "factura_nro": "CTA_COMPROB.NRO_COMPROB",
-    "clasificacion_id": int(lookup JURISDICCION en entity_link_store),
-    "fecha_vencimiento": "CTA_COMPROB.FECH_VENCIM o FECH_NECESIDAD o FECH_ENTREGA",
+    "importe_neto": float(IMPORTE_NETO),
+    "punto_de_venta": "PV de CTA_COMPROB.NRO_COMPROB",
+    "factura_nro": "NRO de CTA_COMPROB.NRO_COMPROB",
+    "tipo_factura_id": int(lookup CTA_COMPROB.TIPO vía RAFAM_TIPO_COMPROB_TO_PAXAPOS_NAME),
+    "centro_costo_id": int(resolve_centro_costo_id(JURISDICCION)),
+    "fecha_vencimiento": "CTA_COMPROB.FECH_VENCIM",
     "observacion": "opcional"
-  }
+  },
+  "pedido_id": int(OC resuelta vía REG_COMP, opcional)
 }
 ```
 
-### 12.6 Órdenes de Pago
+### 12.5 Órdenes de Pago
 
 ```json
 {
@@ -731,9 +687,7 @@ El seed base tiene ~33 tipos, pero cada tenant puede tener tipos adicionales o d
 
 ### 14.11 `internal_id` auto-generado es determinístico
 
-Si no se envía `Pedido.internal_id` pero sí `external_id` con los campos esperados, el controller genera:
-- Solicitudes: `rafam-ped-{ejercicio}-{num_ped}`
-- OCs: `rafam-oc-{ejercicio}-{uni_compra}-{nro_oc}`
+Si no se envía `Pedido.internal_id` pero sí `external_id` con los campos esperados, el controller genera el `internal_id` para OCs como `rafam-oc-{ejercicio}-{uni_compra}-{nro_oc}`.
 
 Si se quiere control total del upsert, enviar `internal_id` propio. Si no, dejar que lo genere pero asegurar que `external_id` tenga los campos necesarios.
 
@@ -751,4 +705,4 @@ Si se envían 100 proveedores y el #50 falla, los primeros 49 ya están grabados
 
 ### 14.15 Orden de importación es crítico — mismo request o requests separados
 
-El orden interno de procesamiento es: `rubros → clasificaciones → proveedores → pedidos → ordenes_compra → gastos → ordenes_pago`. Si se envía todo en un solo request, el controller respeta este orden automáticamente. Si se hacen requests separados, **respetar la secuencia estrictamente** para que las FKs se resuelvan.
+El orden interno de procesamiento es: `proveedores → ordenes_compra → gastos → ordenes_pago`. Si se envía todo en un solo request, el controller respeta este orden automáticamente. Si se hacen requests separados, **respetar la secuencia estrictamente** para que las FKs se resuelvan.
