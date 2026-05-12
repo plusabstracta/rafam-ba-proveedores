@@ -45,6 +45,17 @@ from dotenv import load_dotenv
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_OUT_DIR = REPO_ROOT / "output" / "rafam_context"
 
+# Inicializar Oracle Instant Client a nivel de módulo (ANTES de cualquier intento de conexión)
+load_dotenv(REPO_ROOT / ".env")
+try:
+    lib_dir = os.getenv("ORACLE_CLIENT_LIB_DIR") or None
+    oracledb.init_oracle_client(lib_dir=lib_dir)
+    print(f"[thick mode] Oracle Instant Client habilitado desde: {lib_dir or 'LD_LIBRARY_PATH'}", file=sys.stderr)
+except Exception as e:
+    if "already been initialized" not in str(e):
+        print(f"[thin mode] No se pudo inicializar Oracle Instant Client: {e}", file=sys.stderr)
+        print("[aviso] Si la BD es Oracle < 12.1, instala Oracle Instant Client.", file=sys.stderr)
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -77,6 +88,7 @@ def connect() -> oracledb.Connection:
     password = os.getenv("RAFAM_SOURCE_PASSWORD")
     if not all([host, service, user, password]):
         sys.exit("ERROR: faltan RAFAM_SOURCE_* en .env")
+    
     dsn = oracledb.makedsn(host, port, service_name=service)
     print(f"[conn] {user}@{host}:{port}/{service}")
     return oracledb.connect(user=user, password=password, dsn=dsn)

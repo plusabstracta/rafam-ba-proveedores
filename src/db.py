@@ -55,9 +55,20 @@ def create_source_engine() -> Engine:
     if not user or not password:
         raise ValueError("Faltan RAFAM_SOURCE_USER/RAFAM_SOURCE_PASSWORD para Oracle")
 
-    # Thick mode requerido para Oracle < 12.2. Mirrors explore_schema.py.
-    oracle_client_dir = os.getenv("ORACLE_CLIENT_DIR")
-    oracledb.init_oracle_client(lib_dir=oracle_client_dir or None)
+    # Thick mode requerido para Oracle < 12.2 (python-oracledb thin mode no soporta Oracle antiguo).
+    # Lee ORACLE_CLIENT_LIB_DIR del .env o usa LD_LIBRARY_PATH si no está seteada.
+    try:
+        oracle_client_dir = os.getenv("ORACLE_CLIENT_LIB_DIR") or os.getenv("ORACLE_CLIENT_DIR")
+        oracledb.init_oracle_client(lib_dir=oracle_client_dir or None)
+        # Solo logueamos si es la primera vez (init_oracle_client falla si se llama 2 veces)
+        import sys
+        print(f"[thick mode] Oracle Instant Client habilitado desde: {oracle_client_dir or 'LD_LIBRARY_PATH'}", file=sys.stderr)
+    except Exception as e:
+        # Ya se inicializó antes (normal en múltiples llamadas) o no está instalado el cliente
+        import sys
+        if "already been initialized" not in str(e):
+            print(f"[thin mode] No se pudo inicializar Oracle Instant Client: {e}", file=sys.stderr)
+            print("[aviso] Si la BD es Oracle < 12.1, instala Oracle Instant Client.", file=sys.stderr)
 
     url = f"oracle+oracledb://{user}:{password}@{host}:{port}/?service_name={service}"
     return create_engine(url, future=True)

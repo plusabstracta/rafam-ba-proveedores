@@ -1595,9 +1595,18 @@ def create_connection(args):
 
     import oracledb
 
-    oracle_client_dir = env("ORACLE_CLIENT_DIR", default="")
-    if oracle_client_dir:
-        oracledb.init_oracle_client(lib_dir=oracle_client_dir)
+    # Thick mode requerido para Oracle < 12.2
+    try:
+        oracle_client_dir = env("ORACLE_CLIENT_LIB_DIR", "ORACLE_CLIENT_DIR", default="")
+        if oracle_client_dir:
+            oracledb.init_oracle_client(lib_dir=oracle_client_dir)
+            print(f"[thick mode] Oracle Instant Client habilitado desde: {oracle_client_dir}")
+        else:
+            oracledb.init_oracle_client()
+            print("[thick mode] Oracle Instant Client habilitado desde LD_LIBRARY_PATH")
+    except Exception as e:
+        if "already been initialized" not in str(e):
+            print(f"[thin mode] No se pudo inicializar Oracle Instant Client: {e}")
     host = env("RAFAM_SOURCE_HOST", "DB_HOST", default="10.10.91.241")
     port = int(env("RAFAM_SOURCE_PORT", "DB_PORT", default="1521"))
     service = env("RAFAM_SOURCE_SERVICE", "DB_SERVICE", default="BDRAFAM")

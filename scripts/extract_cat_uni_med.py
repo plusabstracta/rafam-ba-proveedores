@@ -25,9 +25,15 @@ def main():
         print("ERROR: Configurar RAFAM_SOURCE_USER y RAFAM_SOURCE_PASSWORD en .env")
         sys.exit(1)
 
-    # Thick mode requerido para Oracle < 12.2
-    oracle_client_dir = os.getenv("ORACLE_CLIENT_DIR")
-    oracledb.init_oracle_client(lib_dir=oracle_client_dir or None)
+    # Thick mode requerido para Oracle < 12.2 (python-oracledb thin mode no soporta Oracle antiguo)
+    try:
+        oracle_client_dir = os.getenv("ORACLE_CLIENT_LIB_DIR") or os.getenv("ORACLE_CLIENT_DIR")
+        oracledb.init_oracle_client(lib_dir=oracle_client_dir or None)
+        print(f"[thick mode] Oracle Instant Client habilitado desde: {oracle_client_dir or 'LD_LIBRARY_PATH'}")
+    except Exception as e:
+        if "already been initialized" not in str(e):
+            print(f"[thin mode] No se pudo inicializar Oracle Instant Client: {e}")
+            print("[aviso] Si la BD es Oracle < 12.1, instala Oracle Instant Client.")
 
     dsn = oracledb.makedsn(DB_HOST, DB_PORT, service_name=DB_SERVICE)
     conn = oracledb.connect(user=DB_USER, password=DB_PASSWORD, dsn=dsn)
