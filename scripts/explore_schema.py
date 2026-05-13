@@ -28,107 +28,36 @@ DB_USER     = os.getenv("RAFAM_SOURCE_USER")
 DB_PASSWORD = os.getenv("RAFAM_SOURCE_PASSWORD")
 SCHEMA      = "OWNER_RAFAM"
 
-# Tablas de interés (vacío = todas las del schema)
+# Tablas RAFAM realmente necesarias para alimentar el cron RAFAM -> Paxapos.
+# Justificación: Paxapos solo recibe centros_costo, proveedores, ordenes_compra,
+# ordenes_pago (con retenciones inline) y gastos auto-creados. Todo lo demás
+# (asientos, afectaciones, motivos de baja, cotizaciones, regulaciones,
+# devengamientos, etc.) es estado interno RAFAM que se resuelve filtrando OC/OP
+# confirmadas y NO se envía al endpoint /rafam/migracion/importar.
 TARGET_TABLES: list[str] = [
-    # Core
+    # ── Pasada 1: proveedores ──────────────────────────────────────────────
     "PROVEEDORES",
-    "JURISDICCIONES",
-    "PEDIDOS",
-    "PED_ITEMS",
-    "SOLIC_GASTOS",
+    # ── Pasada 2: órdenes de compra ────────────────────────────────────────
     "ORDEN_COMPRA",
     "OC_ITEMS",
+    # ── Pasada 3: órdenes de pago + retenciones + vínculo a gastos ─────────
     "ORDEN_PAGO",
-    "RG_COMP",
-    "CTA_HOJA_DE_RUTA",
+    "ORDEN_PAGO_IMPUT",   # bridge crítico OP ↔ CTA_COMPROB (reemplaza CTA_HOJA_DE_RUTA)
+    "CTA_COMPROB",        # fuente de gasto_nro_comprobante (TIPO + NRO_COMPROB)
+    "REG_COMP",           # eslabón OP -> SG -> RC -> CC
+    "SOLIC_GASTOS",       # eslabón intermedio del JOIN OP -> CC
     "RETENCIONES",
-    "DEDUCCIONES",
-    # Relacionadas con PROVEEDORES
-    "ACT_IMP_PROV",
+    "DEDUCCIONES",        # resuelve tipo_impuesto_id (COD_RET -> nombre)
+    # ── Resolución de items / mercadería (link OC_ITEMS ↔ PED_ITEMS) ───────
+    "PEDIDOS",
+    "PED_ITEMS",
     "ADJUDICACIONES",
-    "BENEFICIARIOS",
-    "CESIONARIOS",
-    "COTIZA_PROV",
-    "COTIZA_PROV_ITEMS",
-    "CTA_COMPROB",
-    "CTA_CTACTE_MOVS",
-    "CTA_PROVEEDORES_ALICUOTAS",
-    "CTA_UTE",
-    "CTR_DOCUM_PROV",
-    "DATOS_PART_CONS",
-    "DATOS_PART_CONT",
-    "DEUFLO_PROV",
-    "DEVOLUCION",
-    "EGRESOS",
-    "EMBARGOS",
-    "HISTO_ESTADOS",
-    "NOMINA_PROV",
-    "ORDEN_PAGO_DEDUC_UTE",
-    "ORDEN_PAGOEA_DEDUC_UTE",
-    "ORDEN_REINT_PRESUP",
-    "PER_AGENTES",
-    "PER_AGENTES_HIST",
-    "PER_CONCEPTOS_PROVEEDOR",
-    "REGUL_CAMBIO_OCEA",
-    "REGUL_CORREC_IMPUT",
-    "REGUL_DESAF",
-    "TES_DEPOSITOS_GARANTIAS",
-    "VI_SUBRUB_PROV",
-    # Relacionadas con JURISDICCIONES
-    "CALCULO_MODIF",
-    "CUOTAS_JURISDIC",
-    "CTA_TMP_REG_DEVEN_IMP",
-    "DEPENDENCIAS",
-    "DEVENGAMIENTOS",
-    "ESTRUC_PROG",
-    "FORMULARIO1",
-    "FORMULARIO2",
-    "FORMULARIO4",
-    "FORMULARIOC1",
-    "FORMULARIOC2",
-    "FORMULARIOP4",
-    "INGRESOS",
-    "ING_COD_INGRESOS_DET",
-    "METAS_PROG",
-    "MOV_PRES_COMP",
-    "MOV_PRES_REC_DEV",
-    "PER_CONCEPTOS_GASTOS_M",
-    "PER_SELECCION_DET",
-    "PRE_JURIS_RECURSOS",
-    "REGUL_CORREC_RECUR_IMPUT",
-    "REGUL_RECURSOS_EX_IMPUT",
-    "REGUL_RETENCIONES",
+    "ADJUDICACIONES_ITEMS",
     "SOLIC_GASTOS_ITEMS",
-    "USUARIOS_JURISDICCIONES",
-    # Relacionadas con ORDEN_PAGO
-    "CTA_IMPUT_PERSONAL",
-    "MOV_PRES_PAG",
-    "REGUL_CAMBIO",
-    # Relacionadas con ORDEN_COMPRA
-    "OC_PLAN_ENT",
-    "RECEPCION",
-    # Relacionadas con PEDIDOS
-    "PED_COTIZACIONES",
-    # Relacionadas con DEDUCCIONES
-    "ORDEN_PAGOEA_DEDUC",
-    "ORDEN_PAGO_DEDUC",
-    "REGUL_RETENCIONES_IMPUT",
-    "RETENCIONES_REGDED",
-    # Relacionadas con múltiples
-    "MOV_EXTRAPRES_DEV",
-    "MOV_EXTRAPRES_PAG",
-    "MOV_EXTRAPRES_REC",
-    "MOV_PRES_DEV",
-    "ORDEN_DEVOL",
-    "ORDEN_PAGOEA",
-    "ORDEN_REINT",
-    "REG_COMP",
-    "REG_DEVEN",
-    "REGUL_CAMBIO_PE_IMPUT",
-    "REGUL_CORREC_EX_IMPUT",
-    "REGUL_GASTOS",
-    "REGUL_GASTOS_EX",
-    "REGUL_OPE_DEVOL",
+    # ── Catálogos (lookups locales para mapear, NO se envían a Paxapos) ────
+    "JURISDICCIONES",     # mapea a centro_costo_id (_JURISDICCION_CENTRO_COSTO_MAP)
+    "TIPOS_COMPROB",      # interpreta TIPO en CTA_COMPROB y arma PDV-NRO
+    "TIPO_DOC_RES",       # tipo de documento del proveedor (CUIT/DNI)
 ]
 
 
