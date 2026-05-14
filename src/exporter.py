@@ -795,10 +795,8 @@ class MigratorExporter(BaseExporter):
         grouped: dict[tuple[int, int, int], dict] = {}
         grouped_raw: dict[tuple[int, int, int], dict] = {}
         grouped_gasto_refs: dict[tuple[int, int, int], list[str]] = {}
-        grouped_gasto_linked_refs: dict[tuple[int, int, int], list[str]] = {}
-        grouped_cc_nros: dict[tuple[int, int, int], list[str]] = {}
         # seen_items_per_oc: dedup por ITEM_OC porque el LEFT JOIN a
-        # SOLIC_GASTOS y CTA_HOJA_DE_RUTA puede multiplicar filas (44% multi-
+        # SOLIC_GASTOS y oc_to_cc (REG_COMP→CTA_COMPROB) puede multiplicar filas (44% multi-
         # match en SG, 8% en CC). Sin esto, los totales en Paxapos se inflan
         # porque sum(item.precio) cuenta cada item N veces.
         seen_items_per_oc: dict[tuple[int, int, int], set[int]] = {}
@@ -881,14 +879,7 @@ class MigratorExporter(BaseExporter):
                 if rafam_ref not in refs:
                     refs.append(rafam_ref)
 
-            # Recolectar CC_NRO de CTA_HOJA_DE_RUTA (nro comprobante del gasto)
-            cc_nro = str(raw.get("HDR_CC_NRO") or "").strip()
-            if cc_nro:
-                cc_nros = grouped_cc_nros.setdefault(key, [])
-                if cc_nro not in cc_nros:
-                    cc_nros.append(cc_nro)
-
-            # Dedup por ITEM_OC: el LEFT JOIN a SOLIC_GASTOS / CTA_HOJA_DE_RUTA
+            # Dedup por ITEM_OC: el LEFT JOIN a SOLIC_GASTOS / oc_to_cc
             # multiplica filas. Sin esto los items se duplican y el total
             # (sum(precio_unitario x cantidad)) en Paxapos queda inflado.
             item_oc = self._to_int(raw.get("ITEM_OC"))
@@ -904,16 +895,6 @@ class MigratorExporter(BaseExporter):
             if item_oc is not None:
                 seen_items.add(item_oc)
             grouped[key]["items"].append(item)
-
-        # ── 1b. Asignar gasto_nro_comprobante desde CTA_HOJA_DE_RUTA.CC_NRO ──
-        for key, oc_data in grouped.items():
-            cc_nros = grouped_cc_nros.get(key, [])
-            if cc_nros:
-                if len(cc_nros) == 1:
-                    oc_data["gasto_nro_comprobante"] = cc_nros[0]
-                else:
-                    oc_data["gasto_nro_comprobante"] = cc_nros
-                grouped_gasto_linked_refs[key] = cc_nros
 
         # ── 2. Clasificar OCs por acción según estado y link previo ───────
         ocs_to_create: list[dict] = []      # estado R, sin link o link con estado != R
@@ -937,19 +918,13 @@ class MigratorExporter(BaseExporter):
             )
             link_previo = self._link_store.get_link("orden_compra", source_key)
             estado_previo = link_previo.get("estado_oc", "").strip().upper() if link_previo else None
-            linked_refs_prev = self._split_ref_set(link_previo.get("gasto_linked_refs")) if link_previo else set()
-            linked_refs_actual = set(grouped_gasto_linked_refs.get(key, []))
-            has_new_linked_gastos = bool(linked_refs_actual - linked_refs_prev)
 
             if estado_actual == "R":
                 if link_previo is None or estado_previo != "R":
                     # Nueva para Paxapos: no existía o venía de otro estado
                     ocs_to_create.append(oc_data)
-                elif has_new_linked_gastos:
-                    # Ya enviada con R pero ahora tiene gastos resueltos → re-enviar para vincular
-                    ocs_to_create.append(oc_data)
                 else:
-                    # Ya estaba con R y ya tiene remote_id → skip envío, actualizar refs
+                    # Ya estaba con R y ya tiene remote_id → skip envío
                     ocs_same_state.append(key)
                     skipped_same_state += 1
             elif estado_actual == "A":
@@ -1017,8 +992,7 @@ class MigratorExporter(BaseExporter):
             # Agregar gasto_refs para persist
             gasto_refs_list = grouped_gasto_refs.get(key, [])
             raw_by_source_key[sk]["_GASTO_REFS"] = ",".join(gasto_refs_list) if gasto_refs_list else ""
-            gasto_linked_refs_list = grouped_gasto_linked_refs.get(key, [])
-            raw_by_source_key[sk]["_GASTO_LINKED_REFS"] = ",".join(gasto_linked_refs_list) if gasto_linked_refs_list else ""
+            raw_by_source_key[sk]["_GASTO_LINKED_REFS"] = ""
 
         if not ordenes_compra:
             logger.info(
@@ -1090,10 +1064,8 @@ class MigratorExporter(BaseExporter):
         grouped: dict[tuple[int, int, int], dict] = {}
         grouped_raw: dict[tuple[int, int, int], dict] = {}
         grouped_gasto_refs: dict[tuple[int, int, int], list[str]] = {}
-        grouped_gasto_linked_refs: dict[tuple[int, int, int], list[str]] = {}
-        grouped_cc_nros: dict[tuple[int, int, int], list[str]] = {}
         # seen_items_per_oc: dedup por ITEM_OC porque el LEFT JOIN a
-        # SOLIC_GASTOS y CTA_HOJA_DE_RUTA puede multiplicar filas (44% multi-
+        # SOLIC_GASTOS y oc_to_cc (REG_COMP→CTA_COMPROB) puede multiplicar filas (44% multi-
         # match en SG, 8% en CC). Sin esto, los totales en Paxapos se inflan
         # porque sum(item.precio) cuenta cada item N veces.
         seen_items_per_oc: dict[tuple[int, int, int], set[int]] = {}
@@ -1175,14 +1147,7 @@ class MigratorExporter(BaseExporter):
                 if rafam_ref not in refs:
                     refs.append(rafam_ref)
 
-            # Recolectar CC_NRO de CTA_HOJA_DE_RUTA (nro comprobante del gasto)
-            cc_nro = str(raw.get("HDR_CC_NRO") or "").strip()
-            if cc_nro:
-                cc_nros = grouped_cc_nros.setdefault(key, [])
-                if cc_nro not in cc_nros:
-                    cc_nros.append(cc_nro)
-
-            # Dedup por ITEM_OC: el LEFT JOIN a SOLIC_GASTOS / CTA_HOJA_DE_RUTA
+            # Dedup por ITEM_OC: el LEFT JOIN a SOLIC_GASTOS / oc_to_cc
             # multiplica filas. Sin esto los items se duplican y el total
             # (sum(precio_unitario x cantidad)) en Paxapos queda inflado.
             item_oc = self._to_int(raw.get("ITEM_OC"))
@@ -1198,16 +1163,6 @@ class MigratorExporter(BaseExporter):
             if item_oc is not None:
                 seen_items.add(item_oc)
             grouped[key]["items"].append(item)
-
-        # ── 1b. Asignar gasto_nro_comprobante desde CTA_HOJA_DE_RUTA.CC_NRO ──
-        for key, oc_data in grouped.items():
-            cc_nros = grouped_cc_nros.get(key, [])
-            if cc_nros:
-                if len(cc_nros) == 1:
-                    oc_data["gasto_nro_comprobante"] = cc_nros[0]
-                else:
-                    oc_data["gasto_nro_comprobante"] = cc_nros
-                grouped_gasto_linked_refs[key] = cc_nros
 
         # ── 2. Clasificar OCs por acción según estado y link previo ───────
         ocs_to_create: list[dict] = []
@@ -1228,14 +1183,9 @@ class MigratorExporter(BaseExporter):
             )
             link_previo = self._link_store.get_link("orden_compra", source_key)
             estado_previo = link_previo.get("estado_oc", "").strip().upper() if link_previo else None
-            linked_refs_prev = self._split_ref_set(link_previo.get("gasto_linked_refs")) if link_previo else set()
-            linked_refs_actual = set(grouped_gasto_linked_refs.get(key, []))
-            has_new_linked_gastos = bool(linked_refs_actual - linked_refs_prev)
 
             if estado_actual == "R":
                 if link_previo is None or estado_previo != "R":
-                    ocs_to_create.append(oc_data)
-                elif has_new_linked_gastos:
                     ocs_to_create.append(oc_data)
                 else:
                     ocs_same_state.append(key)
@@ -1297,8 +1247,7 @@ class MigratorExporter(BaseExporter):
             raw_by_source_key[sk] = grouped_raw[key]
             gasto_refs_list = grouped_gasto_refs.get(key, [])
             raw_by_source_key[sk]["_GASTO_REFS"] = ",".join(gasto_refs_list) if gasto_refs_list else ""
-            gasto_linked_refs_list = grouped_gasto_linked_refs.get(key, [])
-            raw_by_source_key[sk]["_GASTO_LINKED_REFS"] = ",".join(gasto_linked_refs_list) if gasto_linked_refs_list else ""
+            raw_by_source_key[sk]["_GASTO_LINKED_REFS"] = ""
 
         if not ordenes_compra:
             logger.info(
@@ -1544,14 +1493,14 @@ class MigratorExporter(BaseExporter):
 
     def _resolve_pedido_id_from_oc_link(self, raw: dict) -> int | None:
         """Resuelve pedido_id consultando link_store con la clave de OC RAFAM
-        presente en CTA_HOJA_DE_RUTA (HDR_OC_EJERCICIO/UNI_COMPRA/NRO).
+        provista por el REG_COMP exacto imputado en ORDEN_PAGO_IMPUT.
 
         El backend usa pedido_id para vincular el Gasto auto-creado por la OP
         a la OC original. Sin esta resolución, el Gasto queda huérfano de OC.
         """
-        ej = self._to_int(raw.get("HDR_OC_EJERCICIO"))
-        uni = self._to_int(raw.get("HDR_OC_UNI_COMPRA"))
-        nro = self._to_int(raw.get("HDR_OC_NRO"))
+        ej = self._to_int(raw.get("SG_OC_EJERCICIO"))
+        uni = self._to_int(raw.get("SG_OC_UNI_COMPRA"))
+        nro = self._to_int(raw.get("SG_OC_NRO"))
         if ej is None or uni is None or nro is None:
             return None
         source_key = json.dumps(
@@ -1577,16 +1526,16 @@ class MigratorExporter(BaseExporter):
         de Paxapos. Si faltan datos esenciales (factura_nro, proveedor_id,
         importe o fecha), devuelve (None, None).
         """
-        cc_nro = str(raw.get("HDR_CC_NRO") or "").strip()
+        cc_nro = str(raw.get("OPI_NRO_COMPROB") or "").strip()
         if not cc_nro:
             return None, None
 
-        # proveedor_id: priorizar el del comprobante (CC_COD_PROV) que es el
+        # proveedor_id: priorizar el del comprobante (OPI_COD_PROV) que es el
         # emisor real de la factura; fallback al de la OC y al de la OP.
         remote_prov_id: int | None = None
         for cod_prov in (
-            raw.get("HDR_CC_COD_PROV"),
-            raw.get("HDR_OC_COD_PROV"),
+            raw.get("OPI_COD_PROV"),
+            raw.get("SG_OC_COD_PROV"),
             raw.get("COD_PROV"),
         ):
             if cod_prov is None or str(cod_prov).strip() == "":
@@ -1632,8 +1581,8 @@ class MigratorExporter(BaseExporter):
             "proveedor_id": remote_prov_id,
         }
 
-        # tipo_factura_id desde CC_TIPO_COMPROB
-        tipo_factura_id = self._resolve_tipo_factura_id(raw.get("HDR_CC_TIPO_COMPROB"))
+        # tipo_factura_id desde OPI_TIPO_COMPROB
+        tipo_factura_id = self._resolve_tipo_factura_id(raw.get("OPI_TIPO_COMPROB"))
         if tipo_factura_id is not None:
             gasto_data["tipo_factura_id"] = tipo_factura_id
 
@@ -1653,20 +1602,18 @@ class MigratorExporter(BaseExporter):
         if fech_venc:
             gasto_data["fecha_vencimiento"] = fech_venc
 
-        # external_id: si tenemos la SG asociada, usar el formato canónico para
-        # poder vincularlo desde el link_store; si no, usar uno basado en CC.
-        sg_ej = self._to_int(raw.get("HDR_SG_EJERCICIO")) or self._to_int(
-            raw.get("EJERCICIO")
-        )
-        sg_deleg = self._to_int(raw.get("HDR_SG_DELEG"))
-        sg_nro = self._to_int(raw.get("HDR_SG_NRO"))
+        # external_id: si el REG_COMP exacto del OPI trae SG asociada, usar el
+        # formato canónico; si no, usar uno basado en el comprobante fiscal.
+        sg_ej = self._to_int(raw.get("EJERCICIO"))
+        sg_deleg = self._to_int(raw.get("SG_DELEG_SOLIC"))
+        sg_nro = self._to_int(raw.get("SG_NRO_SOLIC"))
         if sg_ej is not None and sg_deleg is not None and sg_nro is not None:
             external_id = self._gasto_external_id(sg_ej, sg_deleg, sg_nro)
         else:
             external_id = {
                 "rafam_ref": (
-                    f"CC-{raw.get('EJERCICIO')}-{raw.get('HDR_CC_TIPO_COMPROB') or ''}-"
-                    f"{cc_nro}-{raw.get('HDR_CC_COD_PROV') or ''}"
+                    f"CC-{raw.get('EJERCICIO')}-{raw.get('OPI_TIPO_COMPROB') or ''}-"
+                    f"{cc_nro}-{raw.get('OPI_COD_PROV') or ''}"
                 )
             }
 
@@ -1677,10 +1624,11 @@ class MigratorExporter(BaseExporter):
         return {"external_id": external_id, "Gasto": gasto_data}, dedup_key
 
     def _write_batch_orden_pago(self, columns: list[str], rows: list[tuple]) -> None:
-        # Agrupa por (EJERCICIO, NRO_OP) y acumula las refs de gastos del LEFT JOIN.
+        # Agrupa por (EJERCICIO, NRO_OP) y acumula las refs de gastos del REG_COMP
+        # exacto de ORDEN_PAGO_IMPUT cuando existe.
         # NOTA: las retenciones NO vienen en este batch — se traen por separado
         # via source_repo.fetch_retenciones_for_ops() para evitar producto cartesiano
-        # con CTA_HOJA_DE_RUTA. Ver source_repository._build_orden_pago_statement.
+        # con los comprobantes pagados. Ver source_repository._build_orden_pago_statement.
         grouped: dict[tuple[int, int], dict] = {}
         grouped_gasto_refs: dict[tuple[int, int], list[str]] = {}
         grouped_cc_nros: dict[tuple[int, int], list[str]] = {}
@@ -1717,65 +1665,20 @@ class MigratorExporter(BaseExporter):
                 if rafam_ref not in refs:
                     refs.append(rafam_ref)
 
-            # Promover columnas OC_* desde el fallback SG→REG_COMP de forma
-            # incondicional. CTA_HOJA_DE_RUTA en RAFAM puede tener CC_NRO
-            # poblado pero dejar OC_NRO/OC_UNI_COMPRA/OC_EJERCICIO en NULL
-            # (vimos OPs migrarse OK como Egreso pero sin pedido_id porque
-            # nunca se enviaba pedido_internal_id). Hacemos el promote ANTES
-            # de la rama CC_NRO para que pedido_internal_id se calcule bien
-            # incluso cuando la hoja de ruta solo trajo el comprobante.
-            if raw.get("HDR_OC_NRO") is None:
-                raw["HDR_OC_NRO"] = raw.get("FB_OC_NRO")
-            if raw.get("HDR_OC_UNI_COMPRA") is None:
-                raw["HDR_OC_UNI_COMPRA"] = raw.get("FB_OC_UNI_COMPRA")
-            if raw.get("HDR_OC_COD_PROV") is None:
-                raw["HDR_OC_COD_PROV"] = raw.get("FB_OC_COD_PROV")
-            if raw.get("HDR_OC_EJERCICIO") is None:
-                # FB_OC_EJERCICIO viene de REG_COMP.EJERCICIO, que en
-                # RAFAM coincide con OC.EJERCICIO por como se modela
-                # el JOIN REG_COMP → ORDEN_COMPRA. Cubre el caso real
-                # OP_2026 → OC_2025 sin asumir mismo ejercicio.
-                raw["HDR_OC_EJERCICIO"] = raw.get("FB_OC_EJERCICIO")
-
-            # Recolectar CC_NRO de CTA_HOJA_DE_RUTA (nro comprobante del gasto).
-            # Si la hoja de ruta no resuelve, usar fallback SG→REG_COMP→CTA_COMPROB
-            # (columnas FB_*) y promover esos valores a las columnas HDR_* del raw
-            # para que el resto del pipeline (build gasto, dedup, etc.) los use
-            # de forma transparente.
-            cc_nro = str(raw.get("HDR_CC_NRO") or "").strip()
-            if not cc_nro:
-                fb_cc_nro_raw = raw.get("FB_CC_NRO")
-                fb_cc_nro = str(fb_cc_nro_raw or "").strip()
-                if fb_cc_nro:
-                    # CTA_COMPROB.NRO_COMPROB en RAFAM no siempre incluye el
-                    # "PDV-" prefix; CTA_HOJA_DE_RUTA suele traerlo. Dejamos
-                    # el comprobante tal cual y delegamos al backend la
-                    # busqueda por sólo factura_nro cuando no hay PDV.
-                    cc_nro = fb_cc_nro
-                    # Promover FB_* → HDR_*/CTA_* solo si HDR/CTA estaban
-                    # explicitamente ausentes (None). Usar `is None` y no
-                    # `not <val>` para no pisar valores legitimos como 0.
-                    raw["HDR_CC_NRO"] = fb_cc_nro_raw
-                    if raw.get("HDR_CC_TIPO_COMPROB") is None:
-                        raw["HDR_CC_TIPO_COMPROB"] = raw.get("FB_CC_TIPO")
-                    if raw.get("HDR_CC_COD_PROV") is None:
-                        raw["HDR_CC_COD_PROV"] = raw.get("FB_CC_COD_PROV")
-                    if raw.get("CTA_IMPORTE_COMPR") is None:
-                        raw["CTA_IMPORTE_COMPR"] = raw.get("FB_CC_IMPORTE_COMPR")
-                    if raw.get("CTA_IMPORTE_SIN_IVA") is None:
-                        raw["CTA_IMPORTE_SIN_IVA"] = raw.get("FB_CC_IMPORTE_SIN_IVA")
-                    if raw.get("CTA_FECH_COMPROB") is None:
-                        raw["CTA_FECH_COMPROB"] = raw.get("FB_CC_FECH_COMPROB")
-                    if raw.get("CTA_FECH_VENCIM") is None:
-                        raw["CTA_FECH_VENCIM"] = raw.get("FB_CC_FECH_VENCIM")
+            # Recolectar nro_comprobante (CC) directamente desde ORDEN_PAGO_IMPUT
+            # (path PRIMARIO). OPI_NRO_COMPROB / OPI_TIPO_COMPROB / OPI_COD_PROV
+            # son ya las claves canonicas del comprobante asociado a esta OP.
+            # No hay promocion de columnas: los datos vienen del bridge real
+            # OP_IMPUT, no de una vista derivada.
+            cc_nro = str(raw.get("OPI_NRO_COMPROB") or "").strip()
             if cc_nro:
                 cc_nros = grouped_cc_nros.setdefault(key, [])
                 if cc_nro not in cc_nros:
                     cc_nros.append(cc_nro)
                 # Guardar raw representativo por comprobante para emitir gastos[]
                 # con datos de CTA_COMPROB (importe/fecha/vencimiento/tipo).
-                cc_tipo = str(raw.get("HDR_CC_TIPO_COMPROB") or "").strip()
-                cc_prov = str(raw.get("HDR_CC_COD_PROV") or "").strip()
+                cc_tipo = str(raw.get("OPI_TIPO_COMPROB") or "").strip()
+                cc_prov = str(raw.get("OPI_COD_PROV") or "").strip()
                 cc_key = (cc_tipo, cc_nro, cc_prov)
                 existing = cc_raw_by_key.get(cc_key)
                 # Preferir el raw que ya trae datos fiscales reales (CTA_COMPROB)
@@ -1786,9 +1689,8 @@ class MigratorExporter(BaseExporter):
                     cc_raw_by_key[cc_key] = raw
 
             # pedido_id: prioridad a la fila (override manual). Si no viene,
-            # se intenta resolver via link_store usando la clave OC RAFAM
-            # (HDR_OC_EJERCICIO/UNI_COMPRA/NRO) provista por CTA_HOJA_DE_RUTA.
-            # Esto permite que el backend vincule el Gasto auto-creado a la OC.
+            # se intenta resolver via link_store usando la OC del REG_COMP
+            # exacto imputado por la OP.
             pedido_id = self._pedido_id_from_op_row(raw)
             if pedido_id is None:
                 pedido_id = self._resolve_pedido_id_from_oc_link(raw)
@@ -1800,18 +1702,18 @@ class MigratorExporter(BaseExporter):
             # pedido_internal_id: fallback robusto. Cuando link_store no tiene
             # el OC (ej. corrida fresca, OC migrada por otro proceso) el backend
             # puede resolverlo via Pedido.internal_id = {ej}-{nro}.
-            # Toda OP siempre tiene una OC (regla de negocio RAFAM), asi que
-            # siempre que CTA_HOJA_DE_RUTA tenga las columnas OC_*, se envia.
-            oc_ej = self._to_int(raw.get("HDR_OC_EJERCICIO"))
-            oc_nro = self._to_int(raw.get("HDR_OC_NRO"))
+            # Si el REG_COMP imputado no tiene OC, no se envia fallback: vincular
+            # por NRO_CANCE puede colgar la OP de una OC de otra solicitud.
+            oc_ej = self._to_int(raw.get("SG_OC_EJERCICIO"))
+            oc_nro = self._to_int(raw.get("SG_OC_NRO"))
             if oc_ej is not None and oc_nro is not None:
                 internal_id = f"{oc_ej % 100}-{oc_nro}"
                 internals = grouped_pedido_internal_ids.setdefault(key, [])
                 if internal_id not in internals:
                     internals.append(internal_id)
 
-                # Rastrear OC source_key para marcar has_op después del envío
-                oc_uni = self._to_int(raw.get("HDR_OC_UNI_COMPRA"))
+                # Rastrear OC source_key para marcar has_op despu\u00e9s del env\u00edo
+                oc_uni = self._to_int(raw.get("SG_OC_UNI_COMPRA"))
                 if oc_uni is not None:
                     oc_sk = json.dumps(
                         {"ejercicio": oc_ej, "nro_oc": oc_nro, "uni_compra": oc_uni},
@@ -1846,11 +1748,16 @@ class MigratorExporter(BaseExporter):
             # Guardar raw para extras en persist_links
             raw_by_source_key[sk] = raw
 
-            # Resolver proveedor_id via link_store. En OP, COD_PROV puede ser
-            # el beneficiario de la OP y no necesariamente el proveedor de la
-            # factura; por eso se prioriza el proveedor del comprobante/OC.
+            # Resolver proveedor_id del Egreso. Regla canonica:
+            # Egreso.proveedor_id = ORDEN_PAGO.COD_PROV (a quien efectivamente
+            # se le paga; puede ser cesionario en casos UTE/cesion de credito).
+            # NO confundir con el emisor de la factura (OPI_COD_PROV) ni con
+            # el proveedor de la OC original (SG_OC_COD_PROV) — esos son del
+            # Gasto y del Pedido respectivamente, y Paxapos los maneja como
+            # entidades distintas linkeadas via Gasto.pedido_id y HABTM.
+            # Fallbacks por si COD_PROV de la OP viene NULL en RAFAM (raro).
             remote_prov_id: int | None = None
-            for cod_prov in (raw.get("HDR_CC_COD_PROV"), raw.get("HDR_OC_COD_PROV"), raw.get("COD_PROV")):
+            for cod_prov in (raw.get("COD_PROV"), raw.get("OPI_COD_PROV"), raw.get("SG_OC_COD_PROV")):
                 if cod_prov is None or str(cod_prov).strip() == "":
                     continue
                 remote_prov = self._link_store.get_remote_id("proveedores", str(cod_prov).strip())
@@ -1930,7 +1837,7 @@ class MigratorExporter(BaseExporter):
             if not cc_nros:
                 skipped_no_gasto += 1
                 logger.debug(
-                    "Migrator [orden_pago] OP %s-%s omitida: sin CC_NRO en CTA_HOJA_DE_RUTA ni fallback SG→REG_COMP→CTA_COMPROB",
+                    "Migrator [orden_pago] OP %s-%s omitida: sin OPI_NRO_COMPROB",
                     key[0], key[1],
                 )
                 continue
@@ -1976,7 +1883,7 @@ class MigratorExporter(BaseExporter):
         if skipped_no_gasto:
             logger.warning(
                 "Migrator [orden_pago]: %d OPs omitidas sin gasto vinculado "
-                "(ni CTA_HOJA_DE_RUTA ni fallback SG→REG_COMP→CTA_COMPROB resolvieron)",
+                "(ni ORDEN_PAGO_IMPUT ni fallback SG→REG_COMP→CTA_COMPROB resolvieron)",
                 skipped_no_gasto,
             )
         if skipped_estado:

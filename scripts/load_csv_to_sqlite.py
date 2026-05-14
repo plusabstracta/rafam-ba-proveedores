@@ -78,24 +78,6 @@ _SCHEMA_COLUMNS: dict[str, list[str]] = {
         "SG_DIFERIDO",
     ],
     # Auxiliary tables used as JOIN sources (not synced as entities)
-    "CTA_HOJA_DE_RUTA": [
-        "USUARIO", "PE_EJERCICIO", "PE_NRO", "PE_FECH", "PE_CODIGO_DEP",
-        "PE_CODIGO_UE", "PE_JURISDICCION", "PE_ESTADO", "PE_COSTO_TOTAL",
-        "SG_EJERCICIO", "SG_DELEG_SOLIC", "SG_NRO", "SG_NRO_PED", "SG_JURISDICCION",
-        "SG_CODIGO_UE", "SG_CODIGO_DEP", "SG_FECH", "SG_TIPO_REGIS", "SG_CODIGO_FF",
-        "SG_IMPORTE", "SG_ESTADO", "SG_CONFIRMADO", "OC_EJERCICIO", "OC_UNI_COMPRA",
-        "OC_NRO", "OC_NRO_ADJUD", "OC_FECH", "OC_COD_PROV", "OC_ESTADO",
-        "OC_CONFIRMADO", "OC_IMPORTE", "RC_EJERCICIO", "RC_NRO", "RC_FECH",
-        "RC_JURISDICCION", "RC_COD_PROV", "RC_TIPO_REGIS", "RC_NRO_ORIG",
-        "RC_CODIGO_FF", "RC_UNI_COMPRA", "RC_NRO_OC", "RC_DELEG_SOLIC", "RC_NRO_SOLIC",
-        "RC_IMPORTE", "RC_ESTADO", "RC_CONFIRMADO", "RC_DEPENDENCIA", "RD_EJERCICIO",
-        "RD_NRO", "RD_FECH", "RD_NRO_REG_COMP", "RD_JURISDICCION", "RD_COD_PROV",
-        "RD_CODIGO_FF", "RD_IMPORTE", "RD_ESTADO", "RD_CONFIRMADO", "CC_TIPO_COMPROB",
-        "CC_NRO", "CC_COD_PROV", "CC_NRO_REG_COMP", "CC_FECH_MOVIM", "CC_FECH_COMPROB",
-        "CC_IMPORTE", "CC_IMPORTE_PAG", "OP_EJERCICIO", "OP_NRO", "OP_FECH",
-        "OP_CODIGO_FF", "OP_JURISDICCION", "OP_CODIGO_UE", "OP_COD_PROV", "OP_TIPO",
-        "OP_ESTADO", "OP_NRO_CANCE", "OP_CONFIRMADO", "OP_IMPORTE", "OP_IMPORTE_LIQUIDO",
-    ],
     "REG_COMP": [
         "EJERCICIO", "NRO_REG_COMP", "FECH_REG_COMP", "LUG_EMI", "JURISDICCION",
         "CODIGO_UE", "COD_PROV", "TIPO_REGIS", "NRO_ORIG", "CODIGO_FF",
@@ -127,76 +109,6 @@ def _latest_csv_by_entity(csv_dir: Path) -> dict[str, Path]:
         if current is None or path.name > current.name:
             latest[entity] = path
     return latest
-
-
-_CTA_HOJA_DE_RUTA_VIEW_SQL = """\
-CREATE VIEW IF NOT EXISTS CTA_HOJA_DE_RUTA AS
-SELECT DISTINCT
-        sg.EJERCICIO    AS SG_EJERCICIO,
-        sg.DELEG_SOLIC  AS SG_DELEG_SOLIC,
-        sg.NRO_SOLIC    AS SG_NRO,
-        sg.JURISDICCION AS SG_JURISDICCION,
-        oc.EJERCICIO    AS OC_EJERCICIO,
-        oc.UNI_COMPRA   AS OC_UNI_COMPRA,
-        oc.NRO_OC       AS OC_NRO,
-        oc.COD_PROV     AS OC_COD_PROV,
-        op.EJERCICIO    AS OP_EJERCICIO,
-        op.NRO_OP       AS OP_NRO,
-        op.NRO_CANCE    AS OP_NRO_CANCE,
-        op.ESTADO_OP    AS OP_ESTADO,
-        rc.NRO_REG_COMP AS RC_NRO,
-        cc.TIPO         AS CC_TIPO_COMPROB,
-        cc.NRO_COMPROB  AS CC_NRO,
-        cc.COD_PROV     AS CC_COD_PROV,
-        cc.NRO_REG_COMP AS CC_NRO_REG_COMP,
-        cc.IMPORTE_COMPR AS CC_IMPORTE,
-        cc.IMPORTE_PAGADO AS CC_IMPORTE_PAG,
-        pe.EJERCICIO    AS PE_EJERCICIO,
-        pe.NUM_PED      AS PE_NRO,
-        pe.JURISDICCION AS PE_JURISDICCION
-FROM ORDEN_PAGO op
-LEFT JOIN SOLIC_GASTOS sg
-    ON sg.EJERCICIO = op.EJERCICIO
- AND sg.NRO_SOLIC = op.NRO_CANCE
-LEFT JOIN OC_ITEMS oci
-    ON oci.EJERCICIO = sg.EJERCICIO
- AND oci.DELEG_SOLIC = sg.DELEG_SOLIC
- AND oci.NRO_SOLIC = sg.NRO_SOLIC
-LEFT JOIN ORDEN_COMPRA oc
-    ON oc.EJERCICIO = oci.EJERCICIO
- AND oc.UNI_COMPRA = oci.UNI_COMPRA
- AND oc.NRO_OC = oci.NRO_OC
-LEFT JOIN REG_COMP rc
-    ON rc.EJERCICIO   = sg.EJERCICIO
-   AND rc.DELEG_SOLIC = sg.DELEG_SOLIC
-   AND rc.NRO_SOLIC   = sg.NRO_SOLIC
-LEFT JOIN CTA_COMPROB cc
-    ON cc.EJERCICIO    = rc.EJERCICIO
-   AND cc.NRO_REG_COMP = rc.NRO_REG_COMP
-LEFT JOIN PEDIDOS pe
-  ON pe.EJERCICIO = sg.EJERCICIO
- AND pe.NUM_PED = sg.NRO_PED
-"""
-
-
-def _ensure_cta_hoja_de_ruta_view(conn) -> None:
-    """Always create CTA_HOJA_DE_RUTA as a derived VIEW (it's a JOIN view, not a real table)."""
-    from sqlalchemy import text
-    existing = conn.execute(
-        text("SELECT type FROM sqlite_master WHERE name = 'CTA_HOJA_DE_RUTA'")
-    ).scalar()
-    if existing == "table":
-        count = conn.execute(text("SELECT COUNT(*) FROM CTA_HOJA_DE_RUTA")).scalar()
-        if count:
-            print(f"[CTA_HOJA_DE_RUTA] tabla CSV preservada ({count} filas)")
-            return
-        print("[CTA_HOJA_DE_RUTA] tabla CSV vacía; se reemplaza por VIEW derivada")
-        conn.execute(text("DROP TABLE CTA_HOJA_DE_RUTA"))
-    if existing == "view":
-        conn.execute(text("DROP VIEW CTA_HOJA_DE_RUTA"))
-    conn.execute(text(_CTA_HOJA_DE_RUTA_VIEW_SQL))
-    count = conn.execute(text("SELECT COUNT(*) FROM CTA_HOJA_DE_RUTA")).scalar()
-    print(f"[CTA_HOJA_DE_RUTA] VIEW derivada creada ({count} filas)")
 
 
 def _create_table_from_csv(metadata: MetaData, entity: str, header: list[str]) -> Table:
@@ -253,11 +165,6 @@ def load_csvs(csv_dir: Path, output_db: Path) -> None:
                 if rows:
                     conn.execute(table.insert(), rows)
                 print(f"[{entity}] {len(rows)} filas cargadas desde {path.name} ({len(header)} cols)")
-
-        # If CTA_HOJA_DE_RUTA was NOT loaded from CSV, create it as a derived
-        # VIEW from the existing tables so that source_repository JOINs work
-        # identically in dev (SQLite) and prod (Oracle).
-        _ensure_cta_hoja_de_ruta_view(conn)
 
 
 def main() -> None:

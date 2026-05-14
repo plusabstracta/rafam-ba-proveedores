@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import Column, MetaData, Table, and_, func, literal_column, or_, select
+from sqlalchemy import Column, MetaData, Table, and_, case, func, literal_column, or_, select
 from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.engine import Connection
 from sqlalchemy.exc import SQLAlchemyError
@@ -81,7 +81,7 @@ class SourceRepository:
         """Trae retenciones para un set de OPs identificadas por (EJERCICIO, NRO_CANCE).
 
         Devuelve dict {(ejercicio, nro_cance): [{cod_ret, importe, descripcion}, ...]}.
-        Se hace en query separada para evitar producto cartesiano OP×RET×CTA_HOJA_DE_RUTA
+        Se hace en query separada para evitar producto cartesiano OP×RET×OPI
         en _build_orden_pago_statement.
         """
         if not op_keys:
@@ -170,7 +170,8 @@ class SourceRepository:
         oc = self._reflect_table("ORDEN_COMPRA")
         oc_items = self._reflect_table("OC_ITEMS")
         solic_gastos = self._reflect_table("SOLIC_GASTOS")
-        cta_hdr = self._reflect_optional_table("CTA_HOJA_DE_RUTA")
+        reg_comp = self._reflect_optional_table("REG_COMP")
+        cta_comprob = self._reflect_optional_table("CTA_COMPROB")
 
         # ORDEN_COMPRA → OC_ITEMS (items) → SOLIC_GASTOS (jurisdicción).
         # El cursor incremental aplica sobre ORDEN_COMPRA (FECH_OC / ESTADO_OC),
@@ -204,26 +205,24 @@ class SourceRepository:
             )
         )
 
-        # LEFT JOIN CTA_HOJA_DE_RUTA para obtener CC_NRO (nro comprobante del gasto vinculado)
-        if cta_hdr is not None:
-            hdr_oc_ej = self._safe_column(cta_hdr, "OC_EJERCICIO")
-            hdr_oc_uni = self._safe_column(cta_hdr, "OC_UNI_COMPRA")
-            hdr_oc_nro = self._safe_column(cta_hdr, "OC_NRO")
-            hdr_cc_nro = self._safe_column(cta_hdr, "CC_NRO")
-            hdr_cc_tipo = self._safe_column(cta_hdr, "CC_TIPO_COMPROB")
-            if hdr_oc_ej is not None and hdr_oc_uni is not None and hdr_oc_nro is not None:
-                from_clause = from_clause.outerjoin(
-                    cta_hdr,
-                    and_(
-                        oc.c.EJERCICIO == hdr_oc_ej,
-                        oc.c.UNI_COMPRA == hdr_oc_uni,
-                        oc.c.NRO_OC == hdr_oc_nro,
-                    ),
-                )
-                if hdr_cc_nro is not None:
-                    select_cols.append(hdr_cc_nro.label("HDR_CC_NRO"))
-                if hdr_cc_tipo is not None:
-                    select_cols.append(hdr_cc_tipo.label("HDR_CC_TIPO_COMPROB"))
+        # LEFT JOIN subquery OC → SG → REG_COMP → CTA_COMPROB para obtener
+        # nro de comprobante asociado a cada OC (sin pasar por la VIEW
+        # (sin pasar por la VIEW CTA_HOJA_DE_RUTA: usamos las tablas reales)
+        oc_cc = self._build_oc_to_cc_subquery(reg_comp, cta_comprob)
+        if oc_cc is not None:
+            from_clause = from_clause.outerjoin(
+                oc_cc,
+                and_(
+                    oc.c.EJERCICIO == oc_cc.c.OC_EJERCICIO,
+                    oc.c.UNI_COMPRA == oc_cc.c.OC_UNI_COMPRA,
+                    oc.c.NRO_OC == oc_cc.c.OC_NRO,
+                ),
+            )
+            select_cols.extend([
+                oc_cc.c.OC_CC_NRO,
+                oc_cc.c.OC_CC_TIPO_COMPROB,
+                oc_cc.c.OC_CC_COD_PROV,
+            ])
 
         stmt = select(*select_cols).select_from(from_clause)
         extra_filters = []
@@ -274,7 +273,8 @@ class SourceRepository:
         oc_items = self._reflect_table("OC_ITEMS")
         orden_compra = self._reflect_table("ORDEN_COMPRA")
         solic_gastos = self._reflect_table("SOLIC_GASTOS")
-        cta_hdr = self._reflect_optional_table("CTA_HOJA_DE_RUTA")
+        reg_comp = self._reflect_optional_table("REG_COMP")
+        cta_comprob = self._reflect_optional_table("CTA_COMPROB")
 
         select_cols = [
             oc_items,
@@ -305,26 +305,24 @@ class SourceRepository:
             )
         )
 
-        # LEFT JOIN CTA_HOJA_DE_RUTA para obtener CC_NRO (nro comprobante del gasto vinculado)
-        if cta_hdr is not None:
-            hdr_oc_ej = self._safe_column(cta_hdr, "OC_EJERCICIO")
-            hdr_oc_uni = self._safe_column(cta_hdr, "OC_UNI_COMPRA")
-            hdr_oc_nro = self._safe_column(cta_hdr, "OC_NRO")
-            hdr_cc_nro = self._safe_column(cta_hdr, "CC_NRO")
-            hdr_cc_tipo = self._safe_column(cta_hdr, "CC_TIPO_COMPROB")
-            if hdr_oc_ej is not None and hdr_oc_uni is not None and hdr_oc_nro is not None:
-                from_clause = from_clause.outerjoin(
-                    cta_hdr,
-                    and_(
-                        orden_compra.c.EJERCICIO == hdr_oc_ej,
-                        orden_compra.c.UNI_COMPRA == hdr_oc_uni,
-                        orden_compra.c.NRO_OC == hdr_oc_nro,
-                    ),
-                )
-                if hdr_cc_nro is not None:
-                    select_cols.append(hdr_cc_nro.label("HDR_CC_NRO"))
-                if hdr_cc_tipo is not None:
-                    select_cols.append(hdr_cc_tipo.label("HDR_CC_TIPO_COMPROB"))
+        # LEFT JOIN subquery OC → SG → REG_COMP → CTA_COMPROB para obtener
+        # nro de comprobante asociado a cada OC (sin pasar por la VIEW
+        # (sin pasar por la VIEW CTA_HOJA_DE_RUTA: usamos las tablas reales)
+        oc_cc = self._build_oc_to_cc_subquery(reg_comp, cta_comprob)
+        if oc_cc is not None:
+            from_clause = from_clause.outerjoin(
+                oc_cc,
+                and_(
+                    orden_compra.c.EJERCICIO == oc_cc.c.OC_EJERCICIO,
+                    orden_compra.c.UNI_COMPRA == oc_cc.c.OC_UNI_COMPRA,
+                    orden_compra.c.NRO_OC == oc_cc.c.OC_NRO,
+                ),
+            )
+            select_cols.extend([
+                oc_cc.c.OC_CC_NRO,
+                oc_cc.c.OC_CC_TIPO_COMPROB,
+                oc_cc.c.OC_CC_COD_PROV,
+            ])
 
         stmt = select(*select_cols).select_from(from_clause)
         stmt = self._apply_incremental_filters(stmt, oc_items, cfg, checkpoint)
@@ -456,84 +454,40 @@ class SourceRepository:
             .subquery("sg_comprobantes")
         )
 
-    def _build_op_fallback_subquery(self, reg_comp, cta_comprob):
-        """Subquery agrupada por (EJERCICIO, DELEG_SOLIC, NRO_SOLIC) que aporta
-        un fallback robusto cuando CTA_HOJA_DE_RUTA no resuelve la cadena
-        OP → OC ni OP → comprobante. Path: SG → REG_COMP → CTA_COMPROB.
+    def _build_oc_to_cc_subquery(self, reg_comp, cta_comprob):
+        """Subquery agrupada por (OC_EJERCICIO, OC_UNI_COMPRA, OC_NRO) que
+        resuelve el comprobante (CTA_COMPROB) asociado a cada OC vía
+        REG_COMP. Reemplaza la lectura directa de la VIEW CTA_HOJA_DE_RUTA.
 
-        REG_COMP tiene directamente NRO_OC, UNI_COMPRA, COD_PROV (vínculo a la
-        OC) y NRO_REG_COMP (vínculo a CTA_COMPROB). Esto evita depender de la
-        vista CTA_HOJA_DE_RUTA, que puede no estar populada para todas las OPs
-        del ejercicio (caso real observado: OPs 2026 con OP_NRO en hoja de
-        ruta vacío).
+        Path: ORDEN_COMPRA ← REG_COMP (por EJERCICIO+UNI_COMPRA+NRO_OC)
+              REG_COMP → CTA_COMPROB (por EJERCICIO+NRO_REG_COMP).
         """
         if reg_comp is None or cta_comprob is None:
             return None
         cols = {
             "rc_ej": self._safe_column(reg_comp, "EJERCICIO"),
-            "rc_deleg": self._safe_column(reg_comp, "DELEG_SOLIC"),
-            "rc_nro_sol": self._safe_column(reg_comp, "NRO_SOLIC"),
-            "rc_nro_rc": self._safe_column(reg_comp, "NRO_REG_COMP"),
-            "rc_nro_oc": self._safe_column(reg_comp, "NRO_OC"),
             "rc_uni": self._safe_column(reg_comp, "UNI_COMPRA"),
-            "rc_prov": self._safe_column(reg_comp, "COD_PROV"),
+            "rc_nro_oc": self._safe_column(reg_comp, "NRO_OC"),
+            "rc_nro_rc": self._safe_column(reg_comp, "NRO_REG_COMP"),
             "cc_ej": self._safe_column(cta_comprob, "EJERCICIO"),
             "cc_rc": self._safe_column(cta_comprob, "NRO_REG_COMP"),
             "cc_tipo": self._safe_column(cta_comprob, "TIPO"),
             "cc_nro": self._safe_column(cta_comprob, "NRO_COMPROB"),
             "cc_prov": self._safe_column(cta_comprob, "COD_PROV"),
-            "cc_imp": self._safe_column(cta_comprob, "IMPORTE_COMPR"),
-            "cc_neto": self._safe_column(cta_comprob, "IMPORTE_SIN_IVA"),
-            "cc_fec": self._safe_column(cta_comprob, "FECH_COMPROB"),
-            "cc_venc": self._safe_column(cta_comprob, "FECH_VENCIM"),
         }
-        # Las columnas críticas de SG y CTA_COMPROB son requeridas; si falta
-        # alguna, no se puede armar el fallback y devolvemos None.
-        required_keys = (
-            "rc_ej", "rc_deleg", "rc_nro_sol", "rc_nro_rc",
-            "rc_nro_oc", "rc_uni", "rc_prov",
-            "cc_ej", "cc_rc", "cc_tipo", "cc_nro", "cc_prov",
-            "cc_imp", "cc_fec",
-        )
-        if any(cols[k] is None for k in required_keys):
+        if any(v is None for v in cols.values()):
             return None
-
-        # IMPORTE_SIN_IVA y FECH_VENCIM son opcionales (algunos comprobantes
-        # no las tienen). Si faltan, las exportamos como NULL literal para
-        # mantener el contrato de columnas estable.
-        cc_neto_expr = (
-            func.min(cols["cc_neto"]) if cols["cc_neto"] is not None
-            else literal_column("NULL")
-        )
-        cc_venc_expr = (
-            func.min(cols["cc_venc"]) if cols["cc_venc"] is not None
-            else literal_column("NULL")
-        )
-
         return (
             select(
-                cols["rc_ej"].label("FB_EJERCICIO"),
-                cols["rc_deleg"].label("FB_DELEG_SOLIC"),
-                cols["rc_nro_sol"].label("FB_NRO_SOLIC"),
-                # FB_OC_EJERCICIO = REG_COMP.EJERCICIO. RAFAM modela el JOIN
-                # REG_COMP→ORDEN_COMPRA por (EJERCICIO + UNI_COMPRA + NRO_OC),
-                # asi que REG_COMP.EJERCICIO == OC.EJERCICIO. Esto evita asumir
-                # que la OP y la OC comparten ejercicio (caso real: OP 2026
-                # pagando una OC 2025).
-                func.min(cols["rc_ej"]).label("FB_OC_EJERCICIO"),
-                func.min(cols["rc_nro_oc"]).label("FB_OC_NRO"),
-                func.min(cols["rc_uni"]).label("FB_OC_UNI_COMPRA"),
-                func.min(cols["rc_prov"]).label("FB_OC_COD_PROV"),
-                func.min(cols["cc_nro"]).label("FB_CC_NRO"),
-                func.min(cols["cc_tipo"]).label("FB_CC_TIPO"),
-                func.min(cols["cc_prov"]).label("FB_CC_COD_PROV"),
-                func.min(cols["cc_imp"]).label("FB_CC_IMPORTE_COMPR"),
-                cc_neto_expr.label("FB_CC_IMPORTE_SIN_IVA"),
-                func.min(cols["cc_fec"]).label("FB_CC_FECH_COMPROB"),
-                cc_venc_expr.label("FB_CC_FECH_VENCIM"),
+                cols["rc_ej"].label("OC_EJERCICIO"),
+                cols["rc_uni"].label("OC_UNI_COMPRA"),
+                cols["rc_nro_oc"].label("OC_NRO"),
+                func.min(cols["cc_nro"]).label("OC_CC_NRO"),
+                func.min(cols["cc_tipo"]).label("OC_CC_TIPO_COMPROB"),
+                func.min(cols["cc_prov"]).label("OC_CC_COD_PROV"),
             )
             .select_from(
-                reg_comp.outerjoin(
+                reg_comp.join(
                     cta_comprob,
                     and_(
                         cols["rc_ej"] == cols["cc_ej"],
@@ -543,16 +497,151 @@ class SourceRepository:
             )
             .where(
                 and_(
-                    cols["rc_deleg"].is_not(None),
-                    cols["rc_nro_sol"].is_not(None),
+                    cols["rc_uni"].is_not(None),
+                    cols["rc_nro_oc"].is_not(None),
                 )
             )
             .group_by(
                 cols["rc_ej"],
-                cols["rc_deleg"],
-                cols["rc_nro_sol"],
+                cols["rc_uni"],
+                cols["rc_nro_oc"],
             )
-            .subquery("op_fb")
+            .subquery("oc_to_cc")
+        )
+
+    def _build_op_imput_subquery(self, opi, cta_comprob, reg_comp=None):
+        """Subquery PRIMARIA: bridge real OP ↔ CTA_COMPROB vía ORDEN_PAGO_IMPUT.
+
+        ORDEN_PAGO_IMPUT modela físicamente la imputación de cada OP a uno o más
+        comprobantes (CC). PK: (EJERCICIO, NRO_OP, NRO_REG_COMP, TIPO_COMPROB,
+        NRO_COMPROB, COD_PROV, ...).
+
+        Una OP puede pagar N comprobantes; aquí agrupamos por (EJERCICIO,
+        NRO_OP) y devolvemos el primer comprobante (MIN) más el conteo. Para
+        OPs multi-comprobante el exporter debe hacer un fetch separado tipo
+        fetch_retenciones_for_ops() (TODO Phase 6).
+
+        Joins a CTA_COMPROB por la PK exacta:
+            (EJERCICIO, TIPO, NRO_COMPROB, COD_PROV)
+        para traer datos fiscales reales.
+
+        Si REG_COMP esta disponible, tambien resuelve la OC desde el mismo
+        NRO_REG_COMP imputado por la OP. No se usa ORDEN_PAGO.NRO_CANCE como
+        puente a OC porque puede referenciar otra solicitud/compromiso.
+        """
+        if opi is None or cta_comprob is None:
+            return None
+        cols = {
+            "opi_ej": self._safe_column(opi, "EJERCICIO"),
+            "opi_op": self._safe_column(opi, "NRO_OP"),
+            "opi_rc": self._safe_column(opi, "NRO_REG_COMP"),
+            "opi_tipo": self._safe_column(opi, "TIPO_COMPROB"),
+            "opi_nro": self._safe_column(opi, "NRO_COMPROB"),
+            "opi_prov": self._safe_column(opi, "COD_PROV"),
+            "cc_ej": self._safe_column(cta_comprob, "EJERCICIO"),
+            "cc_tipo": self._safe_column(cta_comprob, "TIPO"),
+            "cc_nro": self._safe_column(cta_comprob, "NRO_COMPROB"),
+            "cc_prov": self._safe_column(cta_comprob, "COD_PROV"),
+            "cc_imp": self._safe_column(cta_comprob, "IMPORTE_COMPR"),
+            "cc_neto": self._safe_column(cta_comprob, "IMPORTE_SIN_IVA"),
+            "cc_fec": self._safe_column(cta_comprob, "FECH_COMPROB"),
+            "cc_venc": self._safe_column(cta_comprob, "FECH_VENCIM"),
+        }
+        required = ("opi_ej", "opi_op", "opi_rc", "opi_tipo", "opi_nro", "opi_prov",
+                    "cc_ej", "cc_tipo", "cc_nro", "cc_prov", "cc_imp", "cc_fec")
+        if any(cols[k] is None for k in required):
+            return None
+
+        cc_neto_expr = (
+            func.min(cols["cc_neto"]) if cols["cc_neto"] is not None
+            else literal_column("NULL")
+        )
+        cc_venc_expr = (
+            func.min(cols["cc_venc"]) if cols["cc_venc"] is not None
+            else literal_column("NULL")
+        )
+
+        reg_cols = {}
+        if reg_comp is not None:
+            reg_cols = {
+                "rc_ej": self._safe_column(reg_comp, "EJERCICIO"),
+                "rc_nro_rc": self._safe_column(reg_comp, "NRO_REG_COMP"),
+                "rc_deleg": self._safe_column(reg_comp, "DELEG_SOLIC"),
+                "rc_nro_sol": self._safe_column(reg_comp, "NRO_SOLIC"),
+                "rc_uni": self._safe_column(reg_comp, "UNI_COMPRA"),
+                "rc_nro_oc": self._safe_column(reg_comp, "NRO_OC"),
+                "rc_prov": self._safe_column(reg_comp, "COD_PROV"),
+            }
+        has_reg_comp = bool(reg_cols) and all(col is not None for col in reg_cols.values())
+
+        def nonblank(col):
+            if self._conn.dialect.name == "sqlite":
+                return func.nullif(col, "")
+            return col
+
+        sg_deleg_expr = func.min(nonblank(reg_cols["rc_deleg"])) if has_reg_comp else literal_column("NULL")
+        sg_nro_expr = func.min(nonblank(reg_cols["rc_nro_sol"])) if has_reg_comp else literal_column("NULL")
+        if has_reg_comp:
+            rc_ej = nonblank(reg_cols["rc_ej"])
+            rc_uni = nonblank(reg_cols["rc_uni"])
+            rc_nro_oc = nonblank(reg_cols["rc_nro_oc"])
+            rc_prov = nonblank(reg_cols["rc_prov"])
+            oc_present = and_(
+                rc_uni.is_not(None),
+                rc_nro_oc.is_not(None),
+            )
+            sg_oc_ej_expr = func.min(case((oc_present, rc_ej)))
+            sg_oc_nro_expr = func.min(case((oc_present, rc_nro_oc)))
+            sg_oc_uni_expr = func.min(case((oc_present, rc_uni)))
+            sg_oc_prov_expr = func.min(case((oc_present, rc_prov)))
+        else:
+            sg_oc_ej_expr = literal_column("NULL")
+            sg_oc_nro_expr = literal_column("NULL")
+            sg_oc_uni_expr = literal_column("NULL")
+            sg_oc_prov_expr = literal_column("NULL")
+
+        from_clause = opi.outerjoin(
+            cta_comprob,
+            and_(
+                cols["opi_ej"] == cols["cc_ej"],
+                cols["opi_tipo"] == cols["cc_tipo"],
+                cols["opi_nro"] == cols["cc_nro"],
+                cols["opi_prov"] == cols["cc_prov"],
+            ),
+        )
+        if has_reg_comp:
+            from_clause = from_clause.outerjoin(
+                reg_comp,
+                and_(
+                    cols["opi_ej"] == reg_cols["rc_ej"],
+                    cols["opi_rc"] == reg_cols["rc_nro_rc"],
+                    cols["opi_prov"] == reg_cols["rc_prov"],
+                ),
+            )
+
+        return (
+            select(
+                cols["opi_ej"].label("OPI_EJERCICIO"),
+                cols["opi_op"].label("OPI_NRO_OP"),
+                func.min(cols["opi_rc"]).label("OPI_NRO_REG_COMP"),
+                func.min(cols["opi_tipo"]).label("OPI_TIPO_COMPROB"),
+                func.min(cols["opi_nro"]).label("OPI_NRO_COMPROB"),
+                func.min(cols["opi_prov"]).label("OPI_COD_PROV"),
+                func.count(cols["opi_nro"]).label("OPI_COMPROB_COUNT"),
+                sg_deleg_expr.label("SG_DELEG_SOLIC"),
+                sg_nro_expr.label("SG_NRO_SOLIC"),
+                sg_oc_ej_expr.label("SG_OC_EJERCICIO"),
+                sg_oc_nro_expr.label("SG_OC_NRO"),
+                sg_oc_uni_expr.label("SG_OC_UNI_COMPRA"),
+                sg_oc_prov_expr.label("SG_OC_COD_PROV"),
+                func.min(cols["cc_imp"]).label("CTA_IMPORTE_COMPR"),
+                cc_neto_expr.label("CTA_IMPORTE_SIN_IVA"),
+                func.min(cols["cc_fec"]).label("CTA_FECH_COMPROB"),
+                cc_venc_expr.label("CTA_FECH_VENCIM"),
+            )
+            .select_from(from_clause)
+            .group_by(cols["opi_ej"], cols["opi_op"])
+            .subquery("op_imput")
         )
 
     def _build_orden_pago_statement(
@@ -561,138 +650,49 @@ class SourceRepository:
         checkpoint: Checkpoint,
     ) -> Select:
         orden_pago = self._reflect_table("ORDEN_PAGO")
-        solic_gastos = self._reflect_table("SOLIC_GASTOS")
         # NOTE: RETENCIONES y DEDUCCIONES NO se joinean acá — se traen aparte
-        # via fetch_retenciones_for_ops() para evitar producto cartesiano con
-        # CTA_HOJA_DE_RUTA (que tambien explota filas por OP).
-        # CTA_HOJA_DE_RUTA: denormalized view linking OC→SG (and optionally PE).
-        # In Oracle it's a pre-built VIEW; in SQLite dev it's a derived VIEW
-        # created by load_csv_to_sqlite.py.  Required in both environments.
-        cta_hdr = self._reflect_optional_table("CTA_HOJA_DE_RUTA")
-        # CTA_COMPROB aporta los datos fiscales reales del comprobante
-        # (IMPORTE_COMPR, FECH_COMPROB, FECH_VENCIM) para auto-crear el Gasto
-        # en Paxapos cuando la SG aún no fue migrada.
+        # via fetch_retenciones_for_ops() para evitar producto cartesiano.
         cta_comprob = self._reflect_optional_table("CTA_COMPROB")
-        # REG_COMP es el puente directo SG → OC y SG → CTA_COMPROB sin pasar
-        # por CTA_HOJA_DE_RUTA. Se usa como fallback cuando esa vista no
-        # tiene populadas las columnas OP_*.
+        # ORDEN_PAGO_IMPUT: bridge fisico OP ↔ CTA_COMPROB (PK incluye
+        # NRO_REG_COMP+TIPO_COMPROB+NRO_COMPROB+COD_PROV). Path PRIMARIO.
+        opi = self._reflect_optional_table("ORDEN_PAGO_IMPUT")
+        # REG_COMP: se usa solo por el NRO_REG_COMP exacto imputado en OPI.
+        # No usar ORDEN_PAGO.NRO_CANCE como puente a OC: puede apuntar a otra SG.
         reg_comp = self._reflect_optional_table("REG_COMP")
 
-        select_cols = [
-            orden_pago,
-            solic_gastos.c.DELEG_SOLIC.label("SG_DELEG_SOLIC"),
-            solic_gastos.c.NRO_SOLIC.label("SG_NRO_SOLIC"),
-        ]
+        select_cols = [orden_pago]
+        from_clause = orden_pago
 
-        from_clause = orden_pago.outerjoin(
-            solic_gastos,
-            and_(
-                orden_pago.c.EJERCICIO == solic_gastos.c.EJERCICIO,
-                orden_pago.c.NRO_CANCE == solic_gastos.c.NRO_SOLIC,
-            ),
-        )
-
-        # LEFT JOIN CTA_HOJA_DE_RUTA to resolve which OC/SG chain each OP belongs to.
-        # The nexus is NRO_CANCE (= SG.NRO_SOLIC) which identifies the solicitud
-        # being paid.  In Oracle the view is pre-built; in SQLite it's derived.
-        if cta_hdr is not None:
-            hdr_op_nro_col = self._safe_column(cta_hdr, "OP_NRO")
-            hdr_op_ej_col = self._safe_column(cta_hdr, "OP_EJERCICIO")
-        else:
-            hdr_op_nro_col = None
-            hdr_op_ej_col = None
-        if hdr_op_nro_col is not None and hdr_op_ej_col is not None:
+        # ── Path PRIMARIO: ORDEN_PAGO ⨝ ORDEN_PAGO_IMPUT ⨝ CTA_COMPROB ───
+        # Bridge real OP ↔ CC. Una OP puede pagar N comprobantes; aqui
+        # agrupamos por (EJERCICIO, NRO_OP) y devolvemos el primero (MIN)
+        # más OPI_COMPROB_COUNT para que el exporter detecte multi-CC y
+        # haga un fetch separado (igual patron que retenciones).
+        op_imput = self._build_op_imput_subquery(opi, cta_comprob, reg_comp)
+        if op_imput is not None:
             from_clause = from_clause.outerjoin(
-                cta_hdr,
+                op_imput,
                 and_(
-                    orden_pago.c.NRO_OP == hdr_op_nro_col,
-                    orden_pago.c.EJERCICIO == hdr_op_ej_col,
-                ),
-            )
-        # Select SG columns from the view
-        for col_name, label in [
-            ("SG_NRO", "HDR_SG_NRO"),
-            ("SG_DELEG_SOLIC", "HDR_SG_DELEG"),
-            ("SG_EJERCICIO", "HDR_SG_EJERCICIO"),
-            ("OC_EJERCICIO", "HDR_OC_EJERCICIO"),
-            ("OC_UNI_COMPRA", "HDR_OC_UNI_COMPRA"),
-            ("OC_NRO", "HDR_OC_NRO"),
-            ("OC_COD_PROV", "HDR_OC_COD_PROV"),
-            ("CC_NRO", "HDR_CC_NRO"),
-            ("CC_COD_PROV", "HDR_CC_COD_PROV"),
-            ("CC_TIPO_COMPROB", "HDR_CC_TIPO_COMPROB"),
-        ]:
-            col = self._safe_column(cta_hdr, col_name) if cta_hdr is not None else None
-            if col is not None:
-                select_cols.append(col.label(label))
-
-        # LEFT JOIN CTA_COMPROB para obtener datos fiscales reales del
-        # comprobante (importe, fecha, vencimiento, tipo). Necesario para
-        # auto-crear el Gasto en Paxapos si la SG no se migró todavía.
-        # PK CTA_COMPROB: (EJERCICIO, TIPO, NRO_COMPROB, COD_PROV).
-        # CTA_HOJA_DE_RUTA aporta CC_TIPO_COMPROB / CC_NRO / CC_COD_PROV
-        # para hacer match exacto contra esa PK.
-        if cta_hdr is not None and cta_comprob is not None:
-            hdr_cc_tipo_col = self._safe_column(cta_hdr, "CC_TIPO_COMPROB")
-            hdr_cc_nro_col = self._safe_column(cta_hdr, "CC_NRO")
-            hdr_cc_cod_prov_col = self._safe_column(cta_hdr, "CC_COD_PROV")
-            cta_ej_col = self._safe_column(cta_comprob, "EJERCICIO")
-            cta_tipo_col = self._safe_column(cta_comprob, "TIPO")
-            cta_nro_col = self._safe_column(cta_comprob, "NRO_COMPROB")
-            cta_prov_col = self._safe_column(cta_comprob, "COD_PROV")
-            if (
-                hdr_cc_tipo_col is not None
-                and hdr_cc_nro_col is not None
-                and hdr_cc_cod_prov_col is not None
-                and cta_ej_col is not None
-                and cta_tipo_col is not None
-                and cta_nro_col is not None
-                and cta_prov_col is not None
-            ):
-                from_clause = from_clause.outerjoin(
-                    cta_comprob,
-                    and_(
-                        orden_pago.c.EJERCICIO == cta_ej_col,
-                        hdr_cc_tipo_col == cta_tipo_col,
-                        hdr_cc_nro_col == cta_nro_col,
-                        hdr_cc_cod_prov_col == cta_prov_col,
-                    ),
-                )
-                for cta_col_name, label in [
-                    ("IMPORTE_COMPR", "CTA_IMPORTE_COMPR"),
-                    ("IMPORTE_SIN_IVA", "CTA_IMPORTE_SIN_IVA"),
-                    ("FECH_COMPROB", "CTA_FECH_COMPROB"),
-                    ("FECH_VENCIM", "CTA_FECH_VENCIM"),
-                ]:
-                    cta_col = self._safe_column(cta_comprob, cta_col_name)
-                    if cta_col is not None:
-                        select_cols.append(cta_col.label(label))
-
-        # Fallback path: SG → REG_COMP → CTA_COMPROB. Aporta FB_OC_* y FB_CC_*
-        # cuando CTA_HOJA_DE_RUTA no resuelve el vinculo (caso real: vista
-        # con OP_NRO vacio para todas las OPs del ejercicio actual).
-        op_fb = self._build_op_fallback_subquery(reg_comp, cta_comprob)
-        if op_fb is not None:
-            from_clause = from_clause.outerjoin(
-                op_fb,
-                and_(
-                    solic_gastos.c.EJERCICIO == op_fb.c.FB_EJERCICIO,
-                    solic_gastos.c.DELEG_SOLIC == op_fb.c.FB_DELEG_SOLIC,
-                    solic_gastos.c.NRO_SOLIC == op_fb.c.FB_NRO_SOLIC,
+                    orden_pago.c.EJERCICIO == op_imput.c.OPI_EJERCICIO,
+                    orden_pago.c.NRO_OP == op_imput.c.OPI_NRO_OP,
                 ),
             )
             select_cols.extend([
-                op_fb.c.FB_OC_EJERCICIO,
-                op_fb.c.FB_OC_NRO,
-                op_fb.c.FB_OC_UNI_COMPRA,
-                op_fb.c.FB_OC_COD_PROV,
-                op_fb.c.FB_CC_NRO,
-                op_fb.c.FB_CC_TIPO,
-                op_fb.c.FB_CC_COD_PROV,
-                op_fb.c.FB_CC_IMPORTE_COMPR,
-                op_fb.c.FB_CC_IMPORTE_SIN_IVA,
-                op_fb.c.FB_CC_FECH_COMPROB,
-                op_fb.c.FB_CC_FECH_VENCIM,
+                op_imput.c.OPI_NRO_REG_COMP,
+                op_imput.c.OPI_TIPO_COMPROB,
+                op_imput.c.OPI_NRO_COMPROB,
+                op_imput.c.OPI_COD_PROV,
+                op_imput.c.OPI_COMPROB_COUNT,
+                op_imput.c.SG_DELEG_SOLIC,
+                op_imput.c.SG_NRO_SOLIC,
+                op_imput.c.SG_OC_EJERCICIO,
+                op_imput.c.SG_OC_NRO,
+                op_imput.c.SG_OC_UNI_COMPRA,
+                op_imput.c.SG_OC_COD_PROV,
+                op_imput.c.CTA_IMPORTE_COMPR,
+                op_imput.c.CTA_IMPORTE_SIN_IVA,
+                op_imput.c.CTA_FECH_COMPROB,
+                op_imput.c.CTA_FECH_VENCIM,
             ])
 
         stmt = select(*select_cols).select_from(from_clause)

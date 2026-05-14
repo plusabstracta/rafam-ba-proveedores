@@ -322,7 +322,7 @@ ORDEN_COMPRA_COLUMNS = [
     "OC_FECH_CONFIRM",
     "OC_IMPORTE_TOT",
     "SG_JURISDICCION",
-    "HDR_CC_NRO",
+    "OC_CC_NRO",
 ]
 
 
@@ -346,7 +346,7 @@ def _orden_compra_row(**overrides):
         "OC_FECH_CONFIRM": "2026-03-11 00:00:00",
         "OC_IMPORTE_TOT": "300.75",
         "SG_JURISDICCION": "1110104000",
-        "HDR_CC_NRO": "0001-00000001",
+        "OC_CC_NRO": "0001-00000001",
     }
     data.update(overrides)
     return tuple(data.get(col, "") for col in ORDEN_COMPRA_COLUMNS)
@@ -471,7 +471,7 @@ class TestMigratorExporterExtraPaths:
         assert created["Pedido"]["observacion"] == "Compra urgente"
         assert created["Pedido"]["created"] == "2026-03-10 00:00:00"
         assert len(created["items"]) == 2
-        assert created["gasto_nro_comprobante"] == "0001-00000001"
+        assert "gasto_nro_comprobante" not in created
         assert ordenes[1]["Pedido"]["deleted"] == 1
         assert exporter._link_store.get_link("orden_compra", same_state_key)["remote_id"] == "990"
         skip_key = json.dumps({"ejercicio": 2026, "nro_oc": 400, "uni_compra": 1}, sort_keys=True)
@@ -552,7 +552,7 @@ class TestMigratorExporterExtraPaths:
         assert exporter._resolve_gasto_refs_via_oc(2026, "100", "2026") == ["SG-2026-2-300"]
         assert exporter._resolve_gasto_refs_via_oc(2026, None, "2026") == []
         assert exporter._resolve_pedido_id_from_oc_link(
-            {"HDR_OC_EJERCICIO": "2026", "HDR_OC_UNI_COMPRA": "1", "HDR_OC_NRO": "100"}
+            {"SG_OC_EJERCICIO": "2026", "SG_OC_UNI_COMPRA": "1", "SG_OC_NRO": "100"}
         ) == 900
         assert exporter._pedido_id_from_op_row({"PAXAPOS_PEDIDO_ID": "42"}) == 42
         assert exporter._gasto_external_id_from_ref("SG-2026-2-300") == {

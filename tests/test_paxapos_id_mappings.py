@@ -6,7 +6,7 @@ Estos tests bloquean el contrato de mapeo entre RAFAM y Paxapos:
 - RAFAM CTA_COMPROB.TIPO  -> tipo_factura.id (1=A, 2=B, 5=C, 4=M, 7=Otros, 8..14 NC/ND)
 - RAFAM ORDEN_PAGO.TIPO_CANCE -> tipo_de_pago.id (1=Transferencia, 9=Cheque)
 - Default UM = 5 (Unidad)
-- pedido_internal_id se envia en OP cuando hay HDR_OC_* y no se resuelve por link_store
+- pedido_internal_id se envia en OP cuando hay SG_OC_* y no se resuelve por link_store
 
 Si estos valores cambian, el lado servidor (CakePHP) tambien debe actualizarse.
 """
@@ -202,8 +202,8 @@ class TestPedidoInternalIdEnOrdenPago:
             "EJERCICIO", "NRO_OP", "FECH_OP", "ESTADO_OP",
             "IMPORTE_TOTAL", "CONCEPTO", "NRO_CANCE",
             "SG_DELEG_SOLIC", "SG_NRO_SOLIC",
-            "HDR_CC_NRO",
-            "HDR_OC_EJERCICIO", "HDR_OC_UNI_COMPRA", "HDR_OC_NRO",
+            "OPI_NRO_COMPROB",
+            "SG_OC_EJERCICIO", "SG_OC_UNI_COMPRA", "SG_OC_NRO",
             "FECH_CONFIRM", "CONFIRMADO", "TIPO_CANCE",
         ]
 
@@ -215,8 +215,8 @@ class TestPedidoInternalIdEnOrdenPago:
             "ESTADO_OP": "C", "IMPORTE_TOTAL": "1000.00",
             "CONCEPTO": "Pago", "NRO_CANCE": "9000",
             "SG_DELEG_SOLIC": "1", "SG_NRO_SOLIC": "200",
-            "HDR_CC_NRO": "0001-00012345",
-            "HDR_OC_EJERCICIO": "2026", "HDR_OC_UNI_COMPRA": "1", "HDR_OC_NRO": "777",
+            "OPI_NRO_COMPROB": "0001-00012345",
+            "SG_OC_EJERCICIO": "2026", "SG_OC_UNI_COMPRA": "1", "SG_OC_NRO": "777",
             "FECH_CONFIRM": "2026-04-15 00:00:00", "CONFIRMADO": "S",
             "TIPO_CANCE": "NO",
         }
@@ -265,9 +265,9 @@ class TestPedidoInternalIdEnOrdenPago:
         assert "pedido_internal_id" not in op
 
     def test_omite_pedido_internal_id_si_falta_alguna_columna_oc(self):
-        """Sin HDR_OC_* completo no se puede construir el internal_id."""
+        """Sin SG_OC_* completo no se puede construir el internal_id."""
         exp = self._make_exporter()
-        rows = [self._row(self._columns(), HDR_OC_NRO="")]
+        rows = [self._row(self._columns(), SG_OC_NRO="")]
         sent = self._send_and_capture(exp, rows)
         op = sent[0]["ordenes_pago"][0]
         assert "pedido_id" not in op
@@ -278,7 +278,7 @@ class TestPedidoInternalIdEnOrdenPago:
         exp = self._make_exporter()
         rows = [self._row(
             self._columns(),
-            HDR_OC_EJERCICIO="2025", HDR_OC_UNI_COMPRA="3", HDR_OC_NRO="42",
+            SG_OC_EJERCICIO="2025", SG_OC_UNI_COMPRA="3", SG_OC_NRO="42",
         )]
         sent = self._send_and_capture(exp, rows)
         op = sent[0]["ordenes_pago"][0]
@@ -344,7 +344,7 @@ class TestNoCrearPagosEnCero:
             "EJERCICIO", "NRO_OP", "FECH_OP", "ESTADO_OP",
             "IMPORTE_TOTAL", "CONCEPTO", "NRO_CANCE",
             "SG_DELEG_SOLIC", "SG_NRO_SOLIC",
-            "HDR_CC_NRO",
+            "OPI_NRO_COMPROB",
             "FECH_CONFIRM", "CONFIRMADO", "TIPO_CANCE",
         ]
 
@@ -355,7 +355,7 @@ class TestNoCrearPagosEnCero:
             "ESTADO_OP": "C", "IMPORTE_TOTAL": "1500.00",
             "CONCEPTO": "Pago", "NRO_CANCE": "9100",
             "SG_DELEG_SOLIC": "1", "SG_NRO_SOLIC": "300",
-            "HDR_CC_NRO": "0001-00099999",
+            "OPI_NRO_COMPROB": "0001-00099999",
             "FECH_CONFIRM": "2026-04-15 00:00:00", "CONFIRMADO": "S",
             "TIPO_CANCE": "NO",
         }
@@ -420,10 +420,10 @@ class TestNoCrearPagosEnCero:
         exp = self._make_exporter()
         cc = "0001-00099999"
         rows = [
-            self._row(self._columns(), NRO_OP="8001", IMPORTE_TOTAL="2500.00", HDR_CC_NRO=cc),
-            self._row(self._columns(), NRO_OP="8002", IMPORTE_TOTAL="0.00", HDR_CC_NRO=cc),
-            self._row(self._columns(), NRO_OP="8003", IMPORTE_TOTAL=None, HDR_CC_NRO=cc),
-            self._row(self._columns(), NRO_OP="8004", IMPORTE_TOTAL="ERROR", HDR_CC_NRO=cc),
+            self._row(self._columns(), NRO_OP="8001", IMPORTE_TOTAL="2500.00", OPI_NRO_COMPROB=cc),
+            self._row(self._columns(), NRO_OP="8002", IMPORTE_TOTAL="0.00", OPI_NRO_COMPROB=cc),
+            self._row(self._columns(), NRO_OP="8003", IMPORTE_TOTAL=None, OPI_NRO_COMPROB=cc),
+            self._row(self._columns(), NRO_OP="8004", IMPORTE_TOTAL="ERROR", OPI_NRO_COMPROB=cc),
         ]
         sent = self._capture(exp, rows)
         assert len(sent) == 1
