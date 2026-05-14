@@ -675,8 +675,8 @@ class SourceRepository:
             .subquery("op_imput")
         )
 
-    def _build_op_required_oc_subquery(self):
-        """Return OCs required by confirmed OPs, without using NRO_CANCE."""
+    def _build_op_required_oc_subquery(self, ejercicio_min: int | None = None):
+        """Return OCs required by in-scope confirmed OPs, without using NRO_CANCE."""
         orden_pago = self._reflect_optional_table("ORDEN_PAGO")
         opi = self._reflect_optional_table("ORDEN_PAGO_IMPUT")
         reg_comp = self._reflect_optional_table("REG_COMP")
@@ -734,6 +734,27 @@ class SourceRepository:
             )
         )
 
+        filters = [
+            cols["op_estado"] == "C",
+            cols["op_confirmado"] == "S",
+            cols["op_fech_confirm"].is_not(None),
+            nonblank(cols["opi_nro"]).is_not(None),
+            rc_uni.is_not(None),
+            rc_nro_oc.is_not(None),
+        ]
+        if ejercicio_min is not None:
+            cutoff = (
+                f"{ejercicio_min:04d}-01-01"
+                if self._conn.dialect.name == "sqlite"
+                else datetime(ejercicio_min, 1, 1)
+            )
+            filters.append(
+                or_(
+                    cols["op_ej"] >= ejercicio_min,
+                    cols["op_fech_confirm"] >= cutoff,
+                )
+            )
+
         return (
             select(
                 rc_ej.label("OC_EJERCICIO"),
@@ -741,16 +762,7 @@ class SourceRepository:
                 rc_nro_oc.label("OC_NRO"),
             )
             .select_from(from_clause)
-            .where(
-                and_(
-                    cols["op_estado"] == "C",
-                    cols["op_confirmado"] == "S",
-                    cols["op_fech_confirm"].is_not(None),
-                    nonblank(cols["opi_nro"]).is_not(None),
-                    rc_uni.is_not(None),
-                    rc_nro_oc.is_not(None),
-                )
-            )
+            .where(and_(*filters))
             .distinct()
             .subquery("op_required_ocs")
         )
@@ -765,7 +777,7 @@ class SourceRepository:
             return stmt
 
         base_filter = key_cols["ejercicio"] >= cfg.ejercicio_min
-        required_ocs = self._build_op_required_oc_subquery()
+        required_ocs = self._build_op_required_oc_subquery(cfg.ejercicio_min)
         if required_ocs is None:
             return stmt.where(base_filter)
 

@@ -675,7 +675,7 @@ Resuelve por `proveedor_id + punto_de_venta + factura_nro`. Si no encuentra el `
 
 ### 14.8 OPs sin OC se omiten
 
-El script RAFAM no debe confiar en `pedido_internal_id` como fallback para crear pagos. Si el `link_store` local no puede resolver la OC a `pedido_id`, la OP y su `gastos[]` se omiten. Si la OC es anterior a `RAFAM_EJERCICIO_MIN`, la query de `oc_items` debe traer esa OC por dependencia `ORDEN_PAGO_IMPUT -> REG_COMP` antes de procesar la OP.
+El script RAFAM no debe confiar en `pedido_internal_id` como fallback para crear pagos. Si el `link_store` local no puede resolver la OC a `pedido_id`, la OP y su `gastos[]` se omiten. Si la OC es anterior a `RAFAM_EJERCICIO_MIN`, la query de `oc_items` debe traer esa OC por dependencia `ORDEN_PAGO_IMPUT -> REG_COMP` antes de procesar la OP, pero sólo para OPs confirmadas dentro del alcance actual (`EJERCICIO >= mínimo` o `FECH_CONFIRM` desde el 1/1 del mínimo). OPs históricas fuera de ese alcance no deben arrastrar OCs viejas.
 
 ### 14.9 `mercaderia_external_ref` agrupa por clasificación presupuestaria
 

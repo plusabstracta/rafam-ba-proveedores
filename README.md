@@ -266,7 +266,7 @@ Notas importantes:
 - El tenant tambien viaja en header `X-Tenant-Id`.
 - Para scripts productivos se recomienda `PAXAPOS_API_KEY`.
 - `PAXAPOS_VERIFY_SSL=false` solo debe usarse en desarrollo.
-- `RAFAM_EJERCICIO_MIN` no filtra proveedores ni OPs; aplica a OCs (`orden_compra`/`oc_items`). Si una OP confirmada requiere una OC anterior al mínimo, esa OC se incluye igual para no crear pagos o gastos sueltos.
+- `RAFAM_EJERCICIO_MIN` no filtra proveedores ni la query de OPs; aplica a OCs (`orden_compra`/`oc_items`). Si una OP confirmada dentro del alcance actual (`EJERCICIO >= mínimo` o `FECH_CONFIRM` desde el 1/1 del mínimo) requiere una OC anterior, esa OC se incluye igual para no crear pagos o gastos sueltos. Las OPs históricas fuera de ese alcance no arrastran OCs viejas.
 
 ### 2. Validacion previa obligatoria
 

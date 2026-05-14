@@ -157,6 +157,7 @@ En la ejecución actual no hay una pasada standalone `retenciones`. El script `o
 - **`compras_pedidos.tipo` siempre `'orden_compra'`** en esta migración. No se sincronizan otros tipos.
 - **Filtro de OPs:** sólo se migran las que tienen `ESTADO_OP='C'` + `CONFIRMADO='S'`. Las pendientes (`N`) o anuladas (`A`) se omiten. Esto se verifica en `exporter.py` (línea ~1603) y `source_repository.py` (línea ~568).
 - **`pedido_id` en `account_gastos`** debe resolverse desde la cadena `CTA_COMPROB → REG_COMP → ORDEN_COMPRA`. Si no hay OC migrada/linkeada, la OP y su `gastos[]` se omiten para evitar pagos o gastos sueltos.
+- **`RAFAM_EJERCICIO_MIN` en OCs:** el filtro aplica a `orden_compra`/`oc_items`. La excepción para incluir OCs anteriores se limita a OPs confirmadas dentro del alcance actual (`EJERCICIO >= mínimo` o `FECH_CONFIRM` desde el 1/1 del mínimo); OPs históricas no deben arrastrar OCs viejas.
 - **`unidad_de_medida_id` default = 1 (Unidad)**. Antes había un bug que ponía 5 (Paquete); está corregido en `gateway_mapper.py`.
 - **`PROVEEDORES.ING_BRUTOS` no se migra hoy** — pendiente. Si el negocio lo necesita, agregar mapeo en `gateway_mapper.py::map_proveedor()`.
 

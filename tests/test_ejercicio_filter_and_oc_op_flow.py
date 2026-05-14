@@ -284,8 +284,8 @@ class TestEjercicioMinFilter:
         oc_keys = {(r[0], r[1], r[2]) for r in rows}
         assert len(oc_keys) == 4, f"Deben ser 4 OCs, encontradas: {oc_keys}"
 
-    def test_oc_items_incluye_oc_vieja_referenciada_por_op(self, engine_with_data):
-        """Una OC anterior al minimo se trae si una OP confirmada la necesita."""
+    def test_oc_items_no_incluye_oc_historica_por_op_historica(self, engine_with_data):
+        """Una OP historica no debe arrastrar OCs anteriores al minimo."""
         cfg = EntityConfig(
             name="oc_items",
             table_name="OC_ITEMS",
@@ -307,6 +307,45 @@ class TestEjercicioMinFilter:
             conn.execute(text("""
                 INSERT INTO ORDEN_PAGO_IMPUT VALUES
                 (2025, 999, 900, 'FA', 'CC-2025-1', 100)
+            """))
+            conn.commit()
+
+            repo = SourceRepository(conn)
+            with patch.dict("src.config.ENTITY_CONFIGS", {"oc_items": cfg}):
+                stmt = repo.build_statement("oc_items", cp)
+                rows = conn.execute(stmt).fetchall()
+
+        oc_keys = {(r[0], r[1], r[2]) for r in rows}
+        assert (2025, 1, 1) not in oc_keys
+        assert (2026, 1, 1) in oc_keys
+
+    def test_oc_items_incluye_oc_vieja_referenciada_por_op_en_alcance(self, engine_with_data):
+        """Una OC anterior al minimo se trae si una OP confirmada actual la necesita."""
+        cfg = EntityConfig(
+            name="oc_items",
+            table_name="OC_ITEMS",
+            full_load=True,
+            ejercicio_min=2026,
+        )
+        cp = Checkpoint(entity="oc_items")
+
+        with engine_with_data.connect() as conn:
+            conn.execute(text("""
+                INSERT INTO REG_COMP VALUES
+                (2025, 900, 1, 100, 1, 1, 100)
+            """))
+            conn.execute(text("""
+                INSERT INTO CTA_COMPROB VALUES
+                (2025, 'FA', 'CC-2025-1', 100, 900,
+                 50000, 50000, '2025-06-10', '2025-07-10')
+            """))
+            conn.execute(text("""
+                INSERT INTO ORDEN_PAGO VALUES
+                (2025, 998, 100, 'C', 'S', '2026-01-15', 50000, 100, 'Pago viejo confirmado en 2026')
+            """))
+            conn.execute(text("""
+                INSERT INTO ORDEN_PAGO_IMPUT VALUES
+                (2025, 998, 900, 'FA', 'CC-2025-1', 100)
             """))
             conn.commit()
 
