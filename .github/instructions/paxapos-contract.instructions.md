@@ -302,17 +302,17 @@ El gasto puede vincularse a la OC con `pedido_id` (`account_gastos.pedido_id`). 
 
 **Join table** (`account_egresos_gastos`): `egreso_id`, `gasto_id`, `importe decimal(14,2)`, `deleted`.
 
-**Campos obligatorios**: `identificador_pago`, `total`, `gasto_nro_comprobante` (string o array con al menos 1 comprobante).
+**Campos obligatorios**: `identificador_pago`, `total`, `gasto_nro_comprobante` (string o array con al menos 1 comprobante) y `pedido_id` resuelto para el flujo RAFAM.
 
 **Upsert**: por `identificador_pago`. Si ya existe → `skip_existing` (NO actualiza, solo devuelve el existente). No hay forma de hacer N→C post-creación.
 
-**Usa `gasto_nro_comprobante`** para buscar `Gasto` por `proveedor_id + punto_de_venta + factura_nro`; si no existe, lo auto-crea siempre. Si viene `pedido_id`, Paxapos lo guarda en `Gasto.pedido_id` cuando está vacío.
+**Usa `gasto_nro_comprobante`** para buscar `Gasto` por `proveedor_id + punto_de_venta + factura_nro`; si no existe, lo auto-crea siempre. En el flujo RAFAM el script sólo debe enviar la OP si ya resolvió `pedido_id`, y Paxapos lo guarda en `Gasto.pedido_id` cuando está vacío.
 
 **Allowed fields** del save: `identificador_pago, fecha, tipo_de_pago_id, total, observacion, estado, fecha_programada, cuenta_bancaria_id, numero_operacion`. Notar que `proveedor_id` NO está en la whitelist.
 
 **Feature flag**: `Site.ordenes_de_pago` debe estar en `true`. Si no → HTTP 400. Verificar llamando con bloque `ordenes_pago` vacío en `dry_run`.
 
-**Omitir OPs con `ESTADO_OP=A`, `ESTADO_OP=C`, `CONFIRMADO<>S` o sin `FECH_CONFIRM`**. Enviar solo normales confirmadas.
+**Omitir OPs con `ESTADO_OP<>C`, `CONFIRMADO<>S`, sin `FECH_CONFIRM`, sin `gasto_nro_comprobante` o sin OC resuelta a `pedido_id`**. Enviar sólo pagos confirmados y linkeables.
 
 **Validaciones server-side**:
 - `total`: numérico, requerido
@@ -597,7 +597,7 @@ El mapping debe coincidir con los IDs reales de `centros_costo` del tenant desti
     "fecha_vencimiento": "CTA_COMPROB.FECH_VENCIM",
     "observacion": "opcional"
   },
-  "pedido_id": int(OC resuelta vía REG_COMP, opcional)
+  "pedido_id": int(OC resuelta vía REG_COMP, requerido en flujo RAFAM)
 }
 ```
 
@@ -618,7 +618,7 @@ El mapping debe coincidir con los IDs reales de `centros_costo` del tenant desti
 }
 ```
 
-> Solo enviar OPs con `ESTADO_OP='N'`, `CONFIRMADO='S'` y `FECH_CONFIRM` presente. En Paxapos se crean con `fecha=FECH_CONFIRM` y `estado=3`. OPs con `ESTADO_OP='A'`, `ESTADO_OP='C'`, no confirmadas o sin `FECH_CONFIRM` se omiten completamente del envío.
+> Solo enviar OPs con `ESTADO_OP='C'`, `CONFIRMADO='S'`, `FECH_CONFIRM` presente, `gasto_nro_comprobante` y `pedido_id` resuelto. En Paxapos se crean con `fecha=FECH_CONFIRM` y `estado=3`. OPs anuladas, pendientes, no confirmadas, sin comprobante o sin OC migrada se omiten completamente del envío.
 
 ---
 
@@ -673,36 +673,40 @@ Sin `fecha` → `estado=0` (pendiente); con `fecha` → `estado=3` (pagado). Si 
 
 Resuelve por `proveedor_id + punto_de_venta + factura_nro`. Si no encuentra el `Gasto`, lo auto-crea siempre. Si el row trae `pedido_id`, Paxapos lo usa para dejar el gasto existente o auto-creado vinculado con la OC.
 
-### 14.8 `mercaderia_external_ref` agrupa por clasificación presupuestaria
+### 14.8 OPs sin OC se omiten
+
+El script RAFAM no debe confiar en `pedido_internal_id` como fallback para crear pagos. Si el `link_store` local no puede resolver la OC a `pedido_id`, la OP y su `gastos[]` se omiten. Si la OC es anterior a `RAFAM_EJERCICIO_MIN`, la query de `oc_items` debe traer esa OC por dependencia `ORDEN_PAGO_IMPUT -> REG_COMP` antes de procesar la OP.
+
+### 14.9 `mercaderia_external_ref` agrupa por clasificación presupuestaria
 
 Si dos items de pedidos distintos tienen la misma clasificación presupuestaria RAFAM (mismos `clase`, `tipo`, `inciso`, `par_prin`, `par_parc`), Paxapos los **agrupa en la misma Mercadería**. Usa los campos de clasificación (no `ejercicio`/`num_ped`/`orden`) como clave de dedup. Esto es intencional para evitar duplicados de mercaderías.
 
-### 14.9 `monto_presupuestado` se auto-calcula si no se envía
+### 14.10 `monto_presupuestado` se auto-calcula si no se envía
 
 Si no se incluye `monto_presupuestado` en el payload del Pedido/OC, Paxapos lo calcula como `sum(precio * cantidad)` de todos los items. Si se necesita un valor específico (ej: monto aprobado RAFAM distinto al calculado), enviarlo explícitamente.
 
-### 14.10 La tabla `tipo_facturas` varía por tenant
+### 14.11 La tabla `tipo_facturas` varía por tenant
 
 El seed base tiene ~33 tipos, pero cada tenant puede tener tipos adicionales o distintos. **Siempre usar el endpoint `lookups.json?only=tipos_factura`** del tenant destino para mapear. No hardcodear IDs.
 
-### 14.11 `internal_id` auto-generado es determinístico
+### 14.12 `internal_id` auto-generado es determinístico
 
 Si no se envía `Pedido.internal_id` pero sí `external_id` con los campos esperados, el controller genera el `internal_id` para OCs como `{ejercicio}-{nro_oc}`.
 
 Si se quiere control total del upsert, enviar `internal_id` propio. Si no, dejar que lo genere pero asegurar que `external_id` tenga los campos necesarios.
 
-### 14.12 Validación `gastos_pagos` deshabilitada durante import masivo
+### 14.13 Validación `gastos_pagos` deshabilitada durante import masivo
 
 El check normal verifica que los gastos no estén ya pagados, pero con datasets grandes revienta memoria. El migrador lo bypasea. Esto significa que **se puede crear una OP que pague un gasto ya pagado** — no da error pero contablemente queda mal. **Validar del lado del script** que no se dupliquen pagos.
 
-### 14.13 Sin rollback parcial sin `atomic=true`
+### 14.14 Sin rollback parcial sin `atomic=true`
 
 Si se envían 100 proveedores y el #50 falla, los primeros 49 ya están grabados. Con `atomic=true` se revierte todo. **Para migración inicial usar `atomic=false`** (más resiliente); **para correcciones puntuales usar `atomic=true`**.
 
-### 14.14 Endpoint de dedup de proveedores disponible
+### 14.15 Endpoint de dedup de proveedores disponible
 
 `GET /{tenant}/account/proveedores/check_duplicados/{id}.json` detecta proveedores duplicados post-migración usando similitud de nombre + CUIT. Útil para auditoría después de la carga inicial.
 
-### 14.15 Orden de importación es crítico — mismo request o requests separados
+### 14.16 Orden de importación es crítico — mismo request o requests separados
 
 El orden interno de procesamiento es: `proveedores → ordenes_compra → gastos → ordenes_pago`. Si se envía todo en un solo request, el controller respeta este orden automáticamente. Si se hacen requests separados, **respetar la secuencia estrictamente** para que las FKs se resuelvan.

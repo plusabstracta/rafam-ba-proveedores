@@ -44,7 +44,7 @@ En el CLI actual, el modo migrator productivo se ejecuta en 3 pasos oficiales:
 | --- | --- | --- | --- |
 | 1 | `proveedores` | `proveedores[]` | Crea/actualiza proveedores. |
 | 2 | `oc_items` | `ordenes_compra[]` | Arma cabecera de OC + items embebidos. |
-| 3 | `orden_pago` | `ordenes_pago[]` + `gastos[]` + retenciones | Vincula o auto-crea gastos desde datos de `CTA_COMPROB` y agrega retenciones si existen. |
+| 3 | `orden_pago` | `ordenes_pago[]` + `gastos[]` + retenciones | Vincula o auto-crea gastos desde datos de `CTA_COMPROB` solo cuando la OP resuelve una OC migrada. |
 
 No ejecutar `orden_compra` en migrator para produccion: esa entidad queda reemplazada por
 `oc_items`, que manda la OC completa con items. `solic_gastos` tambien esta deshabilitada en
@@ -266,7 +266,7 @@ Notas importantes:
 - El tenant tambien viaja en header `X-Tenant-Id`.
 - Para scripts productivos se recomienda `PAXAPOS_API_KEY`.
 - `PAXAPOS_VERIFY_SSL=false` solo debe usarse en desarrollo.
-- `RAFAM_EJERCICIO_MIN` no filtra proveedores; aplica a entidades con ejercicio fiscal.
+- `RAFAM_EJERCICIO_MIN` no filtra proveedores ni OPs; aplica a OCs (`orden_compra`/`oc_items`). Si una OP confirmada requiere una OC anterior al mínimo, esa OC se incluye igual para no crear pagos o gastos sueltos.
 
 ### 2. Validacion previa obligatoria
 

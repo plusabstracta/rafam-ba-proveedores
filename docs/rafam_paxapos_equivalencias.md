@@ -156,7 +156,7 @@ En la ejecución actual no hay una pasada standalone `retenciones`. El script `o
 - **Idempotencia obligatoria:** todo registro migrado debe llevar `external_ref = {source: "rafam", entity: <tabla>, ...claves naturales}` para que reimportar no genere duplicados.
 - **`compras_pedidos.tipo` siempre `'orden_compra'`** en esta migración. No se sincronizan otros tipos.
 - **Filtro de OPs:** sólo se migran las que tienen `ESTADO_OP='C'` + `CONFIRMADO='S'`. Las pendientes (`N`) o anuladas (`A`) se omiten. Esto se verifica en `exporter.py` (línea ~1603) y `source_repository.py` (línea ~568).
-- **`pedido_id` en `account_gastos`** sólo se setea si la cadena `CTA_COMPROB → REG_COMP → ORDEN_COMPRA` resuelve. Si no, el gasto queda sin OC vinculada (válido).
+- **`pedido_id` en `account_gastos`** debe resolverse desde la cadena `CTA_COMPROB → REG_COMP → ORDEN_COMPRA`. Si no hay OC migrada/linkeada, la OP y su `gastos[]` se omiten para evitar pagos o gastos sueltos.
 - **`unidad_de_medida_id` default = 1 (Unidad)**. Antes había un bug que ponía 5 (Paquete); está corregido en `gateway_mapper.py`.
 - **`PROVEEDORES.ING_BRUTOS` no se migra hoy** — pendiente. Si el negocio lo necesita, agregar mapeo en `gateway_mapper.py::map_proveedor()`.
 

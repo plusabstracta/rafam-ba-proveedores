@@ -33,12 +33,8 @@ except ValueError:
     _EJERCICIO_MIN = None
 _EJERCICIO_MIN = _EJERCICIO_MIN or None
 _EJERCICIO_MIN_ENTITIES = {
-    "pedidos",
-    "ped_items",
     "orden_compra",
     "oc_items",
-    "solic_gastos",
-    "orden_pago",
 }
 
 

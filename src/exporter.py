@@ -1580,6 +1580,9 @@ class MigratorExporter(BaseExporter):
             "importe_neto": importe_neto,
             "proveedor_id": remote_prov_id,
         }
+        pedido_id = self._to_int(raw.get("_PAXAPOS_PEDIDO_ID") or raw.get("pedido_id"))
+        if pedido_id is not None:
+            gasto_data["pedido_id"] = pedido_id
 
         # tipo_factura_id desde OPI_TIPO_COMPROB
         tipo_factura_id = self._resolve_tipo_factura_id(raw.get("OPI_TIPO_COMPROB"))
@@ -1632,6 +1635,7 @@ class MigratorExporter(BaseExporter):
         grouped: dict[tuple[int, int], dict] = {}
         grouped_gasto_refs: dict[tuple[int, int], list[str]] = {}
         grouped_cc_nros: dict[tuple[int, int], list[str]] = {}
+        grouped_cc_keys: dict[tuple[int, int], list[tuple[str, str, str]]] = {}
         grouped_pedido_ids: dict[tuple[int, int], list[int]] = {}
         grouped_pedido_internal_ids: dict[tuple[int, int], list[str]] = {}
         grouped_oc_source_keys: dict[tuple[int, int], list[str]] = {}
@@ -1680,6 +1684,9 @@ class MigratorExporter(BaseExporter):
                 cc_tipo = str(raw.get("OPI_TIPO_COMPROB") or "").strip()
                 cc_prov = str(raw.get("OPI_COD_PROV") or "").strip()
                 cc_key = (cc_tipo, cc_nro, cc_prov)
+                cc_keys = grouped_cc_keys.setdefault(key, [])
+                if cc_key not in cc_keys:
+                    cc_keys.append(cc_key)
                 existing = cc_raw_by_key.get(cc_key)
                 # Preferir el raw que ya trae datos fiscales reales (CTA_COMPROB)
                 if existing is None or (
@@ -1699,11 +1706,9 @@ class MigratorExporter(BaseExporter):
                 if pedido_id not in pedido_ids:
                     pedido_ids.append(pedido_id)
 
-            # pedido_internal_id: fallback robusto. Cuando link_store no tiene
-            # el OC (ej. corrida fresca, OC migrada por otro proceso) el backend
-            # puede resolverlo via Pedido.internal_id = {ej}-{nro}.
-            # Si el REG_COMP imputado no tiene OC, no se envia fallback: vincular
-            # por NRO_CANCE puede colgar la OP de una OC de otra solicitud.
+            # Registrar el internal_id candidato solo para diagnostico. Ya no se
+            # envia como fallback: una OP sin pedido_id local podria crear un
+            # gasto suelto si la OC no existe en Paxapos.
             oc_ej = self._to_int(raw.get("SG_OC_EJERCICIO"))
             oc_nro = self._to_int(raw.get("SG_OC_NRO"))
             if oc_ej is not None and oc_nro is not None:
@@ -1831,7 +1836,12 @@ class MigratorExporter(BaseExporter):
                     retenciones_by_op[op_key] = rets
 
         ordenes_pago = []
+        included_cc_keys: list[tuple[str, str, str]] = []
+        included_cc_key_set: set[tuple[str, str, str]] = set()
+        cc_key_to_pedido_id: dict[tuple[str, str, str], int] = {}
         skipped_no_gasto = 0
+        skipped_no_oc_link = 0
+        skipped_multiple_oc = 0
         for key, op in grouped.items():
             cc_nros = grouped_cc_nros.get(key, [])
             if not cc_nros:
@@ -1850,25 +1860,30 @@ class MigratorExporter(BaseExporter):
 
             pedido_ids = grouped_pedido_ids.get(key, [])
             if len(pedido_ids) == 1:
-                op["pedido_id"] = pedido_ids[0]
+                pedido_id = pedido_ids[0]
+                op["pedido_id"] = pedido_id
             elif len(pedido_ids) > 1:
+                skipped_multiple_oc += 1
                 logger.warning(
-                    "Migrator [orden_pago] OP %s-%s: multiples pedido_id recibidos (%s), se omite pedido_id",
+                    "Migrator [orden_pago] OP %s-%s omitida: multiples OCs/pedido_id recibidos (%s)",
                     key[0], key[1], pedido_ids,
                 )
-
-            # Fallback: pedido_internal_id para que el backend resuelva la OC
-            # via Pedido.internal_id cuando el script no pudo via link_store.
-            # Si la OP toca una sola OC se envia el internal_id; si toca varias
-            # se omite (el backend no puede vincular a multiples OC desde una OP).
-            internal_ids = grouped_pedido_internal_ids.get(key, [])
-            if "pedido_id" not in op and len(internal_ids) == 1:
-                op["pedido_internal_id"] = internal_ids[0]
-            elif "pedido_id" not in op and len(internal_ids) > 1:
+                continue
+            else:
+                skipped_no_oc_link += 1
+                internal_ids = grouped_pedido_internal_ids.get(key, [])
                 logger.debug(
-                    "Migrator [orden_pago] OP %s-%s: multiples OC vinculadas (%s), se omite pedido_internal_id",
+                    "Migrator [orden_pago] OP %s-%s omitida: sin OC migrada en link_store "
+                    "(pedido_internal_id candidatos=%s)",
                     key[0], key[1], internal_ids,
                 )
+                continue
+
+            for cc_key in grouped_cc_keys.get(key, []):
+                if cc_key not in included_cc_key_set:
+                    included_cc_key_set.add(cc_key)
+                    included_cc_keys.append(cc_key)
+                cc_key_to_pedido_id.setdefault(cc_key, pedido_id)
 
             # Mapear retenciones (de fetch separado)
             ret_payload = []
@@ -1885,6 +1900,18 @@ class MigratorExporter(BaseExporter):
                 "Migrator [orden_pago]: %d OPs omitidas sin gasto vinculado "
                 "(ni ORDEN_PAGO_IMPUT ni fallback SG→REG_COMP→CTA_COMPROB resolvieron)",
                 skipped_no_gasto,
+            )
+        if skipped_no_oc_link:
+            logger.warning(
+                "Migrator [orden_pago]: %d OPs omitidas sin OC migrada/linkeada; "
+                "no se crean pagos ni gastos sueltos",
+                skipped_no_oc_link,
+            )
+        if skipped_multiple_oc:
+            logger.warning(
+                "Migrator [orden_pago]: %d OPs omitidas por multiples OCs en un mismo pago; "
+                "se requiere mapeo por gasto antes de enviarlas",
+                skipped_multiple_oc,
             )
         if skipped_estado:
             logger.info("Migrator [orden_pago]: OPs omitidas por estado: %s", skipped_estado)
@@ -1924,10 +1951,17 @@ class MigratorExporter(BaseExporter):
         # proveedor_id + factura_nro + punto_de_venta, así que enviar gastos
         # ya migrados es no-op.
         gastos_payload: list[dict] = []
-        seen_dedup_keys: set[tuple[int, str, str]] = set()
+        seen_dedup_keys: set[tuple] = set()
         skipped_gastos_incomplete = 0
-        for cc_key, cc_raw in cc_raw_by_key.items():
-            gasto, dedup_key = self._build_gasto_from_op_row(cc_raw)
+        for cc_key in included_cc_keys:
+            cc_raw = cc_raw_by_key.get(cc_key)
+            if cc_raw is None:
+                continue
+            cc_raw_for_gasto = dict(cc_raw)
+            pedido_id = cc_key_to_pedido_id.get(cc_key)
+            if pedido_id is not None:
+                cc_raw_for_gasto["_PAXAPOS_PEDIDO_ID"] = pedido_id
+            gasto, dedup_key = self._build_gasto_from_op_row(cc_raw_for_gasto)
             if gasto is None:
                 skipped_gastos_incomplete += 1
                 continue

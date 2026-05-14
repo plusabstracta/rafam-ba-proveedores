@@ -1,6 +1,6 @@
 """
 Tests para:
-1. Filtro EJERCICIO >= RAFAM_EJERCICIO_MIN en source_repository
+1. Filtro EJERCICIO >= RAFAM_EJERCICIO_MIN sólo para OCs
 2. Flujo OC → OP: 4 OCs enviadas → siguiente corrida detecta y envía OPs vinculadas
 
 Usa SQLite in-memory para simular tablas RAFAM.
@@ -236,7 +236,7 @@ class TestEjercicioMinFilter:
         assert 2025 in ejercicios, "Sin filtro, OCs de 2025 deben aparecer"
         assert 2026 in ejercicios
 
-    def test_orden_pago_excluye_2025(self, engine_with_data):
+    def test_orden_pago_no_aplica_ejercicio_min(self, engine_with_data):
         cfg = EntityConfig(
             name="orden_pago",
             table_name="ORDEN_PAGO",
@@ -244,7 +244,6 @@ class TestEjercicioMinFilter:
             pending_state_field="ESTADO_OP",
             pending_state_value="N",
             pending_reprocess_days=30,
-            ejercicio_min=2026,
         )
         cp = Checkpoint(entity="orden_pago")
 
@@ -254,14 +253,12 @@ class TestEjercicioMinFilter:
                 stmt = repo.build_statement("orden_pago", cp)
                 rows = conn.execute(stmt).fetchall()
 
-        # ORDEN_PAGO.EJERCICIO is part of the select
-        cols = [col for col in rows[0]._fields] if rows else []
         ej_idx = 0  # EJERCICIO is first column in ORDEN_PAGO
         ejercicios = set()
         for r in rows:
             ejercicios.add(r[ej_idx])
 
-        assert 2025 not in ejercicios, "OPs de 2025 no deben aparecer con ejercicio_min=2026"
+        assert 2025 in ejercicios, "RAFAM_EJERCICIO_MIN no debe filtrar OPs"
         assert 2026 in ejercicios, "OPs de 2026 deben aparecer"
 
     def test_4_ocs_2026_procesadas(self, engine_with_data):
@@ -286,6 +283,41 @@ class TestEjercicioMinFilter:
         # Agrupar por (EJERCICIO, UNI_COMPRA, NRO_OC) — las 3 primeras columnas de OC_ITEMS
         oc_keys = {(r[0], r[1], r[2]) for r in rows}
         assert len(oc_keys) == 4, f"Deben ser 4 OCs, encontradas: {oc_keys}"
+
+    def test_oc_items_incluye_oc_vieja_referenciada_por_op(self, engine_with_data):
+        """Una OC anterior al minimo se trae si una OP confirmada la necesita."""
+        cfg = EntityConfig(
+            name="oc_items",
+            table_name="OC_ITEMS",
+            full_load=True,
+            ejercicio_min=2026,
+        )
+        cp = Checkpoint(entity="oc_items")
+
+        with engine_with_data.connect() as conn:
+            conn.execute(text("""
+                INSERT INTO REG_COMP VALUES
+                (2025, 900, 1, 100, 1, 1, 100)
+            """))
+            conn.execute(text("""
+                INSERT INTO CTA_COMPROB VALUES
+                (2025, 'FA', 'CC-2025-1', 100, 900,
+                 50000, 50000, '2025-06-10', '2025-07-10')
+            """))
+            conn.execute(text("""
+                INSERT INTO ORDEN_PAGO_IMPUT VALUES
+                (2025, 999, 900, 'FA', 'CC-2025-1', 100)
+            """))
+            conn.commit()
+
+            repo = SourceRepository(conn)
+            with patch.dict("src.config.ENTITY_CONFIGS", {"oc_items": cfg}):
+                stmt = repo.build_statement("oc_items", cp)
+                rows = conn.execute(stmt).fetchall()
+
+        oc_keys = {(r[0], r[1], r[2]) for r in rows}
+        assert (2025, 1, 1) in oc_keys
+        assert (2026, 1, 1) in oc_keys
 
 
 # ─── Tests: Flujo OC → OP ────────────────────────────────────────────────────

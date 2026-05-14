@@ -233,7 +233,23 @@ class SourceRepository:
                 window_start = datetime.now(timezone.utc) - timedelta(days=cfg.pending_reprocess_days or 30)
                 extra_filters.append(and_(estado_col == "A", fech_anul_col > window_start))
 
-        stmt = self._apply_incremental_filters(stmt, oc, cfg, checkpoint, extra_filters=extra_filters)
+        stmt = self._apply_oc_dependency_filter(
+            stmt,
+            cfg,
+            {
+                "ejercicio": oc.c.EJERCICIO,
+                "uni_compra": oc.c.UNI_COMPRA,
+                "nro_oc": oc.c.NRO_OC,
+            },
+        )
+        stmt = self._apply_incremental_filters(
+            stmt,
+            oc,
+            cfg,
+            checkpoint,
+            extra_filters=extra_filters,
+            apply_ejercicio_min=False,
+        )
         return stmt.order_by(oc.c.EJERCICIO, oc.c.UNI_COMPRA, oc.c.NRO_OC, oc_items.c.ITEM_OC)
 
     def _build_ped_items_statement(
@@ -325,7 +341,22 @@ class SourceRepository:
             ])
 
         stmt = select(*select_cols).select_from(from_clause)
-        stmt = self._apply_incremental_filters(stmt, oc_items, cfg, checkpoint)
+        stmt = self._apply_oc_dependency_filter(
+            stmt,
+            cfg,
+            {
+                "ejercicio": oc_items.c.EJERCICIO,
+                "uni_compra": oc_items.c.UNI_COMPRA,
+                "nro_oc": oc_items.c.NRO_OC,
+            },
+        )
+        stmt = self._apply_incremental_filters(
+            stmt,
+            oc_items,
+            cfg,
+            checkpoint,
+            apply_ejercicio_min=False,
+        )
         return stmt.order_by(oc_items.c.EJERCICIO, oc_items.c.UNI_COMPRA, oc_items.c.NRO_OC, oc_items.c.ITEM_OC)
 
     def _build_solic_gastos_statement(
@@ -644,6 +675,109 @@ class SourceRepository:
             .subquery("op_imput")
         )
 
+    def _build_op_required_oc_subquery(self):
+        """Return OCs required by confirmed OPs, without using NRO_CANCE."""
+        orden_pago = self._reflect_optional_table("ORDEN_PAGO")
+        opi = self._reflect_optional_table("ORDEN_PAGO_IMPUT")
+        reg_comp = self._reflect_optional_table("REG_COMP")
+        if orden_pago is None or opi is None or reg_comp is None:
+            return None
+
+        cols = {
+            "op_ej": self._safe_column(orden_pago, "EJERCICIO"),
+            "op_nro": self._safe_column(orden_pago, "NRO_OP"),
+            "op_estado": self._safe_column(orden_pago, "ESTADO_OP"),
+            "op_confirmado": self._safe_column(orden_pago, "CONFIRMADO"),
+            "op_fech_confirm": self._safe_column(orden_pago, "FECH_CONFIRM"),
+            "opi_ej": self._safe_column(opi, "EJERCICIO"),
+            "opi_op": self._safe_column(opi, "NRO_OP"),
+            "opi_rc": self._safe_column(opi, "NRO_REG_COMP"),
+            "opi_nro": self._safe_column(opi, "NRO_COMPROB"),
+            "opi_prov": self._safe_column(opi, "COD_PROV"),
+            "rc_ej": self._safe_column(reg_comp, "EJERCICIO"),
+            "rc_nro_rc": self._safe_column(reg_comp, "NRO_REG_COMP"),
+            "rc_uni": self._safe_column(reg_comp, "UNI_COMPRA"),
+            "rc_nro_oc": self._safe_column(reg_comp, "NRO_OC"),
+            "rc_prov": self._safe_column(reg_comp, "COD_PROV"),
+        }
+        required = (
+            "op_ej", "op_nro", "op_estado", "op_confirmado", "op_fech_confirm",
+            "opi_ej", "opi_op", "opi_rc", "opi_nro", "opi_prov",
+            "rc_ej", "rc_nro_rc", "rc_uni", "rc_nro_oc", "rc_prov",
+        )
+        if any(cols[k] is None for k in required):
+            return None
+
+        def nonblank(col):
+            if self._conn.dialect.name == "sqlite":
+                return func.nullif(col, "")
+            return col
+
+        rc_ej = nonblank(cols["rc_ej"])
+        rc_uni = nonblank(cols["rc_uni"])
+        rc_nro_oc = nonblank(cols["rc_nro_oc"])
+
+        from_clause = (
+            orden_pago.join(
+                opi,
+                and_(
+                    cols["op_ej"] == cols["opi_ej"],
+                    cols["op_nro"] == cols["opi_op"],
+                ),
+            ).join(
+                reg_comp,
+                and_(
+                    cols["opi_ej"] == cols["rc_ej"],
+                    cols["opi_rc"] == cols["rc_nro_rc"],
+                    cols["opi_prov"] == cols["rc_prov"],
+                ),
+            )
+        )
+
+        return (
+            select(
+                rc_ej.label("OC_EJERCICIO"),
+                rc_uni.label("OC_UNI_COMPRA"),
+                rc_nro_oc.label("OC_NRO"),
+            )
+            .select_from(from_clause)
+            .where(
+                and_(
+                    cols["op_estado"] == "C",
+                    cols["op_confirmado"] == "S",
+                    cols["op_fech_confirm"].is_not(None),
+                    nonblank(cols["opi_nro"]).is_not(None),
+                    rc_uni.is_not(None),
+                    rc_nro_oc.is_not(None),
+                )
+            )
+            .distinct()
+            .subquery("op_required_ocs")
+        )
+
+    def _apply_oc_dependency_filter(
+        self,
+        stmt: Select,
+        cfg: EntityConfig,
+        key_cols: dict[str, object],
+    ) -> Select:
+        if cfg.ejercicio_min is None:
+            return stmt
+
+        base_filter = key_cols["ejercicio"] >= cfg.ejercicio_min
+        required_ocs = self._build_op_required_oc_subquery()
+        if required_ocs is None:
+            return stmt.where(base_filter)
+
+        dependency_join = and_(
+            required_ocs.c.OC_EJERCICIO == key_cols["ejercicio"],
+            required_ocs.c.OC_UNI_COMPRA == key_cols["uni_compra"],
+            required_ocs.c.OC_NRO == key_cols["nro_oc"],
+        )
+        return stmt.outerjoin(required_ocs, dependency_join).where(
+            or_(base_filter, required_ocs.c.OC_EJERCICIO.is_not(None))
+        )
+
     def _build_orden_pago_statement(
         self,
         cfg: EntityConfig,
@@ -718,10 +852,11 @@ class SourceRepository:
         cfg: EntityConfig,
         cp: Checkpoint,
         extra_filters: list | None = None,
+        apply_ejercicio_min: bool = True,
     ) -> Select:
         # Apply ejercicio_min only for entities whose config explicitly enables it.
         # It is independent from full_load/fresh checkpoint behavior.
-        if cfg.ejercicio_min is not None:
+        if apply_ejercicio_min and cfg.ejercicio_min is not None:
             ej_col = self._safe_column(table, "EJERCICIO")
             if ej_col is not None:
                 stmt = stmt.where(ej_col >= cfg.ejercicio_min)

@@ -83,7 +83,7 @@ ORDEN_PAGO (EJERCICIO + NRO_OP)
 
 ```sql
 -- REG_COMP con NRO_OC poblado: 579/1075 filas (54%)
--- El otro 46% son gastos sin OC (servicios, contratos directos)
+-- El otro 46% no trae OC resoluble desde REG_COMP; en el migrator actual esas OP/gastos se omiten para no crear registros sueltos.
 -- Por lo tanto el path OC → REG_COMP es parcial por diseño
 ```
 

@@ -181,9 +181,9 @@ Se pueden enviar todas las entidades en un solo payload y el endpoint respeta el
 - Upsert por `Egreso.identificador_pago` (formato: `RAFAM-OP-{ej}-{nro}`). Si no viene, se autogenera como `RAFAM-{md5(externalId)}`.
 - Si ya existe → `skip_existing` (NO actualiza estado ni campos). No hay forma de hacer N→C post-creación.
 - Requiere mínimo 1 gasto resoluble — falla explícitamente si `gastoIds` está vacío.
-- Usa `gasto_nro_comprobante` como nexo obligatorio hacia gastos; el endpoint auto-crea el gasto si no existe y usa `pedido_id` si viene en el row. El script no resuelve ese ID contra `link_orden_compra`.
+- Usa `gasto_nro_comprobante` como nexo obligatorio hacia gastos; el endpoint auto-crea el gasto si no existe y usa `pedido_id` para vincularlo a la OC. El script debe resolver `pedido_id` contra `link_orden_compra` y omitir OP/gastos si no hay OC linkeada.
 - Feature flag: `Site.ordenes_de_pago` debe estar en `true` — si no, devuelve HTTP 400 inmediatamente.
-- Estados del Egreso: `0=Pendiente, 1=Aprobado, 2=Rechazado, 3=Pagado`. Enviar solo OPs RAFAM con `ESTADO_OP=N`, `CONFIRMADO=S` y `FECH_CONFIRM` presente como `estado=3`; omitir `ESTADO_OP=A`, `ESTADO_OP=C`, no confirmadas o sin fecha de confirmacion.
+- Estados del Egreso: `0=Pendiente, 1=Aprobado, 2=Rechazado, 3=Pagado`. Enviar solo OPs RAFAM con `ESTADO_OP=C`, `CONFIRMADO=S`, `FECH_CONFIRM` presente y OC resuelta a `pedido_id`; omitir anuladas, pendientes, no confirmadas, sin fecha o sin OC linkeada.
 - Si no se envía `estado`: con `fecha` → auto `PAGADO(3)`, sin `fecha` → auto `PENDIENTE(0)`. Para OPs confirmadas RAFAM, enviar `fecha=FECH_CONFIRM`.
 - `allowedFields` del save: `identificador_pago, fecha, tipo_de_pago_id, total, observacion, estado, fecha_programada, cuenta_bancaria_id, numero_operacion`. Notar que `proveedor_id` NO está.
 - Respuesta: `{success, id, mode: create|skip_existing, external_id, gasto_ids, gastos_creados}`.

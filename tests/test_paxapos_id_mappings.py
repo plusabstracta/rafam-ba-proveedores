@@ -6,7 +6,7 @@ Estos tests bloquean el contrato de mapeo entre RAFAM y Paxapos:
 - RAFAM CTA_COMPROB.TIPO  -> tipo_factura.id (1=A, 2=B, 5=C, 4=M, 7=Otros, 8..14 NC/ND)
 - RAFAM ORDEN_PAGO.TIPO_CANCE -> tipo_de_pago.id (1=Transferencia, 9=Cheque)
 - Default UM = 5 (Unidad)
-- pedido_internal_id se envia en OP cuando hay SG_OC_* y no se resuelve por link_store
+- orden_pago solo se envia cuando la OC ya resuelve a pedido_id local
 
 Si estos valores cambian, el lado servidor (CakePHP) tambien debe actualizarse.
 """
@@ -170,11 +170,11 @@ class TestResolveUnidadMedidaDefault:
         assert exporter._resolve_unidad_medida_id({"UNI_MED": "KILOGRAMO"}) == 3
 
 
-# ─── pedido_internal_id en payload de OP ─────────────────────────────────────
+# ─── pedido_id obligatorio en payload de OP ──────────────────────────────────
 
 
 class TestPedidoInternalIdEnOrdenPago:
-    """Verifica que el script envia pedido_internal_id como fallback robusto."""
+    """Verifica que el script no crea OP/gastos sin OC linkeada."""
 
     def _make_exporter(self):
         with patch("src.exporter.fetch_migrator_lookups") as mock_lookups:
@@ -233,28 +233,26 @@ class TestPedidoInternalIdEnOrdenPago:
         exp.write_batch("orden_pago", cols, rows)
         return sent
 
-    def test_envia_pedido_internal_id_cuando_link_store_vacio(self):
-        """OC nunca migrada por este script -> link_store vacio -> manda internal_id."""
+    @staticmethod
+    def _link_oc(exp, *, ejercicio=2026, uni_compra=1, nro_oc=777, remote_id="12345"):
+        oc_key = json.dumps(
+            {"ejercicio": ejercicio, "nro_oc": nro_oc, "uni_compra": uni_compra},
+            sort_keys=True,
+        )
+        exp._link_store.save_link("orden_compra", oc_key, remote_id=remote_id)
+
+    def test_omite_op_cuando_link_store_vacio(self):
+        """OC nunca migrada por este script -> no se envia la OP."""
         exp = self._make_exporter()
         rows = [self._row(self._columns())]
 
         sent = self._send_and_capture(exp, rows)
-        assert len(sent) == 1
-        ops = sent[0]["ordenes_pago"]
-        assert len(ops) == 1
-        op = ops[0]
-        # Sin link_store -> no hay pedido_id, pero SI pedido_internal_id
-        assert "pedido_id" not in op
-        assert op["pedido_internal_id"] == "26-777"
+        assert sent == []
 
     def test_no_envia_pedido_internal_id_si_pedido_id_resuelto(self):
         """OC ya migrada por este script -> link_store devuelve pedido_id."""
         exp = self._make_exporter()
-        # Pre-vincular OC en el link_store local
-        oc_key = json.dumps(
-            {"ejercicio": 2026, "nro_oc": 777, "uni_compra": 1}, sort_keys=True,
-        )
-        exp._link_store.save_link("orden_compra", oc_key, "12345")
+        self._link_oc(exp)
 
         rows = [self._row(self._columns())]
         sent = self._send_and_capture(exp, rows)
@@ -265,28 +263,29 @@ class TestPedidoInternalIdEnOrdenPago:
         assert "pedido_internal_id" not in op
 
     def test_omite_pedido_internal_id_si_falta_alguna_columna_oc(self):
-        """Sin SG_OC_* completo no se puede construir el internal_id."""
+        """Sin SG_OC_* completo no se puede resolver OC, entonces se omite."""
         exp = self._make_exporter()
         rows = [self._row(self._columns(), SG_OC_NRO="")]
         sent = self._send_and_capture(exp, rows)
-        op = sent[0]["ordenes_pago"][0]
-        assert "pedido_id" not in op
-        assert "pedido_internal_id" not in op
+        assert sent == []
 
-    def test_internal_id_es_lowercase_y_formato_canonico(self):
-        """El formato debe coincidir con lo que el OC migra: {ej}-{nro}."""
+    def test_op_con_oc_vieja_linkeada_envia_pedido_id(self):
+        """Una OC vieja incluida por dependencia se vincula por pedido_id local."""
         exp = self._make_exporter()
+        self._link_oc(exp, ejercicio=2025, uni_compra=3, nro_oc=42, remote_id="4242")
         rows = [self._row(
             self._columns(),
             SG_OC_EJERCICIO="2025", SG_OC_UNI_COMPRA="3", SG_OC_NRO="42",
         )]
         sent = self._send_and_capture(exp, rows)
         op = sent[0]["ordenes_pago"][0]
-        assert op["pedido_internal_id"] == "25-42"
+        assert op["pedido_id"] == 4242
+        assert "pedido_internal_id" not in op
 
     def test_tipo_pago_se_setea_desde_tipo_cance(self):
         """TIPO_CANCE='CA' -> tipo_de_pago_id=9 (Cheque)."""
         exp = self._make_exporter()
+        self._link_oc(exp)
         rows = [self._row(self._columns(), TIPO_CANCE="CA")]
         sent = self._send_and_capture(exp, rows)
         op = sent[0]["ordenes_pago"][0]
@@ -295,6 +294,7 @@ class TestPedidoInternalIdEnOrdenPago:
     def test_tipo_pago_default_para_tipo_cance_no(self):
         """TIPO_CANCE='NO' -> tipo_de_pago_id=1 (Transferencia bancaria)."""
         exp = self._make_exporter()
+        self._link_oc(exp)
         rows = [self._row(self._columns(), TIPO_CANCE="NO")]
         sent = self._send_and_capture(exp, rows)
         op = sent[0]["ordenes_pago"][0]
@@ -345,7 +345,7 @@ class TestNoCrearPagosEnCero:
             "IMPORTE_TOTAL", "CONCEPTO", "NRO_CANCE",
             "SG_DELEG_SOLIC", "SG_NRO_SOLIC",
             "OPI_NRO_COMPROB",
-            "FECH_CONFIRM", "CONFIRMADO", "TIPO_CANCE",
+            "pedido_id", "FECH_CONFIRM", "CONFIRMADO", "TIPO_CANCE",
         ]
 
     def _row(self, cols, **overrides):
@@ -356,6 +356,7 @@ class TestNoCrearPagosEnCero:
             "CONCEPTO": "Pago", "NRO_CANCE": "9100",
             "SG_DELEG_SOLIC": "1", "SG_NRO_SOLIC": "300",
             "OPI_NRO_COMPROB": "0001-00099999",
+            "pedido_id": "12345",
             "FECH_CONFIRM": "2026-04-15 00:00:00", "CONFIRMADO": "S",
             "TIPO_CANCE": "NO",
         }
