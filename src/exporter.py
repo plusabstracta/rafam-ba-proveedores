@@ -1639,7 +1639,6 @@ class MigratorExporter(BaseExporter):
         grouped_pedido_ids: dict[tuple[int, int], list[int]] = {}
         grouped_pedido_internal_ids: dict[tuple[int, int], list[str]] = {}
         grouped_oc_source_keys: dict[tuple[int, int], list[str]] = {}
-        op_to_nro_cance: dict[tuple[int, int], int] = {}
         raw_by_source_key: dict[str, dict] = {}
         # cc_raw_by_key: dedup por comprobante fiscal real para emitir gastos[]
         # con datos de CTA_COMPROB (importe, fecha, tipo, vencimiento). La key
@@ -1820,20 +1819,21 @@ class MigratorExporter(BaseExporter):
             if remote_prov_id is not None:
                 grouped[key]["proveedor_id"] = remote_prov_id
 
-            # Guardar NRO_CANCE para fetch posterior de retenciones
-            nro_cance = self._to_int(raw.get("NRO_CANCE"))
-            if nro_cance is not None:
-                op_to_nro_cance[key] = nro_cance
+            # Guardar IMPORTE_LIQUIDO para neto_transferido
+            importe_liquido = raw.get("IMPORTE_LIQUIDO")
+            if importe_liquido is not None:
+                try:
+                    neto = round(float(importe_liquido), 2)
+                    if neto >= 0:
+                        grouped[key]["_importe_liquido"] = neto
+                except (TypeError, ValueError):
+                    pass
 
-        # Fetch retenciones en query separada (por (EJERCICIO, NRO_CANCE))
-        retenciones_by_op: dict[tuple[int, int], list[dict]] = {}
-        if op_to_nro_cance and self._source_repo is not None:
-            cance_keys = {(ej, nc) for (ej, _), nc in op_to_nro_cance.items()}
-            cance_to_rets = self._source_repo.fetch_retenciones_for_ops(list(cance_keys))
-            for op_key, nc in op_to_nro_cance.items():
-                rets = cance_to_rets.get((op_key[0], nc), [])
-                if rets:
-                    retenciones_by_op[op_key] = rets
+        # Fetch deducciones por OP individual (ORDEN_PAGOEA_DEDUC por (EJERCICIO, NRO_OP))
+        deducciones_by_op: dict[tuple[int, int], list[dict]] = {}
+        if grouped and self._source_repo is not None:
+            op_keys_for_deduc = list(grouped.keys())
+            deducciones_by_op = self._source_repo.fetch_deducciones_for_ops(op_keys_for_deduc)
 
         ordenes_pago = []
         included_cc_keys: list[tuple[str, str, str]] = []
@@ -1885,14 +1885,20 @@ class MigratorExporter(BaseExporter):
                     included_cc_keys.append(cc_key)
                 cc_key_to_pedido_id.setdefault(cc_key, pedido_id)
 
-            # Mapear retenciones (de fetch separado)
+            # Mapear deducciones (de ORDEN_PAGOEA_DEDUC por NRO_OP)
             ret_payload = []
-            for ret in retenciones_by_op.get(key, []):
-                mapped = self._map_retencion_dict(ret, key[0], key[1])
+            for ded in deducciones_by_op.get(key, []):
+                mapped = self._map_deduccion_dict(ded, key[0], key[1])
                 if mapped is not None:
                     ret_payload.append(mapped)
             if ret_payload:
                 op["retenciones"] = ret_payload
+
+            # neto_transferido = IMPORTE_LIQUIDO de RAFAM (si disponible)
+            importe_liquido = op.pop("_importe_liquido", None)
+            if importe_liquido is not None:
+                op["Egreso"]["neto_transferido"] = importe_liquido
+
             ordenes_pago.append(op)
 
         if skipped_no_gasto:
@@ -2264,6 +2270,74 @@ class MigratorExporter(BaseExporter):
 
         if descripcion:
             retencion["observacion"] = f"Retencion RAFAM {descripcion} OP {ejercicio}/{nro_op}"
+
+        return retencion
+
+    def _map_deduccion_dict(self, ded: dict, ejercicio: int, nro_op: int) -> dict | None:
+        """Mapea una deduccion de ORDEN_PAGOEA_DEDUC al formato Paxapos retenciones.
+
+        Usa codigo_deduc/importe_reten/descripcion para resolver tipo_impuesto_id.
+        """
+        codigo_deduc = ded.get("codigo_deduc")
+        importe_reten = ded.get("importe_reten")
+        if codigo_deduc is None or importe_reten is None:
+            return None
+
+        cod_text = str(codigo_deduc).strip()
+        if not cod_text:
+            return None
+
+        try:
+            monto_retenido = float(importe_reten)
+        except (TypeError, ValueError):
+            return None
+        if monto_retenido == 0:
+            return None
+
+        descripcion = str(ded.get("descripcion") or "").strip()
+
+        tipo_retencion_id = self._resolve_tipo_retencion_id(cod_text, descripcion)
+        if tipo_retencion_id is None:
+            alias = self._retencion_alias(descripcion or cod_text)
+            if alias:
+                tipo_retencion_id = self._resolve_tipo_retencion_id_by_alias(alias)
+
+        if tipo_retencion_id is None:
+            if not self._tipos_retencion:
+                self._retencion_skipped_no_catalog += 1
+            else:
+                key = descripcion or f"CODIGO_DEDUC={cod_text}"
+                self._retencion_skipped_no_match[key] = self._retencion_skipped_no_match.get(key, 0) + 1
+            return None
+
+        retencion: dict = {
+            "external_id": {
+                "ejercicio": ejercicio,
+                "nro_op": nro_op,
+                "codigo_deduc": cod_text,
+            },
+            "monto_retenido": monto_retenido,
+            "numero_certificado": f"RAFAM-RET-{ejercicio}-{nro_op}-{cod_text}",
+            "tipo_impuesto_id": tipo_retencion_id,
+        }
+
+        # Alicuota si está disponible
+        alicuota = ded.get("alicuota")
+        if alicuota is not None:
+            try:
+                alicuota_val = float(alicuota)
+                if alicuota_val > 0:
+                    retencion["alicuota"] = alicuota_val
+            except (TypeError, ValueError):
+                pass
+
+        # Certificado de deducción
+        comprob_deduc = ded.get("comprob_deduc")
+        if comprob_deduc is not None and str(comprob_deduc).strip():
+            retencion["numero_certificado"] = str(comprob_deduc).strip()
+
+        if descripcion:
+            retencion["observacion"] = f"Deduccion RAFAM {descripcion} OP {ejercicio}/{nro_op}"
 
         return retencion
 

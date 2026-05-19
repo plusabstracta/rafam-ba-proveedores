@@ -153,6 +153,96 @@ class SourceRepository:
             out.setdefault((ej, nc), []).append(entry)
         return out
 
+    def fetch_deducciones_for_ops(
+        self,
+        op_keys: list[tuple[int, int]] | set[tuple[int, int]],
+    ) -> dict[tuple[int, int], list[dict]]:
+        """Trae deducciones individuales por OP desde ORDEN_PAGOEA_DEDUC.
+
+        Clave: (EJERCICIO, NRO_OP).
+        Devuelve dict {(ejercicio, nro_op): [{codigo_deduc, importe_reten, alicuota,
+        comprob_deduc, cuenta, descripcion}, ...]}.
+        """
+        if not op_keys:
+            return {}
+
+        op_deduc = self._reflect_optional_table("ORDEN_PAGOEA_DEDUC")
+        if op_deduc is None:
+            return {}
+        deducciones = self._reflect_optional_table("DEDUCCIONES")
+
+        od_ej = self._safe_column(op_deduc, "EJERCICIO")
+        od_nro_op = self._safe_column(op_deduc, "NRO_OP")
+        od_codigo = self._safe_column(op_deduc, "CODIGO_DEDUC")
+        od_importe = self._safe_column(op_deduc, "IMPORTE_RETEN")
+        if od_ej is None or od_nro_op is None or od_codigo is None or od_importe is None:
+            return {}
+
+        od_alicuota = self._safe_column(op_deduc, "ALICUOTA")
+        od_comprob = self._safe_column(op_deduc, "COMPROB_DEDUC")
+        od_cuenta = self._safe_column(op_deduc, "CUENTA")
+
+        select_cols = [
+            od_ej.label("EJERCICIO"),
+            od_nro_op.label("NRO_OP"),
+            od_codigo.label("CODIGO_DEDUC"),
+            od_importe.label("IMPORTE_RETEN"),
+        ]
+        if od_alicuota is not None:
+            select_cols.append(od_alicuota.label("ALICUOTA"))
+        if od_comprob is not None:
+            select_cols.append(od_comprob.label("COMPROB_DEDUC"))
+        if od_cuenta is not None:
+            select_cols.append(od_cuenta.label("CUENTA"))
+
+        from_clause = op_deduc
+
+        if deducciones is not None:
+            ded_codigo = self._safe_column(deducciones, "CODIGO")
+            ded_desc = self._safe_column(deducciones, "DESCRIPCION")
+            if ded_codigo is not None:
+                join_conditions = [od_codigo == ded_codigo]
+                ded_ejercicio = self._safe_column(deducciones, "EJERCICIO")
+                if ded_ejercicio is not None:
+                    join_conditions.append(od_ej == ded_ejercicio)
+                from_clause = from_clause.outerjoin(deducciones, and_(*join_conditions))
+                if ded_desc is not None:
+                    select_cols.append(ded_desc.label("DESCRIPCION"))
+
+        keys_by_ej: dict[int, set[int]] = {}
+        for ej, nro_op in op_keys:
+            if ej is None or nro_op is None:
+                continue
+            keys_by_ej.setdefault(int(ej), set()).add(int(nro_op))
+
+        if not keys_by_ej:
+            return {}
+
+        ej_filters = []
+        for ej, nro_ops in keys_by_ej.items():
+            ej_filters.append(and_(od_ej == ej, od_nro_op.in_(list(nro_ops))))
+
+        stmt = select(*select_cols).select_from(from_clause).where(or_(*ej_filters))
+
+        out: dict[tuple[int, int], list[dict]] = {}
+        for row in self._conn.execute(stmt):
+            mapping = row._mapping
+            try:
+                ej = int(mapping["EJERCICIO"])
+                nro_op = int(mapping["NRO_OP"])
+            except (TypeError, ValueError, KeyError):
+                continue
+            entry = {
+                "codigo_deduc": mapping.get("CODIGO_DEDUC"),
+                "importe_reten": mapping.get("IMPORTE_RETEN"),
+                "alicuota": mapping.get("ALICUOTA") if "ALICUOTA" in mapping.keys() else None,
+                "comprob_deduc": mapping.get("COMPROB_DEDUC") if "COMPROB_DEDUC" in mapping.keys() else None,
+                "cuenta": mapping.get("CUENTA") if "CUENTA" in mapping.keys() else None,
+                "descripcion": mapping.get("DESCRIPCION") if "DESCRIPCION" in mapping.keys() else None,
+            }
+            out.setdefault((ej, nro_op), []).append(entry)
+        return out
+
     def _build_simple_table_statement(
         self,
         cfg: EntityConfig,

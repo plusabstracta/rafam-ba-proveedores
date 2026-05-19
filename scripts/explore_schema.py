@@ -48,6 +48,7 @@ TARGET_TABLES: list[str] = [
     "SOLIC_GASTOS",       # eslabón intermedio del JOIN OP -> CC
     "RETENCIONES",
     "DEDUCCIONES",        # resuelve tipo_impuesto_id (COD_RET -> nombre)
+    "ORDEN_PAGOEA_DEDUC", # deducciones por OP individual (PK: EJERCICIO+NRO_OP+CODIGO_DEDUC)
     # ── Resolución de items / mercadería (link OC_ITEMS ↔ PED_ITEMS) ───────
     "PEDIDOS",
     "PED_ITEMS",

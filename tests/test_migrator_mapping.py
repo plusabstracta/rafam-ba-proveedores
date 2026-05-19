@@ -1053,3 +1053,143 @@ class TestWriteBatchOcItems:
 
         link_after = exp._link_store.get_link("orden_compra", source_key)
         assert link_after["has_op"] == "1"
+
+
+# ─── Tests para deducciones por OP (ORDEN_PAGOEA_DEDUC) ─────────────────────
+
+
+class TestFetchDeduccionesForOps:
+    """Valida que fetch_deducciones_for_ops usa ORDEN_PAGOEA_DEDUC por NRO_OP."""
+
+    def _make_sqlite_with_deducciones(self, tmp_path):
+        from sqlalchemy import create_engine, text as sa_text
+        db_path = tmp_path / "test_deduc.db"
+        engine = create_engine(f"sqlite:///{db_path}", future=True)
+        with engine.begin() as conn:
+            conn.execute(sa_text("""
+                CREATE TABLE ORDEN_PAGOEA_DEDUC (
+                    EJERCICIO TEXT, NRO_OP TEXT, CODIGO_DEDUC TEXT,
+                    IMPORTE_RETEN TEXT, ALICUOTA TEXT, COMPROB_DEDUC TEXT,
+                    TIPO_GENERAC TEXT, CUENTA TEXT, COEF_CONV_MULTI TEXT,
+                    ACTIVIDAD TEXT, TIPO_ALICUOTA TEXT
+                )
+            """))
+            conn.execute(sa_text("""
+                CREATE TABLE DEDUCCIONES (
+                    CODIGO TEXT, DESCRIPCION TEXT, TIPO_DEDUC TEXT,
+                    PORCENTAJE TEXT, SALDO TEXT, DECRIPCION_AB TEXT,
+                    CODIGO_AXT TEXT, EJERCICIO TEXT
+                )
+            """))
+            # OP 1392 tiene 1 deducción de 3400
+            conn.execute(sa_text(
+                "INSERT INTO ORDEN_PAGOEA_DEDUC VALUES ('2026','1392','5','3400','10.5','7001','A','123',NULL,NULL,NULL)"
+            ))
+            # OP 1393 tiene 1 deducción de 10000
+            conn.execute(sa_text(
+                "INSERT INTO ORDEN_PAGOEA_DEDUC VALUES ('2026','1393','5','10000','10.5','7002','A','124',NULL,NULL,NULL)"
+            ))
+            # OP 1394 tiene 1 deducción de 800
+            conn.execute(sa_text(
+                "INSERT INTO ORDEN_PAGOEA_DEDUC VALUES ('2026','1394','3','800','3','7003','M',NULL,NULL,NULL,NULL)"
+            ))
+            # Lookup de deducciones
+            conn.execute(sa_text(
+                "INSERT INTO DEDUCCIONES VALUES ('5','RET. GANANCIAS','R',NULL,NULL,NULL,NULL,'2026')"
+            ))
+            conn.execute(sa_text(
+                "INSERT INTO DEDUCCIONES VALUES ('3','RET. IIBB','R',NULL,NULL,NULL,NULL,'2026')"
+            ))
+        return engine
+
+    def test_returns_deducciones_keyed_by_nro_op(self, tmp_path):
+        from src.source_repository import SourceRepository
+        engine = self._make_sqlite_with_deducciones(tmp_path)
+        with engine.connect() as conn:
+            repo = SourceRepository(conn, schema=None)
+            result = repo.fetch_deducciones_for_ops([(2026, 1392), (2026, 1393), (2026, 1394)])
+
+        assert (2026, 1392) in result
+        assert (2026, 1393) in result
+        assert (2026, 1394) in result
+        # Cada OP tiene solo SU deducción, no la de las demás
+        assert len(result[(2026, 1392)]) == 1
+        assert float(result[(2026, 1392)][0]["importe_reten"]) == 3400
+        assert float(result[(2026, 1393)][0]["importe_reten"]) == 10000
+        assert float(result[(2026, 1394)][0]["importe_reten"]) == 800
+        # Descripción viene del JOIN con DEDUCCIONES
+        assert result[(2026, 1392)][0]["descripcion"] == "RET. GANANCIAS"
+        assert result[(2026, 1394)][0]["descripcion"] == "RET. IIBB"
+
+    def test_empty_keys_returns_empty(self, tmp_path):
+        from src.source_repository import SourceRepository
+        engine = self._make_sqlite_with_deducciones(tmp_path)
+        with engine.connect() as conn:
+            repo = SourceRepository(conn, schema=None)
+            assert repo.fetch_deducciones_for_ops([]) == {}
+
+    def test_missing_table_returns_empty(self, tmp_path):
+        from sqlalchemy import create_engine
+        db_path = tmp_path / "empty.db"
+        engine = create_engine(f"sqlite:///{db_path}", future=True)
+        with engine.begin() as conn:
+            pass  # DB vacía
+        from src.source_repository import SourceRepository
+        with engine.connect() as conn:
+            repo = SourceRepository(conn, schema=None)
+            assert repo.fetch_deducciones_for_ops([(2026, 1)]) == {}
+
+
+class TestMapDeduccionDict:
+    """Valida _map_deduccion_dict del exporter."""
+
+    @pytest.fixture
+    def exporter(self):
+        with patch("src.exporter.fetch_migrator_lookups") as mock_lookups:
+            mock_lookups.return_value = {
+                "unidades_de_medida": [],
+                "tipos_factura": [],
+                "tipos_de_pago": [{"id": "4", "name": "Transferencia"}],
+                "tipos_retencion": [
+                    {"id": "102", "name": "Retención de IVA"},
+                    {"id": "103", "name": "Retención de Ganancias"},
+                    {"id": "104", "name": "Retención de IIBB"},
+                    {"id": "105", "name": "Retención SUSS"},
+                ],
+            }
+            with patch.dict("os.environ", {
+                "PAXAPOS_URL": "https://example.com",
+                "PAXAPOS_TENANT": "test",
+                "PAXAPOS_API_KEY": "key",
+                "PAXAPOS_RAFAM_DEFAULT_UNIDAD_ID": "1",
+                "PAXAPOS_RAFAM_DEFAULT_TIPO_PAGO_ID": "4",
+                "LOCAL_STATE_DB_PATH": ":memory:",
+            }):
+                exp = MigratorExporter(dry_run=True)
+        return exp
+
+    def test_maps_deduccion_with_alicuota(self, exporter):
+        ded = {
+            "codigo_deduc": "5",
+            "importe_reten": "3400.00",
+            "alicuota": "10.5",
+            "comprob_deduc": "7001",
+            "cuenta": "123",
+            "descripcion": "RET. GANANCIAS",
+        }
+        result = exporter._map_deduccion_dict(ded, 2026, 1392)
+        assert result is not None
+        assert result["monto_retenido"] == 3400.00
+        assert result["tipo_impuesto_id"] == 103  # Ganancias
+        assert result["alicuota"] == 10.5
+        assert result["numero_certificado"] == "7001"
+        assert result["external_id"]["codigo_deduc"] == "5"
+
+    def test_zero_importe_returns_none(self, exporter):
+        ded = {"codigo_deduc": "5", "importe_reten": "0", "descripcion": "GANANCIAS"}
+        assert exporter._map_deduccion_dict(ded, 2026, 1) is None
+
+    def test_no_catalog_match_returns_none(self, exporter):
+        ded = {"codigo_deduc": "999", "importe_reten": "100", "descripcion": "DESCONOCIDO XYZ"}
+        result = exporter._map_deduccion_dict(ded, 2026, 1)
+        assert result is None
