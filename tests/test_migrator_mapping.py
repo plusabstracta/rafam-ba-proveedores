@@ -1139,6 +1139,53 @@ class TestFetchDeduccionesForOps:
             repo = SourceRepository(conn, schema=None)
             assert repo.fetch_deducciones_for_ops([(2026, 1)]) == {}
 
+    def test_retenciones_fallback_uses_nro_cance(self, tmp_path):
+        """Valida que fetch_retenciones_fallback_for_ops trae datos de RETENCIONES
+        y los re-mapea de (ej, nro_cance) a (ej, nro_op)."""
+        from sqlalchemy import create_engine, text as sa_text
+        db_path = tmp_path / "test_ret_fallback.db"
+        engine = create_engine(f"sqlite:///{db_path}", future=True)
+        with engine.begin() as conn:
+            conn.execute(sa_text("""
+                CREATE TABLE RETENCIONES (
+                    EJERCICIO TEXT, NRO_CANCE TEXT, COD_RET TEXT,
+                    IMPORTE TEXT, CUENTA TEXT
+                )
+            """))
+            conn.execute(sa_text("""
+                CREATE TABLE DEDUCCIONES (
+                    CODIGO TEXT, DESCRIPCION TEXT, TIPO_DEDUC TEXT,
+                    PORCENTAJE TEXT, SALDO TEXT, DECRIPCION_AB TEXT,
+                    CODIGO_AXT TEXT, EJERCICIO TEXT
+                )
+            """))
+            conn.execute(sa_text(
+                "INSERT INTO RETENCIONES VALUES ('2026','927','3','1140.0','111')"
+            ))
+            conn.execute(sa_text(
+                "INSERT INTO RETENCIONES VALUES ('2026','927','6','1824.0','222')"
+            ))
+            conn.execute(sa_text(
+                "INSERT INTO DEDUCCIONES VALUES ('3','A.F.I.P. - Ganancias','R',NULL,NULL,NULL,NULL,'2026')"
+            ))
+            conn.execute(sa_text(
+                "INSERT INTO DEDUCCIONES VALUES ('6','Ingresos Brutos','R',NULL,NULL,NULL,NULL,'2026')"
+            ))
+        with engine.connect() as conn:
+            from src.source_repository import SourceRepository
+            repo = SourceRepository(conn, schema=None)
+            # OP 1392 tiene NRO_CANCE=927
+            nro_cance_map = {(2026, 1392): 927}
+            result = repo.fetch_retenciones_fallback_for_ops(nro_cance_map)
+
+        assert (2026, 1392) in result
+        assert len(result[(2026, 1392)]) == 2
+        importes = sorted([float(r["importe_reten"]) for r in result[(2026, 1392)]])
+        assert importes == [1140.0, 1824.0]
+        # Verificar que descripciones se pasaron
+        descs = {r["descripcion"] for r in result[(2026, 1392)] if r["descripcion"]}
+        assert "A.F.I.P. - Ganancias" in descs or "Ingresos Brutos" in descs
+
 
 class TestMapDeduccionDict:
     """Valida _map_deduccion_dict del exporter."""

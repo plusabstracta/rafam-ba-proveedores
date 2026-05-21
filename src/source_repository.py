@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import Column, MetaData, Table, and_, case, func, literal_column, or_, select
@@ -10,6 +11,8 @@ from sqlalchemy.sql import Select
 
 from .config import ENTITY_CONFIGS, SCHEMA
 from .models import Checkpoint, EntityConfig
+
+logger = logging.getLogger(__name__)
 
 
 class SourceRepository:
@@ -44,6 +47,12 @@ class SourceRepository:
                         f"RAFAM_SOURCE_BACKEND=oracle en .env"
                     ) from exc
                 raise
+            if not col_defs:
+                logger.warning(
+                    "get_columns('%s', schema='%s') retorno 0 columnas. "
+                    "Posible falta de privilegios SELECT o tabla inexistente.",
+                    table_name, self._schema,
+                )
             table = Table(table_name, self._metadata, schema=self._schema)
             for col_def in col_defs:
                 table.append_column(Column(col_def["name"].upper(), col_def["type"]))
@@ -54,7 +63,11 @@ class SourceRepository:
     def _reflect_optional_table(self, table_name: str):
         try:
             return self._reflect_table(table_name)
-        except SQLAlchemyError:
+        except SQLAlchemyError as exc:
+            logger.warning(
+                "No se pudo reflejar tabla opcional '%s' (schema=%s): %s",
+                table_name, self._schema, exc,
+            )
             return None
 
     def build_statement(self, entity: str, checkpoint: Checkpoint) -> Select:
@@ -168,6 +181,11 @@ class SourceRepository:
 
         op_deduc = self._reflect_optional_table("ORDEN_PAGOEA_DEDUC")
         if op_deduc is None:
+            logger.warning(
+                "fetch_deducciones_for_ops: tabla ORDEN_PAGOEA_DEDUC no disponible "
+                "(schema=%s). Las retenciones se resolveran via RETENCIONES+NRO_CANCE.",
+                self._schema,
+            )
             return {}
         deducciones = self._reflect_optional_table("DEDUCCIONES")
 
@@ -176,6 +194,14 @@ class SourceRepository:
         od_codigo = self._safe_column(op_deduc, "CODIGO_DEDUC")
         od_importe = self._safe_column(op_deduc, "IMPORTE_RETEN")
         if od_ej is None or od_nro_op is None or od_codigo is None or od_importe is None:
+            logger.warning(
+                "fetch_deducciones_for_ops: ORDEN_PAGOEA_DEDUC reflejada sin columnas "
+                "requeridas (EJERCICIO=%s, NRO_OP=%s, CODIGO_DEDUC=%s, IMPORTE_RETEN=%s). "
+                "Columnas disponibles: %s",
+                od_ej is not None, od_nro_op is not None,
+                od_codigo is not None, od_importe is not None,
+                [c.name for c in op_deduc.columns] if hasattr(op_deduc, "columns") else "?",
+            )
             return {}
 
         od_alicuota = self._safe_column(op_deduc, "ALICUOTA")
@@ -225,22 +251,102 @@ class SourceRepository:
         stmt = select(*select_cols).select_from(from_clause).where(or_(*ej_filters))
 
         out: dict[tuple[int, int], list[dict]] = {}
-        for row in self._conn.execute(stmt):
-            mapping = row._mapping
-            try:
-                ej = int(mapping["EJERCICIO"])
-                nro_op = int(mapping["NRO_OP"])
-            except (TypeError, ValueError, KeyError):
+        try:
+            for row in self._conn.execute(stmt):
+                mapping = row._mapping
+                try:
+                    ej = int(mapping["EJERCICIO"])
+                    nro_op = int(mapping["NRO_OP"])
+                except (TypeError, ValueError, KeyError):
+                    continue
+                entry = {
+                    "codigo_deduc": mapping.get("CODIGO_DEDUC"),
+                    "importe_reten": mapping.get("IMPORTE_RETEN"),
+                    "alicuota": mapping.get("ALICUOTA") if "ALICUOTA" in mapping.keys() else None,
+                    "comprob_deduc": mapping.get("COMPROB_DEDUC") if "COMPROB_DEDUC" in mapping.keys() else None,
+                    "cuenta": mapping.get("CUENTA") if "CUENTA" in mapping.keys() else None,
+                    "descripcion": mapping.get("DESCRIPCION") if "DESCRIPCION" in mapping.keys() else None,
+                }
+                out.setdefault((ej, nro_op), []).append(entry)
+        except (SQLAlchemyError, Exception) as exc:
+            logger.warning(
+                "fetch_deducciones_for_ops: error ejecutando query ORDEN_PAGOEA_DEDUC: %s. "
+                "Las retenciones se resolveran via RETENCIONES+NRO_CANCE.",
+                exc,
+            )
+            return {}
+
+        if out:
+            logger.debug(
+                "fetch_deducciones_for_ops: %d OPs con deducciones encontradas en ORDEN_PAGOEA_DEDUC",
+                len(out),
+            )
+        else:
+            logger.info(
+                "fetch_deducciones_for_ops: ORDEN_PAGOEA_DEDUC no devolvio filas para %d keys. "
+                "Se intentara fallback via RETENCIONES+NRO_CANCE.",
+                len(op_keys),
+            )
+        return out
+
+    def fetch_retenciones_fallback_for_ops(
+        self,
+        nro_cance_map: dict[tuple[int, int], int],
+    ) -> dict[tuple[int, int], list[dict]]:
+        """Fallback: trae retenciones desde RETENCIONES por (EJERCICIO, NRO_CANCE).
+
+        Recibe un mapeo {(ejercicio, nro_op): nro_cance} y devuelve resultados
+        re-keyed como {(ejercicio, nro_op): [{codigo_deduc, importe_reten, descripcion}, ...]}.
+
+        Se usa cuando ORDEN_PAGOEA_DEDUC no esta disponible o no devuelve filas.
+        La tabla RETENCIONES tiene cobertura completa (~79K filas vs ~15K en
+        ORDEN_PAGOEA_DEDUC) y es la fuente canonica de retenciones por pago.
+        """
+        if not nro_cance_map:
+            return {}
+
+        # Invertir mapa: {(ejercicio, nro_cance): [(ejercicio, nro_op), ...]}
+        cance_to_ops: dict[tuple[int, int], list[tuple[int, int]]] = {}
+        for (ej, nro_op), nro_cance in nro_cance_map.items():
+            if nro_cance is None:
                 continue
-            entry = {
-                "codigo_deduc": mapping.get("CODIGO_DEDUC"),
-                "importe_reten": mapping.get("IMPORTE_RETEN"),
-                "alicuota": mapping.get("ALICUOTA") if "ALICUOTA" in mapping.keys() else None,
-                "comprob_deduc": mapping.get("COMPROB_DEDUC") if "COMPROB_DEDUC" in mapping.keys() else None,
-                "cuenta": mapping.get("CUENTA") if "CUENTA" in mapping.keys() else None,
-                "descripcion": mapping.get("DESCRIPCION") if "DESCRIPCION" in mapping.keys() else None,
-            }
-            out.setdefault((ej, nro_op), []).append(entry)
+            cance_key = (int(ej), int(nro_cance))
+            cance_to_ops.setdefault(cance_key, []).append((ej, nro_op))
+
+        if not cance_to_ops:
+            return {}
+
+        # Reutilizar fetch_retenciones_for_ops con las keys de NRO_CANCE
+        ret_by_cance = self.fetch_retenciones_for_ops(set(cance_to_ops.keys()))
+
+        if not ret_by_cance:
+            logger.info(
+                "fetch_retenciones_fallback_for_ops: RETENCIONES tampoco devolvio filas "
+                "para %d NRO_CANCE unicos.",
+                len(cance_to_ops),
+            )
+            return {}
+
+        # Re-mapear de (ej, nro_cance) -> (ej, nro_op), convirtiendo al formato
+        # esperado por _map_deduccion_dict: {codigo_deduc, importe_reten, descripcion}
+        out: dict[tuple[int, int], list[dict]] = {}
+        for cance_key, entries in ret_by_cance.items():
+            op_keys = cance_to_ops.get(cance_key, [])
+            for op_key in op_keys:
+                for entry in entries:
+                    out.setdefault(op_key, []).append({
+                        "codigo_deduc": entry.get("cod_ret"),
+                        "importe_reten": entry.get("importe"),
+                        "alicuota": None,
+                        "comprob_deduc": None,
+                        "cuenta": None,
+                        "descripcion": entry.get("descripcion"),
+                    })
+
+        logger.info(
+            "fetch_retenciones_fallback_for_ops: %d OPs con retenciones via RETENCIONES table",
+            len(out),
+        )
         return out
 
     def _build_simple_table_statement(

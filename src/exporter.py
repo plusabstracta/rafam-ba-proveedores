@@ -1640,6 +1640,8 @@ class MigratorExporter(BaseExporter):
         grouped_pedido_internal_ids: dict[tuple[int, int], list[str]] = {}
         grouped_oc_source_keys: dict[tuple[int, int], list[str]] = {}
         raw_by_source_key: dict[str, dict] = {}
+        # Mapping (ejercicio, nro_op) → nro_cance para fallback RETENCIONES
+        nro_cance_by_op: dict[tuple[int, int], int] = {}
         # cc_raw_by_key: dedup por comprobante fiscal real para emitir gastos[]
         # con datos de CTA_COMPROB (importe, fecha, tipo, vencimiento). La key
         # es (CC_TIPO, CC_NRO, CC_COD_PROV) — PK lógica del comprobante en RAFAM.
@@ -1658,6 +1660,12 @@ class MigratorExporter(BaseExporter):
                 continue
 
             key = (ejercicio, nro_op)
+
+            # Capturar NRO_CANCE para fallback RETENCIONES (primera vez por key)
+            if key not in nro_cance_by_op:
+                nro_cance = self._to_int(raw.get("NRO_CANCE"))
+                if nro_cance is not None:
+                    nro_cance_by_op[key] = nro_cance
 
             # Recolectar ref de gasto desde columnas del LEFT JOIN
             sg_deleg = self._to_int(raw.get("SG_DELEG_SOLIC"))
@@ -1830,10 +1838,18 @@ class MigratorExporter(BaseExporter):
                     pass
 
         # Fetch deducciones por OP individual (ORDEN_PAGOEA_DEDUC por (EJERCICIO, NRO_OP))
+        # Si no hay resultados, fallback a RETENCIONES por (EJERCICIO, NRO_CANCE).
         deducciones_by_op: dict[tuple[int, int], list[dict]] = {}
         if grouped and self._source_repo is not None:
             op_keys_for_deduc = list(grouped.keys())
             deducciones_by_op = self._source_repo.fetch_deducciones_for_ops(op_keys_for_deduc)
+
+            # Fallback: si ORDEN_PAGOEA_DEDUC no devolvio nada, intentar via RETENCIONES
+            if not deducciones_by_op and nro_cance_by_op:
+                # Filtrar solo las OPs que estan en grouped (las que se van a enviar)
+                cance_map = {k: v for k, v in nro_cance_by_op.items() if k in grouped}
+                if cance_map:
+                    deducciones_by_op = self._source_repo.fetch_retenciones_fallback_for_ops(cance_map)
 
         ordenes_pago = []
         included_cc_keys: list[tuple[str, str, str]] = []
