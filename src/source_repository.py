@@ -170,7 +170,7 @@ class SourceRepository:
         self,
         op_keys: list[tuple[int, int]] | set[tuple[int, int]],
     ) -> dict[tuple[int, int], list[dict]] | None:
-        """Trae deducciones individuales por OP desde ORDEN_PAGOEA_DEDUC.
+        """Trae deducciones individuales por OP desde ORDEN_PAGO_DEDUC.
 
         Clave: (EJERCICIO, NRO_OP).
         Devuelve dict {(ejercicio, nro_op): [{codigo_deduc, importe_reten, alicuota,
@@ -180,14 +180,19 @@ class SourceRepository:
         (señal para que el caller active el fallback via RETENCIONES).
         Retorna {} si la tabla existe pero no hay filas para esas keys (caso normal,
         el caller NO debe activar fallback).
+
+        NOTA: ORDEN_PAGO_DEDUC corresponde a las Ordenes de Pago normales (tabla
+        ORDEN_PAGO). NO confundir con ORDEN_PAGOEA_DEDUC, que es para Ordenes
+        de Pago de Egresos Adicionales (entidad ORDEN_PAGOEA, distinta y no migrada
+        por este pipeline).
         """
         if not op_keys:
             return {}
 
-        op_deduc = self._reflect_optional_table("ORDEN_PAGOEA_DEDUC")
+        op_deduc = self._reflect_optional_table("ORDEN_PAGO_DEDUC")
         if op_deduc is None:
             logger.error(
-                "fetch_deducciones_for_ops: tabla ORDEN_PAGOEA_DEDUC no disponible "
+                "fetch_deducciones_for_ops: tabla ORDEN_PAGO_DEDUC no disponible "
                 "(schema=%s). Verificar que el usuario Oracle tenga SELECT sobre esta tabla. "
                 "Sin ella NO se migraran retenciones.",
                 self._schema,
@@ -201,7 +206,7 @@ class SourceRepository:
         od_importe = self._safe_column(op_deduc, "IMPORTE_RETEN")
         if od_ej is None or od_nro_op is None or od_codigo is None or od_importe is None:
             logger.error(
-                "fetch_deducciones_for_ops: ORDEN_PAGOEA_DEDUC reflejada sin columnas "
+                "fetch_deducciones_for_ops: ORDEN_PAGO_DEDUC reflejada sin columnas "
                 "requeridas (EJERCICIO=%s, NRO_OP=%s, CODIGO_DEDUC=%s, IMPORTE_RETEN=%s). "
                 "Columnas disponibles: %s. Sin ellas NO se migraran retenciones.",
                 od_ej is not None, od_nro_op is not None,
@@ -276,7 +281,7 @@ class SourceRepository:
                 out.setdefault((ej, nro_op), []).append(entry)
         except (SQLAlchemyError, Exception) as exc:
             logger.error(
-                "fetch_deducciones_for_ops: error ejecutando query ORDEN_PAGOEA_DEDUC: %s. "
+                "fetch_deducciones_for_ops: error ejecutando query ORDEN_PAGO_DEDUC: %s. "
                 "Sin esta tabla NO se migraran retenciones. Verificar privilegios Oracle.",
                 exc,
             )
@@ -284,12 +289,12 @@ class SourceRepository:
 
         if out:
             logger.debug(
-                "fetch_deducciones_for_ops: %d OPs con deducciones encontradas en ORDEN_PAGOEA_DEDUC",
+                "fetch_deducciones_for_ops: %d OPs con deducciones encontradas en ORDEN_PAGO_DEDUC",
                 len(out),
             )
         else:
             logger.debug(
-                "fetch_deducciones_for_ops: ORDEN_PAGOEA_DEDUC no devolvio filas para %d keys "
+                "fetch_deducciones_for_ops: ORDEN_PAGO_DEDUC no devolvio filas para %d keys "
                 "(normal si esas OPs no tienen deducciones).",
                 len(op_keys),
             )

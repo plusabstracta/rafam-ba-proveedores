@@ -1055,11 +1055,11 @@ class TestWriteBatchOcItems:
         assert link_after["has_op"] == "1"
 
 
-# ─── Tests para deducciones por OP (ORDEN_PAGOEA_DEDUC) ─────────────────────
+# ─── Tests para deducciones por OP (ORDEN_PAGO_DEDUC) ─────────────────────
 
 
 class TestFetchDeduccionesForOps:
-    """Valida que fetch_deducciones_for_ops usa ORDEN_PAGOEA_DEDUC por NRO_OP."""
+    """Valida que fetch_deducciones_for_ops usa ORDEN_PAGO_DEDUC por NRO_OP."""
 
     def _make_sqlite_with_deducciones(self, tmp_path):
         from sqlalchemy import create_engine, text as sa_text
@@ -1067,7 +1067,7 @@ class TestFetchDeduccionesForOps:
         engine = create_engine(f"sqlite:///{db_path}", future=True)
         with engine.begin() as conn:
             conn.execute(sa_text("""
-                CREATE TABLE ORDEN_PAGOEA_DEDUC (
+                CREATE TABLE ORDEN_PAGO_DEDUC (
                     EJERCICIO TEXT, NRO_OP TEXT, CODIGO_DEDUC TEXT,
                     IMPORTE_RETEN TEXT, ALICUOTA TEXT, COMPROB_DEDUC TEXT,
                     TIPO_GENERAC TEXT, CUENTA TEXT, COEF_CONV_MULTI TEXT,
@@ -1083,15 +1083,15 @@ class TestFetchDeduccionesForOps:
             """))
             # OP 1392 tiene 1 deducción de 3400
             conn.execute(sa_text(
-                "INSERT INTO ORDEN_PAGOEA_DEDUC VALUES ('2026','1392','5','3400','10.5','7001','A','123',NULL,NULL,NULL)"
+                "INSERT INTO ORDEN_PAGO_DEDUC VALUES ('2026','1392','5','3400','10.5','7001','A','123',NULL,NULL,NULL)"
             ))
             # OP 1393 tiene 1 deducción de 10000
             conn.execute(sa_text(
-                "INSERT INTO ORDEN_PAGOEA_DEDUC VALUES ('2026','1393','5','10000','10.5','7002','A','124',NULL,NULL,NULL)"
+                "INSERT INTO ORDEN_PAGO_DEDUC VALUES ('2026','1393','5','10000','10.5','7002','A','124',NULL,NULL,NULL)"
             ))
             # OP 1394 tiene 1 deducción de 800
             conn.execute(sa_text(
-                "INSERT INTO ORDEN_PAGOEA_DEDUC VALUES ('2026','1394','3','800','3','7003','M',NULL,NULL,NULL,NULL)"
+                "INSERT INTO ORDEN_PAGO_DEDUC VALUES ('2026','1394','3','800','3','7003','M',NULL,NULL,NULL,NULL)"
             ))
             # Lookup de deducciones
             conn.execute(sa_text(

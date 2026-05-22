@@ -1829,7 +1829,7 @@ class MigratorExporter(BaseExporter):
                 except (TypeError, ValueError):
                     pass
 
-        # Fetch deducciones por OP individual (ORDEN_PAGOEA_DEDUC por (EJERCICIO, NRO_OP))
+        # Fetch deducciones por OP individual (ORDEN_PAGO_DEDUC por (EJERCICIO, NRO_OP))
         deducciones_by_op: dict[tuple[int, int], list[dict]] = {}
         if grouped and self._source_repo is not None:
             op_keys_for_deduc = list(grouped.keys())
@@ -1887,7 +1887,7 @@ class MigratorExporter(BaseExporter):
                     included_cc_keys.append(cc_key)
                 cc_key_to_pedido_id.setdefault(cc_key, pedido_id)
 
-            # Mapear deducciones (de ORDEN_PAGOEA_DEDUC por NRO_OP)
+            # Mapear deducciones (de ORDEN_PAGO_DEDUC por NRO_OP)
             ret_payload = []
             for ded in deducciones_by_op.get(key, []):
                 mapped = self._map_deduccion_dict(ded, key[0], key[1])
@@ -2289,7 +2289,7 @@ class MigratorExporter(BaseExporter):
         return retencion
 
     def _map_deduccion_dict(self, ded: dict, ejercicio: int, nro_op: int) -> dict | None:
-        """Mapea una deduccion de ORDEN_PAGOEA_DEDUC al formato Paxapos retenciones.
+        """Mapea una deduccion de ORDEN_PAGO_DEDUC al formato Paxapos retenciones.
 
         Usa codigo_deduc/importe_reten/descripcion para resolver tipo_impuesto_id.
         """
