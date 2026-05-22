@@ -65,8 +65,8 @@ FULL_LOAD_TABLES: set[str] = {
     "PED_ITEMS",
     "OC_ITEMS",
     "SOLIC_GASTOS_ITEMS",
-    # Deducciones por OP individual (~15K filas, necesitamos 2025+2026)
-    "ORDEN_PAGOEA_DEDUC",
+    # Deducciones por OP individual (~163K filas, necesitamos 2025+2026)
+    "ORDEN_PAGO_DEDUC",
 }
 
 # Tablas filtradas por EJERCICIO (no tienen DATE pero sí columna EJERCICIO).
@@ -92,7 +92,7 @@ ALL_TABLES: list[str] = [
     "SOLIC_GASTOS",
     "RETENCIONES",
     "DEDUCCIONES",
-    "ORDEN_PAGOEA_DEDUC",  # deducciones por OP individual (PK: EJERCICIO+NRO_OP+CODIGO_DEDUC)
+    "ORDEN_PAGO_DEDUC",  # deducciones por OP individual (PK: EJERCICIO+NRO_OP+CODIGO_DEDUC)
     # ── Resolución de items / mercadería ───────────────────────────────────
     "PEDIDOS",
     "PED_ITEMS",

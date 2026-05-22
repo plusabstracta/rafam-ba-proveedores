@@ -172,7 +172,7 @@ SECTIONS: list[dict[str, Any]] = [
         "CTA_PROVEEDORES_ALICUOTAS", "CTA_UTE", "CTR_DOCUM_PROV",
         "DATOS_PART_CONS", "DATOS_PART_CONT", "DEUFLO_PROV", "DEVOLUCION",
         "EGRESOS", "EMBARGOS", "HISTO_ESTADOS", "NOMINA_PROV",
-        "ORDEN_PAGO_DEDUC_UTE", "ORDEN_PAGOEA_DEDUC_UTE", "ORDEN_REINT_PRESUP",
+        "ORDEN_PAGO_DEDUC_UTE", "ORDEN_REINT_PRESUP",
         "PER_AGENTES", "PER_AGENTES_HIST", "PER_CONCEPTOS_PROVEEDOR",
         "REGUL_CAMBIO_OCEA", "REGUL_CORREC_IMPUT", "REGUL_DESAF",
         "TES_DEPOSITOS_GARANTIAS", "VI_SUBRUB_PROV",
@@ -184,13 +184,13 @@ SECTIONS: list[dict[str, Any]] = [
     ]},
     # Relacionadas con DEDUCCIONES / RETENCIONES
     {"num": 5, "title": "Tablas relacionadas — Retenciones y deducciones", "tables": [
-        "ORDEN_PAGOEA_DEDUC", "ORDEN_PAGO_DEDUC",
+        "ORDEN_PAGO_DEDUC",
         "REGUL_RETENCIONES_IMPUT", "RETENCIONES_REGDED",
     ]},
     # Múltiples relaciones
     {"num": 6, "title": "Tablas con múltiples relaciones",           "tables": [
         "MOV_EXTRAPRES_DEV", "MOV_EXTRAPRES_PAG", "MOV_EXTRAPRES_REC", "MOV_PRES_DEV",
-        "ORDEN_DEVOL", "ORDEN_PAGOEA", "ORDEN_REINT",
+        "ORDEN_DEVOL", "ORDEN_REINT",
         "REG_DEVEN",
         "REGUL_CAMBIO_PE_IMPUT", "REGUL_CORREC_EX_IMPUT",
         "REGUL_GASTOS", "REGUL_GASTOS_EX", "REGUL_OPE_DEVOL",
