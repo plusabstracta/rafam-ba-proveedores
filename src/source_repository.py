@@ -694,10 +694,9 @@ class SourceRepository:
         comprobantes (CC). PK: (EJERCICIO, NRO_OP, NRO_REG_COMP, TIPO_COMPROB,
         NRO_COMPROB, COD_PROV, ...).
 
-        Una OP puede pagar N comprobantes; aquí agrupamos por (EJERCICIO,
-        NRO_OP) y devolvemos el primer comprobante (MIN) más el conteo. Para
-        OPs multi-comprobante el exporter debe hacer un fetch separado tipo
-        fetch_retenciones_for_ops() (TODO Phase 6).
+        Devuelve una fila por cada comprobante imputado (sin GROUP BY) para que
+        el exporter reciba TODAS las facturas de una OP. La agrupación y dedup
+        se realiza en _write_batch_orden_pago via grouped_cc_nros/cc_raw_by_key.
 
         Joins a CTA_COMPROB por la PK exacta:
             (EJERCICIO, TIPO, NRO_COMPROB, COD_PROV)
@@ -731,11 +730,11 @@ class SourceRepository:
             return None
 
         cc_neto_expr = (
-            func.min(cols["cc_neto"]) if cols["cc_neto"] is not None
+            cols["cc_neto"] if cols["cc_neto"] is not None
             else literal_column("NULL")
         )
         cc_venc_expr = (
-            func.min(cols["cc_venc"]) if cols["cc_venc"] is not None
+            cols["cc_venc"] if cols["cc_venc"] is not None
             else literal_column("NULL")
         )
 
@@ -757,9 +756,9 @@ class SourceRepository:
                 return func.nullif(col, "")
             return col
 
-        sg_deleg_expr = func.min(nonblank(reg_cols["rc_deleg"])) if has_reg_comp else literal_column("NULL")
-        sg_nro_expr = func.min(nonblank(reg_cols["rc_nro_sol"])) if has_reg_comp else literal_column("NULL")
         if has_reg_comp:
+            sg_deleg_expr = nonblank(reg_cols["rc_deleg"])
+            sg_nro_expr = nonblank(reg_cols["rc_nro_sol"])
             rc_ej = nonblank(reg_cols["rc_ej"])
             rc_uni = nonblank(reg_cols["rc_uni"])
             rc_nro_oc = nonblank(reg_cols["rc_nro_oc"])
@@ -768,11 +767,13 @@ class SourceRepository:
                 rc_uni.is_not(None),
                 rc_nro_oc.is_not(None),
             )
-            sg_oc_ej_expr = func.min(case((oc_present, rc_ej)))
-            sg_oc_nro_expr = func.min(case((oc_present, rc_nro_oc)))
-            sg_oc_uni_expr = func.min(case((oc_present, rc_uni)))
-            sg_oc_prov_expr = func.min(case((oc_present, rc_prov)))
+            sg_oc_ej_expr = case((oc_present, rc_ej))
+            sg_oc_nro_expr = case((oc_present, rc_nro_oc))
+            sg_oc_uni_expr = case((oc_present, rc_uni))
+            sg_oc_prov_expr = case((oc_present, rc_prov))
         else:
+            sg_deleg_expr = literal_column("NULL")
+            sg_nro_expr = literal_column("NULL")
             sg_oc_ej_expr = literal_column("NULL")
             sg_oc_nro_expr = literal_column("NULL")
             sg_oc_uni_expr = literal_column("NULL")
@@ -801,24 +802,22 @@ class SourceRepository:
             select(
                 cols["opi_ej"].label("OPI_EJERCICIO"),
                 cols["opi_op"].label("OPI_NRO_OP"),
-                func.min(cols["opi_rc"]).label("OPI_NRO_REG_COMP"),
-                func.min(cols["opi_tipo"]).label("OPI_TIPO_COMPROB"),
-                func.min(cols["opi_nro"]).label("OPI_NRO_COMPROB"),
-                func.min(cols["opi_prov"]).label("OPI_COD_PROV"),
-                func.count(cols["opi_nro"]).label("OPI_COMPROB_COUNT"),
+                cols["opi_rc"].label("OPI_NRO_REG_COMP"),
+                cols["opi_tipo"].label("OPI_TIPO_COMPROB"),
+                cols["opi_nro"].label("OPI_NRO_COMPROB"),
+                cols["opi_prov"].label("OPI_COD_PROV"),
                 sg_deleg_expr.label("SG_DELEG_SOLIC"),
                 sg_nro_expr.label("SG_NRO_SOLIC"),
                 sg_oc_ej_expr.label("SG_OC_EJERCICIO"),
                 sg_oc_nro_expr.label("SG_OC_NRO"),
                 sg_oc_uni_expr.label("SG_OC_UNI_COMPRA"),
                 sg_oc_prov_expr.label("SG_OC_COD_PROV"),
-                func.min(cols["cc_imp"]).label("CTA_IMPORTE_COMPR"),
+                cols["cc_imp"].label("CTA_IMPORTE_COMPR"),
                 cc_neto_expr.label("CTA_IMPORTE_SIN_IVA"),
-                func.min(cols["cc_fec"]).label("CTA_FECH_COMPROB"),
+                cols["cc_fec"].label("CTA_FECH_COMPROB"),
                 cc_venc_expr.label("CTA_FECH_VENCIM"),
             )
             .select_from(from_clause)
-            .group_by(cols["opi_ej"], cols["opi_op"])
             .subquery("op_imput")
         )
 
@@ -957,10 +956,9 @@ class SourceRepository:
         from_clause = orden_pago
 
         # ── Path PRIMARIO: ORDEN_PAGO ⨝ ORDEN_PAGO_IMPUT ⨝ CTA_COMPROB ───
-        # Bridge real OP ↔ CC. Una OP puede pagar N comprobantes; aqui
-        # agrupamos por (EJERCICIO, NRO_OP) y devolvemos el primero (MIN)
-        # más OPI_COMPROB_COUNT para que el exporter detecte multi-CC y
-        # haga un fetch separado (igual patron que retenciones).
+        # Bridge real OP ↔ CC. Una OP puede pagar N comprobantes; la subquery
+        # devuelve una fila por comprobante (sin GROUP BY) y el exporter los
+        # acumula por (EJERCICIO, NRO_OP) en _write_batch_orden_pago.
         op_imput = self._build_op_imput_subquery(opi, cta_comprob, reg_comp)
         if op_imput is not None:
             from_clause = from_clause.outerjoin(
@@ -975,7 +973,6 @@ class SourceRepository:
                 op_imput.c.OPI_TIPO_COMPROB,
                 op_imput.c.OPI_NRO_COMPROB,
                 op_imput.c.OPI_COD_PROV,
-                op_imput.c.OPI_COMPROB_COUNT,
                 op_imput.c.SG_DELEG_SOLIC,
                 op_imput.c.SG_NRO_SOLIC,
                 op_imput.c.SG_OC_EJERCICIO,

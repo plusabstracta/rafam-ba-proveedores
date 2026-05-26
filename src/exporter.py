@@ -1844,6 +1844,7 @@ class MigratorExporter(BaseExporter):
         skipped_no_gasto = 0
         skipped_no_oc_link = 0
         skipped_multiple_oc = 0
+        warned_facturas_exceed_oc = 0
         for key, op in grouped.items():
             cc_nros = grouped_cc_nros.get(key, [])
             if not cc_nros:
@@ -1914,6 +1915,38 @@ class MigratorExporter(BaseExporter):
             if importe_liquido is not None:
                 op["Egreso"]["neto_transferido"] = importe_liquido
 
+            # ── Validación: suma facturas vs total OC ─────────────────────
+            # Si la suma de los importes de las facturas imputadas a esta OP
+            # supera el total de la OC vinculada, emitir WARNING (dato
+            # inconsistente upstream — una OC de $X nunca debería tener
+            # facturas que sumen más que $X).
+            oc_sks = grouped_oc_source_keys.get(key, [])
+            if oc_sks and grouped_cc_keys.get(key):
+                suma_facturas = 0.0
+                for ck in grouped_cc_keys[key]:
+                    cr = cc_raw_by_key.get(ck)
+                    if cr and cr.get("CTA_IMPORTE_COMPR") is not None:
+                        try:
+                            suma_facturas += round(float(cr["CTA_IMPORTE_COMPR"]), 2)
+                        except (TypeError, ValueError):
+                            pass
+                if suma_facturas > 0:
+                    for oc_sk in oc_sks:
+                        oc_link = self._link_store.get_link("orden_compra", oc_sk)
+                        if oc_link and oc_link.get("importe_tot"):
+                            try:
+                                oc_total = round(float(oc_link["importe_tot"]), 2)
+                            except (TypeError, ValueError):
+                                continue
+                            if suma_facturas > oc_total:
+                                warned_facturas_exceed_oc += 1
+                                logger.warning(
+                                    "Migrator [orden_pago] OP %s-%s: suma facturas ($%.2f) "
+                                    "supera total OC ($%.2f). Comprobantes: %s. OC: %s",
+                                    key[0], key[1], suma_facturas, oc_total,
+                                    cc_nros, oc_sk,
+                                )
+
             ordenes_pago.append(op)
 
         if skipped_no_gasto:
@@ -1933,6 +1966,11 @@ class MigratorExporter(BaseExporter):
                 "Migrator [orden_pago]: %d OPs omitidas por multiples OCs en un mismo pago; "
                 "se requiere mapeo por gasto antes de enviarlas",
                 skipped_multiple_oc,
+            )
+        if warned_facturas_exceed_oc:
+            logger.warning(
+                "Migrator [orden_pago]: %d OPs con suma de facturas que supera el total de la OC vinculada",
+                warned_facturas_exceed_oc,
             )
         if skipped_estado:
             logger.info("Migrator [orden_pago]: OPs omitidas por estado: %s", skipped_estado)
