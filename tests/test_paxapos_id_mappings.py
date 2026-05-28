@@ -411,6 +411,7 @@ class TestNoCrearPagosEnCero:
         ops = sent[0]["ordenes_pago"]
         assert len(ops) == 1
         assert ops[0]["Egreso"]["total"] == 1500.00
+        assert ops[0]["importe_total"] == 1500.00
 
     def test_lote_mixto_solo_exporta_op_con_importe_valido(self):
         """

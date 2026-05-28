@@ -588,8 +588,8 @@ El mapping debe coincidir con los IDs reales de `centros_costo` del tenant desti
   "external_id": { "ejercicio": int, "nro_reg_comp": int },
   "Gasto": {
     "fecha": "YYYY-MM-DD",
-    "importe_total": float(IMPORTE_TOT),
-    "importe_neto": float(IMPORTE_NETO),
+    "importe_total": float(CTA_COMPROB.IMPORTE_COMPR),
+    "importe_neto": float(CTA_COMPROB.IMPORTE_LIQUIDO || CTA_COMPROB.IMPORTE_NETO || CTA_COMPROB.IMPORTE_SIN_IVA),
     "punto_de_venta": "PV de CTA_COMPROB.NRO_COMPROB",
     "factura_nro": "NRO de CTA_COMPROB.NRO_COMPROB",
     "tipo_factura_id": int(lookup CTA_COMPROB.TIPO vía RAFAM_TIPO_COMPROB_TO_PAXAPOS_NAME),
@@ -601,14 +601,19 @@ El mapping debe coincidir con los IDs reales de `centros_costo` del tenant desti
 }
 ```
 
+`Gasto.importe_total` y `Gasto.importe_neto` son importes crudos RAFAM. El script no calcula netos: sólo parsea y redondea a 2 decimales para JSON. En dumps actuales el neto/líquido del comprobante llega como `CTA_COMPROB.IMPORTE_SIN_IVA`; si el schema real expone `IMPORTE_LIQUIDO` o `IMPORTE_NETO`, esos campos tienen prioridad.
+
 ### 12.5 Órdenes de Pago
 
 ```json
 {
   "external_id": { "ejercicio": int, "nro_op": int },
+  "importe_total": float(IMPORTE_TOTAL),
+  "importe_neto": float(IMPORTE_LIQUIDO),
   "Egreso": {
     "identificador_pago": "RAFAM-OP-{ejercicio}-{nro_op}",
     "total": float(IMPORTE_TOTAL),
+    "neto_transferido": float(IMPORTE_LIQUIDO),
     "tipo_de_pago_id": int(PAXAPOS_RAFAM_DEFAULT_TIPO_PAGO_ID),
     "estado": 3,
     "fecha": "FECH_CONFIRM"
@@ -617,6 +622,8 @@ El mapping debe coincidir con los IDs reales de `centros_costo` del tenant desti
   "pedido_id": 789
 }
 ```
+
+`importe_total` e `importe_neto` son los nombres Paxapos para los dos importes de la OP. `Egreso.total` y `Egreso.neto_transferido` se conservan en el payload por compatibilidad con el importador actual.
 
 > Solo enviar OPs con `ESTADO_OP IN ('C', 'N')`, `CONFIRMADO='S'`, `FECH_CONFIRM` presente, importe positivo, `gasto_nro_comprobante` y `pedido_id` resuelto. En Paxapos se crean con `fecha=FECH_CONFIRM` y `estado=3`. OPs anuladas, no confirmadas, sin comprobante o sin OC migrada se omiten completamente del envío.
 

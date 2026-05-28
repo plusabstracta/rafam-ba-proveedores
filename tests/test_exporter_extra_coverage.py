@@ -497,6 +497,8 @@ class TestMigratorExporterExtraPaths:
             "CTA_NRO_COMPROB",
             "CTA_TIPO_COMPROB",
             "CTA_FECH_VENCIM",
+            "CTA_IMPORTE_COMPR",
+            "CTA_IMPORTE_NETO",
             "OC_COD_PROV",
             "OBSERVACIONES",
         ]
@@ -513,6 +515,8 @@ class TestMigratorExporterExtraPaths:
                 "CTA_NRO_COMPROB": "0001-00012345",
                 "CTA_TIPO_COMPROB": "FAB",
                 "CTA_FECH_VENCIM": "2026-04-10",
+                "CTA_IMPORTE_COMPR": "1210.50",
+                "CTA_IMPORTE_NETO": "1000.00",
                 "OC_COD_PROV": "99",
                 "OBSERVACIONES": "Factura",
             }
@@ -539,6 +543,8 @@ class TestMigratorExporterExtraPaths:
         assert gasto["proveedor_id"] == 777
         assert gasto["tipo_factura_id"] == 2
         assert gasto["fecha_vencimiento"] == "2026-04-10"
+        assert gasto["importe_total"] == 1210.50
+        assert gasto["importe_neto"] == 1000.00
         source_key = json.dumps({"ejercicio": 2026, "deleg_solic": 2, "nro_solic": 300}, sort_keys=True)
         assert exporter._link_store.get_remote_id("gasto", source_key) == "123"
         assert exporter._link_store.get_remote_id("gasto", json.dumps({"rafam_ref": "SG-2026-2-300"}, sort_keys=True)) == "123"

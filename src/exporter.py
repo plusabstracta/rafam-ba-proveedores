@@ -1401,14 +1401,6 @@ class MigratorExporter(BaseExporter):
         if ejercicio is None or deleg_solic is None or nro_solic is None:
             return None
 
-        importe_str = raw.get("IMPORTE_TOT")
-        if importe_str is None:
-            return None
-        try:
-            importe_total = round(float(importe_str), 2)
-        except (TypeError, ValueError):
-            return None
-
         fecha_raw = raw.get("FECH_SOLIC")
         fecha = self._format_date_only(fecha_raw)
         if not fecha:
@@ -1418,12 +1410,6 @@ class MigratorExporter(BaseExporter):
         if str(raw.get("ESTADO_SOLIC", "")).strip().upper() == "A":
             return None
 
-        gasto_data: dict = {
-            "fecha": fecha,
-            "importe_total": importe_total,
-            "importe_neto": importe_total,  # RAFAM no discrimina IVA
-        }
-
         cta_count = self._to_int(raw.get("CTA_COMPROB_COUNT"))
         if cta_count != 1:
             logger.debug(
@@ -1431,6 +1417,24 @@ class MigratorExporter(BaseExporter):
                 ejercicio, deleg_solic, nro_solic, raw.get("CTA_COMPROB_COUNT"),
             )
             return None
+
+        importe_total = self._parse_money(raw.get("CTA_IMPORTE_COMPR"))
+        if importe_total is None:
+            importe_total = self._parse_money(raw.get("IMPORTE_TOT"))
+        if importe_total is None:
+            return None
+
+        importe_neto = self._parse_money(raw.get("CTA_IMPORTE_NETO"))
+        if importe_neto is None:
+            importe_neto = self._parse_money(raw.get("CTA_IMPORTE_SIN_IVA"))
+        if importe_neto is None:
+            importe_neto = importe_total
+
+        gasto_data: dict = {
+            "fecha": fecha,
+            "importe_total": importe_total,
+            "importe_neto": importe_neto,
+        }
 
         nro_comprob = str(raw.get("CTA_NRO_COMPROB") or "").strip()
         if not nro_comprob:
@@ -1587,15 +1591,10 @@ class MigratorExporter(BaseExporter):
         except (TypeError, ValueError):
             return None, None
 
-        # importe_neto: si CTA tiene IMPORTE_SIN_IVA usarlo, si no = total.
-        importe_sin_iva_raw = raw.get("CTA_IMPORTE_SIN_IVA")
-        try:
-            importe_neto = (
-                round(float(importe_sin_iva_raw), 2)
-                if importe_sin_iva_raw is not None
-                else importe_total
-            )
-        except (TypeError, ValueError):
+        importe_neto = self._parse_money(raw.get("CTA_IMPORTE_NETO"))
+        if importe_neto is None:
+            importe_neto = self._parse_money(raw.get("CTA_IMPORTE_SIN_IVA"))
+        if importe_neto is None:
             importe_neto = importe_total
 
         # fecha: CTA_COMPROB.FECH_COMPROB; obligatoria en Paxapos.
@@ -1850,12 +1849,13 @@ class MigratorExporter(BaseExporter):
 
             grouped[key] = {
                 "external_id": {"ejercicio": ejercicio, "nro_op": nro_op},
+                "importe_total": total,
                 "Egreso": egreso,
             }
             if remote_prov_id is not None:
                 grouped[key]["proveedor_id"] = remote_prov_id
 
-            # Guardar IMPORTE_LIQUIDO para neto_transferido
+            # Guardar IMPORTE_LIQUIDO para importe_neto/neto_transferido
             importe_liquido = raw.get("IMPORTE_LIQUIDO")
             if importe_liquido is not None:
                 try:
@@ -1967,9 +1967,10 @@ class MigratorExporter(BaseExporter):
                 else:
                     op["retenciones"] = ret_payload
 
-            # neto_transferido = IMPORTE_LIQUIDO de RAFAM (si disponible)
+            # importe_neto/neto_transferido = IMPORTE_LIQUIDO de RAFAM (si disponible)
             importe_liquido = op.pop("_importe_liquido", None)
             if importe_liquido is not None:
+                op["importe_neto"] = importe_liquido
                 op["Egreso"]["neto_transferido"] = importe_liquido
 
             # ── Validación: suma facturas vs total OC ─────────────────────
@@ -2593,6 +2594,15 @@ class MigratorExporter(BaseExporter):
             if len(date_part) == 10 and date_part[4] == "-" and date_part[7] == "-":
                 return date_part
         return ""
+
+    @staticmethod
+    def _parse_money(value) -> float | None:
+        if value is None or str(value).strip() == "":
+            return None
+        try:
+            return round(float(value), 2)
+        except (TypeError, ValueError):
+            return None
 
     def _resolve_unidad_medida_id(self, raw: dict) -> int:
         # Intentar resolver via link_store (si ya se mapeó previamente)

@@ -262,6 +262,122 @@ class TestEjercicioMinFilter:
         assert 2025 in ejercicios, "RAFAM_EJERCICIO_MIN no debe filtrar OPs"
         assert 2026 in ejercicios, "OPs de 2026 deben aparecer"
 
+    def test_orden_pago_expone_importes_crudos_cta(self, engine_with_data):
+        cfg = EntityConfig(
+            name="orden_pago",
+            table_name="ORDEN_PAGO",
+            ts_field="FECH_CONFIRM",
+            pending_state_field="ESTADO_OP",
+            pending_state_value="N",
+            pending_reprocess_days=30,
+        )
+        cp = Checkpoint(entity="orden_pago")
+
+        with engine_with_data.connect() as conn:
+            repo = SourceRepository(conn)
+            with patch.dict("src.config.ENTITY_CONFIGS", {"orden_pago": cfg}):
+                stmt = repo.build_statement("orden_pago", cp)
+                rows = conn.execute(stmt).mappings().all()
+
+        row = next(r for r in rows if r["EJERCICIO"] == 2026 and r["NRO_OP"] == 501)
+        assert row["CTA_IMPORTE_COMPR"] == 10000
+        assert row["CTA_IMPORTE_NETO"] == 10000
+        assert row["CTA_IMPORTE_SIN_IVA"] == 10000
+
+    def test_solic_gastos_prefiere_importe_liquido_cta(self):
+        engine = create_engine("sqlite+pysqlite:///:memory:")
+        with engine.connect() as conn:
+            conn.execute(text("""
+                CREATE TABLE SOLIC_GASTOS (
+                    EJERCICIO INTEGER,
+                    DELEG_SOLIC INTEGER,
+                    NRO_SOLIC INTEGER,
+                    FECH_SOLIC DATETIME,
+                    ESTADO_SOLIC TEXT,
+                    IMPORTE_TOT REAL,
+                    PRIMARY KEY (EJERCICIO, DELEG_SOLIC, NRO_SOLIC)
+                )
+            """))
+            conn.execute(text("""
+                CREATE TABLE OC_ITEMS (
+                    EJERCICIO INTEGER,
+                    UNI_COMPRA INTEGER,
+                    NRO_OC INTEGER,
+                    ITEM_OC INTEGER,
+                    DELEG_SOLIC INTEGER,
+                    NRO_SOLIC INTEGER
+                )
+            """))
+            conn.execute(text("""
+                CREATE TABLE ORDEN_COMPRA (
+                    EJERCICIO INTEGER,
+                    UNI_COMPRA INTEGER,
+                    NRO_OC INTEGER,
+                    COD_PROV INTEGER
+                )
+            """))
+            conn.execute(text("""
+                CREATE TABLE REG_COMP (
+                    EJERCICIO INTEGER,
+                    NRO_REG_COMP INTEGER,
+                    DELEG_SOLIC INTEGER,
+                    NRO_SOLIC INTEGER
+                )
+            """))
+            conn.execute(text("""
+                CREATE TABLE CTA_COMPROB (
+                    EJERCICIO INTEGER,
+                    NRO_REG_COMP INTEGER,
+                    TIPO TEXT,
+                    NRO_COMPROB TEXT,
+                    FECH_COMPROB DATETIME,
+                    FECH_VENCIM DATETIME,
+                    IMPORTE_COMPR REAL,
+                    IMPORTE_LIQUIDO REAL,
+                    IMPORTE_NETO REAL,
+                    IMPORTE_SIN_IVA REAL
+                )
+            """))
+            conn.execute(text("""
+                INSERT INTO SOLIC_GASTOS VALUES
+                (2026, 1, 10, '2026-04-01', 'C', 1210)
+            """))
+            conn.execute(text("""
+                INSERT INTO OC_ITEMS VALUES
+                (2026, 1, 5, 1, 1, 10)
+            """))
+            conn.execute(text("""
+                INSERT INTO ORDEN_COMPRA VALUES
+                (2026, 1, 5, 100)
+            """))
+            conn.execute(text("""
+                INSERT INTO REG_COMP VALUES
+                (2026, 77, 1, 10)
+            """))
+            conn.execute(text("""
+                INSERT INTO CTA_COMPROB VALUES
+                (2026, 77, 'FA', '0001-00000077', '2026-04-02', '2026-05-02',
+                 1210, 700, 800, 900)
+            """))
+            conn.commit()
+
+            cfg = EntityConfig(
+                name="solic_gastos",
+                table_name="SOLIC_GASTOS",
+                ts_field="FECH_SOLIC",
+                pending_state_field="ESTADO_SOLIC",
+                pending_state_value="N",
+                pending_reprocess_days=30,
+            )
+            repo = SourceRepository(conn)
+            with patch.dict("src.config.ENTITY_CONFIGS", {"solic_gastos": cfg}):
+                stmt = repo.build_statement("solic_gastos", Checkpoint(entity="solic_gastos"))
+                rows = conn.execute(stmt).mappings().all()
+
+        assert rows[0]["CTA_IMPORTE_COMPR"] == 1210
+        assert rows[0]["CTA_IMPORTE_NETO"] == 700
+        assert rows[0]["CTA_IMPORTE_SIN_IVA"] == 900
+
     def test_4_ocs_2026_procesadas(self, engine_with_data):
         """Con ejercicio_min=2026, exactamente 4 OCs distintas deben retornar."""
         cfg = EntityConfig(

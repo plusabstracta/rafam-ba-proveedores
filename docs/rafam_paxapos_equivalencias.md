@@ -117,7 +117,8 @@ En la ejecución actual no hay una pasada standalone `cta_comprob`. El script `o
 | `TIPO` (FAA/FAB/FAC/...) | `tipo_factura_id` | Vía `RAFAM_TIPO_COMPROB_TO_PAXAPOS_NAME` → lookup por `name` en `afip_tipo_facturas`. |
 | `NRO_COMPROB` | `factura_nro` | Número fiscal de la factura. |
 | `FECH_COMPROB` | `fecha` | |
-| `IMPORTE_TOT` | `total` | |
+| `IMPORTE_COMPR` | `importe_total` | Total crudo del comprobante RAFAM. |
+| `IMPORTE_LIQUIDO` / `IMPORTE_NETO` / `IMPORTE_SIN_IVA` | `importe_neto` | Neto/líquido crudo del comprobante. El script prefiere `IMPORTE_LIQUIDO`, luego `IMPORTE_NETO`, luego `IMPORTE_SIN_IVA`; no calcula netos en Python. |
 | `JURISDICCION` | `centro_costo_id` | |
 | (vía REG_COMP → ORDEN_COMPRA) | `pedido_id` | FK a `compras_pedidos.id` cuando la factura tiene OC asociada. |
 
@@ -130,8 +131,8 @@ En la ejecución actual no hay una pasada standalone `cta_comprob`. El script `o
 | `EJERCICIO` + `NRO_OP` | `external_ref` | |
 | `COD_PROV` | `proveedor_id` | |
 | `FECH_CONFIRM` | `fecha` | Sólo cuando `ESTADO_OP IN ('C', 'N')`, `CONFIRMADO='S'` y la OP tiene OC/gasto canónico. |
-| `IMPORTE_TOTAL` | `total` | |
-| `IMPORTE_LIQUIDO` | `importe_liquido` | Total menos retenciones. |
+| `IMPORTE_TOTAL` | `importe_total` | Total bruto de la OP. El payload conserva también `Egreso.total` por compatibilidad con el importador actual. |
+| `IMPORTE_LIQUIDO` | `importe_neto` | Total líquido/neto transferido según RAFAM. El payload conserva también `Egreso.neto_transferido` por compatibilidad con el importador actual. |
 | `TIPO_CANCE` (CA/CM/NO) | `tipo_de_pago_id` | Vía `RAFAM_TIPO_CANCE_TO_PAXAPOS_PAGO_NAME` → lookup por `name` en `tipo_de_pagos`. Default `"Transferencia bancaria"`. |
 | `JURISDICCION` | `centro_costo_id` | |
 | `NRO_CANCE` | (clave para retenciones) | Se guarda para luego buscar `RETENCIONES` por `EJERCICIO + NRO_CANCE`. No se persiste como columna en Paxapos. |

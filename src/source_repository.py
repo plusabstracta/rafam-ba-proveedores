@@ -70,6 +70,15 @@ class SourceRepository:
             )
             return None
 
+    @staticmethod
+    def _coalesce_optional_columns(*columns):
+        present = [col for col in columns if col is not None]
+        if not present:
+            return literal_column("NULL")
+        if len(present) == 1:
+            return present[0]
+        return func.coalesce(*present)
+
     def build_statement(self, entity: str, checkpoint: Checkpoint) -> Select:
         cfg = ENTITY_CONFIGS[entity]
         if entity == "orden_compra":
@@ -563,6 +572,9 @@ class SourceRepository:
                     comprobantes.c.CTA_TIPO_COMPROB,
                     comprobantes.c.CTA_FECH_COMPROB,
                     comprobantes.c.CTA_FECH_VENCIM,
+                    comprobantes.c.CTA_IMPORTE_COMPR,
+                    comprobantes.c.CTA_IMPORTE_NETO,
+                    comprobantes.c.CTA_IMPORTE_SIN_IVA,
                     comprobantes.c.CTA_COMPROB_COUNT,
                 ]
             )
@@ -598,6 +610,22 @@ class SourceRepository:
         if any(col is None for col in required_cols.values()):
             return None
 
+        cta_importe_total = self._safe_column(cta_comprob, "IMPORTE_COMPR")
+        cta_importe_sin_iva = self._safe_column(cta_comprob, "IMPORTE_SIN_IVA")
+        cta_importe_neto = self._coalesce_optional_columns(
+            self._safe_column(cta_comprob, "IMPORTE_LIQUIDO"),
+            self._safe_column(cta_comprob, "IMPORTE_NETO"),
+            cta_importe_sin_iva,
+        )
+        cta_importe_total_expr = (
+            cta_importe_total if cta_importe_total is not None
+            else literal_column("NULL")
+        )
+        cta_importe_sin_iva_expr = (
+            cta_importe_sin_iva if cta_importe_sin_iva is not None
+            else literal_column("NULL")
+        )
+
         return (
             select(
                 required_cols["reg_ejercicio"].label("EJERCICIO"),
@@ -607,6 +635,9 @@ class SourceRepository:
                 func.min(required_cols["cta_tipo"]).label("CTA_TIPO_COMPROB"),
                 func.min(required_cols["cta_fech_comprob"]).label("CTA_FECH_COMPROB"),
                 func.min(required_cols["cta_fech_vencim"]).label("CTA_FECH_VENCIM"),
+                func.min(cta_importe_total_expr).label("CTA_IMPORTE_COMPR"),
+                func.min(cta_importe_neto).label("CTA_IMPORTE_NETO"),
+                func.min(cta_importe_sin_iva_expr).label("CTA_IMPORTE_SIN_IVA"),
                 func.count(required_cols["cta_nro_comprob"]).label("CTA_COMPROB_COUNT"),
             )
             .select_from(
@@ -720,7 +751,9 @@ class SourceRepository:
             "cc_nro": self._safe_column(cta_comprob, "NRO_COMPROB"),
             "cc_prov": self._safe_column(cta_comprob, "COD_PROV"),
             "cc_imp": self._safe_column(cta_comprob, "IMPORTE_COMPR"),
-            "cc_neto": self._safe_column(cta_comprob, "IMPORTE_SIN_IVA"),
+            "cc_sin_iva": self._safe_column(cta_comprob, "IMPORTE_SIN_IVA"),
+            "cc_liquido": self._safe_column(cta_comprob, "IMPORTE_LIQUIDO"),
+            "cc_neto": self._safe_column(cta_comprob, "IMPORTE_NETO"),
             "cc_fec": self._safe_column(cta_comprob, "FECH_COMPROB"),
             "cc_venc": self._safe_column(cta_comprob, "FECH_VENCIM"),
         }
@@ -729,8 +762,13 @@ class SourceRepository:
         if any(cols[k] is None for k in required):
             return None
 
-        cc_neto_expr = (
-            cols["cc_neto"] if cols["cc_neto"] is not None
+        cc_neto_expr = self._coalesce_optional_columns(
+            cols["cc_liquido"],
+            cols["cc_neto"],
+            cols["cc_sin_iva"],
+        )
+        cc_sin_iva_expr = (
+            cols["cc_sin_iva"] if cols["cc_sin_iva"] is not None
             else literal_column("NULL")
         )
         cc_venc_expr = (
@@ -813,7 +851,8 @@ class SourceRepository:
                 sg_oc_uni_expr.label("SG_OC_UNI_COMPRA"),
                 sg_oc_prov_expr.label("SG_OC_COD_PROV"),
                 cols["cc_imp"].label("CTA_IMPORTE_COMPR"),
-                cc_neto_expr.label("CTA_IMPORTE_SIN_IVA"),
+                cc_neto_expr.label("CTA_IMPORTE_NETO"),
+                cc_sin_iva_expr.label("CTA_IMPORTE_SIN_IVA"),
                 cols["cc_fec"].label("CTA_FECH_COMPROB"),
                 cc_venc_expr.label("CTA_FECH_VENCIM"),
             )
@@ -980,6 +1019,7 @@ class SourceRepository:
                 op_imput.c.SG_OC_UNI_COMPRA,
                 op_imput.c.SG_OC_COD_PROV,
                 op_imput.c.CTA_IMPORTE_COMPR,
+                op_imput.c.CTA_IMPORTE_NETO,
                 op_imput.c.CTA_IMPORTE_SIN_IVA,
                 op_imput.c.CTA_FECH_COMPROB,
                 op_imput.c.CTA_FECH_VENCIM,

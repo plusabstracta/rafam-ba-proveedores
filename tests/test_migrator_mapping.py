@@ -109,6 +109,8 @@ class TestMapSolicGasto:
             "CTA_COMPROB_COUNT": "1",
             "CTA_TIPO_COMPROB": "factura_a",
             "CTA_NRO_COMPROB": "0001-00000042",
+            "CTA_IMPORTE_COMPR": "1210.50",
+            "CTA_IMPORTE_SIN_IVA": "1000.00",
             "OBSERVACIONES": "Factura de papelería",
         }
         result = exporter._map_solic_gasto(raw)
@@ -116,10 +118,31 @@ class TestMapSolicGasto:
         assert result["external_id"] == {"ejercicio": 2026, "deleg_solic": 1, "nro_solic": 500}
         assert result["Gasto"]["fecha"] == "2026-03-10"
         assert result["Gasto"]["importe_total"] == 1210.50
+        assert result["Gasto"]["importe_neto"] == 1000.00
         assert result["Gasto"]["tipo_factura_id"] == 2
         assert result["Gasto"]["punto_de_venta"] == "0001"
         assert result["Gasto"]["factura_nro"] == "00000042"
         assert result["Gasto"]["observacion"] == "Factura de papelería"
+
+    def test_mapea_importes_crudos_cta_con_fallback_legacy(self, exporter):
+        raw = {
+            "EJERCICIO": "2026", "DELEG_SOLIC": "1", "NRO_SOLIC": "510",
+            "FECH_SOLIC": "2026-03-10",
+            "IMPORTE_TOT": "9999.99",
+            "ESTADO_SOLIC": "C",
+            "CTA_COMPROB_COUNT": "1",
+            "CTA_TIPO_COMPROB": "factura_b",
+            "CTA_NRO_COMPROB": "0001-00000051",
+            "CTA_IMPORTE_COMPR": "2420.00",
+            "CTA_IMPORTE_NETO": "2000.00",
+            "CTA_IMPORTE_SIN_IVA": "1900.00",
+        }
+
+        result = exporter._map_solic_gasto(raw)
+
+        assert result is not None
+        assert result["Gasto"]["importe_total"] == 2420.00
+        assert result["Gasto"]["importe_neto"] == 2000.00
 
     def test_excluye_anuladas(self, exporter):
         raw = {
@@ -398,18 +421,18 @@ class TestWriteBatchOrdenPago:
 
         columns = [
             "EJERCICIO", "NRO_OP", "ESTADO_OP", "CONFIRMADO", "FECH_CONFIRM",
-            "IMPORTE_TOTAL", "CONCEPTO", "NRO_CANCE", "COD_PROV",
+            "IMPORTE_TOTAL", "IMPORTE_LIQUIDO", "CONCEPTO", "NRO_CANCE", "COD_PROV",
             "SG_DELEG_SOLIC", "SG_NRO_SOLIC",
             "OPI_NRO_COMPROB", "OPI_TIPO_COMPROB", "OPI_COD_PROV",
             "SG_OC_COD_PROV", "pedido_id",
-            "CTA_IMPORTE_COMPR", "CTA_IMPORTE_SIN_IVA",
+            "CTA_IMPORTE_COMPR", "CTA_IMPORTE_NETO", "CTA_IMPORTE_SIN_IVA",
             "CTA_FECH_COMPROB", "CTA_FECH_VENCIM",
         ]
         vals = {
             "EJERCICIO": "2026", "NRO_OP": "8001",
             "ESTADO_OP": "C", "CONFIRMADO": "S",
             "FECH_CONFIRM": "2026-04-15 00:00:00",
-            "IMPORTE_TOTAL": "12100", "CONCEPTO": "Pago factura",
+            "IMPORTE_TOTAL": "12100", "IMPORTE_LIQUIDO": "315814.05", "CONCEPTO": "Pago factura",
             "NRO_CANCE": "300", "COD_PROV": "555",
             "SG_DELEG_SOLIC": "1", "SG_NRO_SOLIC": "300",
             "OPI_NRO_COMPROB": "0001-00012345",
@@ -418,7 +441,8 @@ class TestWriteBatchOrdenPago:
             "SG_OC_COD_PROV": "555",
             "pedido_id": "789",
             "CTA_IMPORTE_COMPR": "12100.00",
-            "CTA_IMPORTE_SIN_IVA": "10000.00",
+            "CTA_IMPORTE_NETO": "10000.00",
+            "CTA_IMPORTE_SIN_IVA": "9999.00",
             "CTA_FECH_COMPROB": "2026-04-10 00:00:00",
             "CTA_FECH_VENCIM": "2026-05-10 00:00:00",
         }
@@ -434,8 +458,12 @@ class TestWriteBatchOrdenPago:
         payload = sent[0]
         # OP enviada con gasto_nro_comprobante
         assert len(payload["ordenes_pago"]) == 1
-        assert payload["ordenes_pago"][0]["gasto_nro_comprobante"] == "0001-00012345"
-        assert payload["ordenes_pago"][0]["pedido_id"] == 789
+        op = payload["ordenes_pago"][0]
+        assert op["gasto_nro_comprobante"] == "0001-00012345"
+        assert op["pedido_id"] == 789
+        assert op["importe_total"] == 12100.00
+        assert op["importe_neto"] == 315814.05
+        assert op["Egreso"]["neto_transferido"] == 315814.05
         # Gasto enviado con todos los datos fiscales reales
         assert len(payload["gastos"]) == 1
         gasto = payload["gastos"][0]["Gasto"]
