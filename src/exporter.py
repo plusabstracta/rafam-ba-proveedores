@@ -948,7 +948,7 @@ class MigratorExporter(BaseExporter):
                 # Estado N u otro → fallback: si tiene comprobante o OP
                 # asociada en RAFAM, enviar a Paxapos (la OC ya tiene
                 # actividad downstream real).
-                has_cc = bool(str(raw.get("OC_CC_NRO", "")).strip())
+                has_cc = bool(str(raw.get("OC_CC_NRO") or "").strip())
                 has_op = bool(link_previo and link_previo.get("has_op"))
                 if has_cc or has_op:
                     logger.info(
@@ -1221,7 +1221,7 @@ class MigratorExporter(BaseExporter):
             else:
                 # Estado N u otro → fallback: si tiene comprobante o OP
                 # asociada en RAFAM, enviar a Paxapos.
-                has_cc = bool(str(raw.get("OC_CC_NRO", "")).strip())
+                has_cc = bool(str(raw.get("OC_CC_NRO") or "").strip())
                 has_op = bool(link_previo and link_previo.get("has_op"))
                 if has_cc or has_op:
                     logger.info(
@@ -1757,7 +1757,7 @@ class MigratorExporter(BaseExporter):
                         oc_sks.append(oc_sk)
 
             estado = str(raw.get("ESTADO_OP", "")).strip().upper()
-            if estado != "C":
+            if estado not in {"C", "N"}:
                 skipped_estado[estado or "(vacio)"] = skipped_estado.get(estado or "(vacio)", 0) + 1
                 continue
             confirmado = str(raw.get("CONFIRMADO", "")).strip().upper()
@@ -1801,7 +1801,7 @@ class MigratorExporter(BaseExporter):
             importe = raw.get("IMPORTE_TOTAL")
             # Validar IMPORTE_TOTAL antes de crear el Egreso. Si es NULL,
             # no parseable o <=0 NO se exporta: en RAFAM esto suele ser una
-            # OP de ajuste contable o anulacion (CONFIRMADO=S, ESTADO_OP=C
+            # OP de ajuste contable o anulacion (CONFIRMADO=S, estado enviable
             # con importe 0). Si las dejaramos pasar, se crean Egresos en
             # cero vinculados al mismo Gasto, mostrando "varios pagos" para
             # un mismo comprobante (1 con importe, otros en 0).

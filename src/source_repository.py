@@ -881,7 +881,7 @@ class SourceRepository:
         )
 
         filters = [
-            cols["op_estado"] == "C",
+            cols["op_estado"].in_(("C", "N")),
             cols["op_confirmado"] == "S",
             cols["op_fech_confirm"].is_not(None),
             nonblank(cols["opi_nro"]).is_not(None),
@@ -992,7 +992,7 @@ class SourceRepository:
         confirmado_col = self._safe_column(orden_pago, "CONFIRMADO")
         fech_confirm_col = self._safe_column(orden_pago, "FECH_CONFIRM")
         if estado_col is not None:
-            base_filters.append(estado_col == "C")
+            base_filters.append(estado_col.in_(("C", "N")))
         if confirmado_col is not None:
             base_filters.append(confirmado_col == "S")
         if fech_confirm_col is not None:

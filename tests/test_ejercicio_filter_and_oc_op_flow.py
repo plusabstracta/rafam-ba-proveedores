@@ -168,9 +168,10 @@ def engine_with_data():
 
         # ── 4 OPs ejercicio 2026 (vinculadas a las 4 OCs) ──
         for nro_oc in range(1, 5):
+            estado_op = "N" if nro_oc == 4 else "C"
             conn.execute(text(f"""
                 INSERT INTO ORDEN_PAGO VALUES
-                (2026, {500 + nro_oc}, 100, 'C', 'S', '2026-04-0{nro_oc}', {10000 * nro_oc}, {200 + nro_oc}, 'Pago OC {nro_oc}')
+                (2026, {500 + nro_oc}, 100, '{estado_op}', 'S', '2026-04-0{nro_oc}', {10000 * nro_oc}, {200 + nro_oc}, 'Pago OC {nro_oc}')
             """))
             # ORDEN_PAGO_IMPUT: bridge real OP ↔ CC
             conn.execute(text(f"""
@@ -392,6 +393,8 @@ class TestOcToOpFlow:
         # Debe haber 4 OPs (una por cada OC)
         op_keys = {(r[columns.index("EJERCICIO")], r[columns.index("NRO_OP")]) for r in rows}
         assert len(op_keys) == 4, f"Deben ser 4 OPs, encontradas: {op_keys}"
+        estados = {r[columns.index("ESTADO_OP")] for r in rows}
+        assert estados == {"C", "N"}
 
         # Cada OP debe tener OPI_NRO_COMPROB (bridge ORDEN_PAGO_IMPUT)
         assert "OPI_NRO_COMPROB" in columns, "La columna OPI_NRO_COMPROB debe estar presente"
