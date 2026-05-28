@@ -13,11 +13,12 @@ import csv
 import re
 from pathlib import Path
 
-from sqlalchemy import Column, MetaData, Table, Text, create_engine
+from sqlalchemy import Column, MetaData, Table, Text, create_engine, text
 
 _SNAPSHOT_RE = re.compile(r"^(?P<entity>.+)_\d{8}_\d{6}$")
 
-# Real Oracle schema columns per table (from docs/rafam_schema.md).
+# Real Oracle schema columns per table. Canonical docs live in
+# docs/rafam_paxapos_source_of_truth.md.
 # CSVs exported from JOIN queries have extra columns that must be stripped
 # so that source_repository.py JOINs work correctly on SQLite.
 _SCHEMA_COLUMNS: dict[str, list[str]] = {
@@ -77,21 +78,38 @@ _SCHEMA_COLUMNS: dict[str, list[str]] = {
         "SG_DIFERIDO",
     ],
     # Auxiliary tables used as JOIN sources (not synced as entities)
-    "CTA_HOJA_DE_RUTA": [
-        "PE_EJERCICIO", "PE_NRO", "SG_EJERCICIO", "SG_NRO", "SG_DELEG",
-        "OC_EJERCICIO", "OC_NRO_OC", "OC_COD_PROV", "OP_NRO_OP", "ESTADO_OP",
-        "OP_NRO_CANCE", "PE_JURISDICCION", "FECH_HOJA",
+    "REG_COMP": [
+        "EJERCICIO", "NRO_REG_COMP", "FECH_REG_COMP", "LUG_EMI", "JURISDICCION",
+        "CODIGO_UE", "COD_PROV", "TIPO_REGIS", "NRO_ORIG", "CODIGO_FF",
+        "UNI_COMPRA", "NRO_OC", "DELEG_SOLIC", "NRO_SOLIC", "TIPO_DOC", "NRO_DOC",
+        "ANIO_DOC", "IMPORTE_TOT", "ESTADO_REG_COMP", "CONFIRMADO", "FECH_CONFIRM",
+        "FECH_ANUL", "MOTIVO_ANUL", "CANT_IMPRES", "CONCEPTO", "FECH_RELOJ",
+        "DEUDA", "DEPENDENCIA", "INSISTIDO", "RC_DIFERIDO", "EJERCICIO_ANT",
+        "NRO_REG_COMP_ANT", "RC_EJERCICIO_ANT",
     ],
-    "RG_COMP": [
-        "EJERCICIO", "NRO_REG_COMP", "NRO_OC", "COD_PROV", "JURISDICCION",
-        "FECH_REG_COMP",
+    "CTA_COMPROB": [
+        "EJERCICIO", "TIPO", "NRO_COMPROB", "COD_PROV", "NRO_REG_COMP",
+        "FECH_MOVIM", "FECH_COMPROB", "FECH_VENCIM", "FECH_CONFORMAC",
+        "PORC_BONIF", "FECH_BONIF", "IMPORTE_COMPR", "IMPORTE_PAGADO",
+        "RINDE_IVA", "PORC_IVA", "PORC_CRED_FISCAL", "LIST_LIBRO_IVA",
+        "FECH_LIST_IVA", "COD_PROV_REAL", "RAZON_SOCIAL", "CUIT", "DETALLE",
+        "IMPORTE_SIN_IVA",
+    ],
+    "ORDEN_PAGO_DEDUC": [
+        "EJERCICIO", "NRO_OP", "CODIGO_DEDUC", "IMPORTE_RETEN", "ALICUOTA",
+        "COMPROB_DEDUC", "TIPO_GENERAC", "CUENTA", "COEF_CONV_MULTI",
+        "ACTIVIDAD", "TIPO_ALICUOTA",
+    ],
+    "DEDUCCIONES": [
+        "CODIGO", "DESCRIPCION", "TIPO_DEDUC", "PORCENTAJE", "SALDO",
+        "DECRIPCION_AB", "CODIGO_AXT", "EJERCICIO",
     ],
 }
 
 
 def _latest_csv_by_entity(csv_dir: Path) -> dict[str, Path]:
     latest: dict[str, Path] = {}
-    for path in csv_dir.glob("*.csv"):
+    for path in csv_dir.rglob("*.csv"):
         match = _SNAPSHOT_RE.match(path.stem)
         if match is None:
             continue
@@ -100,49 +118,6 @@ def _latest_csv_by_entity(csv_dir: Path) -> dict[str, Path]:
         if current is None or path.name > current.name:
             latest[entity] = path
     return latest
-
-
-_CTA_HOJA_DE_RUTA_VIEW_SQL = """\
-CREATE VIEW IF NOT EXISTS CTA_HOJA_DE_RUTA AS
-SELECT DISTINCT
-    sg.EJERCICIO    AS SG_EJERCICIO,
-    sg.NRO_SOLIC    AS SG_NRO,
-    sg.DELEG_SOLIC  AS SG_DELEG,
-    oc.EJERCICIO    AS OC_EJERCICIO,
-    oc.NRO_OC       AS OC_NRO_OC,
-    oc.COD_PROV     AS OC_COD_PROV,
-    pe.EJERCICIO    AS PE_EJERCICIO,
-    pe.NUM_PED      AS PE_NRO,
-    pe.JURISDICCION AS PE_JURISDICCION,
-    oc.FECH_CONFIRM AS FECH_HOJA
-FROM OC_ITEMS oci
-JOIN SOLIC_GASTOS sg
-  ON sg.EJERCICIO = oci.EJERCICIO
- AND sg.DELEG_SOLIC = oci.DELEG_SOLIC
- AND sg.NRO_SOLIC = oci.NRO_SOLIC
-JOIN ORDEN_COMPRA oc
-  ON oc.EJERCICIO = oci.EJERCICIO
- AND oc.UNI_COMPRA = oci.UNI_COMPRA
- AND oc.NRO_OC = oci.NRO_OC
-LEFT JOIN PEDIDOS pe
-  ON pe.EJERCICIO = sg.EJERCICIO
- AND pe.NUM_PED = sg.NRO_PED
-"""
-
-
-def _ensure_cta_hoja_de_ruta_view(conn) -> None:
-    """Always create CTA_HOJA_DE_RUTA as a derived VIEW (it's a JOIN view, not a real table)."""
-    from sqlalchemy import text
-    existing = conn.execute(
-        text("SELECT type FROM sqlite_master WHERE name = 'CTA_HOJA_DE_RUTA'")
-    ).scalar()
-    if existing == "table":
-        conn.execute(text("DROP TABLE CTA_HOJA_DE_RUTA"))
-    elif existing == "view":
-        conn.execute(text("DROP VIEW CTA_HOJA_DE_RUTA"))
-    conn.execute(text(_CTA_HOJA_DE_RUTA_VIEW_SQL))
-    count = conn.execute(text("SELECT COUNT(*) FROM CTA_HOJA_DE_RUTA")).scalar()
-    print(f"[CTA_HOJA_DE_RUTA] VIEW derivada creada ({count} filas)")
 
 
 def _create_table_from_csv(metadata: MetaData, entity: str, header: list[str]) -> Table:
@@ -184,6 +159,13 @@ def load_csvs(csv_dir: Path, output_db: Path) -> None:
                 else:
                     header = list(reader.fieldnames)
 
+                existing = conn.execute(
+                    text("SELECT type FROM sqlite_master WHERE name = :name"),
+                    {"name": table_name},
+                ).scalar()
+                if existing == "view":
+                    conn.execute(text(f'DROP VIEW "{table_name}"'))
+
                 table = _create_table_from_csv(metadata, entity, header)
                 table.drop(conn, checkfirst=True)
                 table.create(conn, checkfirst=True)
@@ -192,11 +174,6 @@ def load_csvs(csv_dir: Path, output_db: Path) -> None:
                 if rows:
                     conn.execute(table.insert(), rows)
                 print(f"[{entity}] {len(rows)} filas cargadas desde {path.name} ({len(header)} cols)")
-
-        # If CTA_HOJA_DE_RUTA was NOT loaded from CSV, create it as a derived
-        # VIEW from the existing tables so that source_repository JOINs work
-        # identically in dev (SQLite) and prod (Oracle).
-        _ensure_cta_hoja_de_ruta_view(conn)
 
 
 def main() -> None:

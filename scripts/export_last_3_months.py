@@ -44,162 +44,79 @@ DEFAULT_OUTPUT_DIR = REPO_ROOT / "output" / "rafam_ultimos_3_meses"
 # Si la tabla tiene varias columnas DATE, se usa la primera que aparezca aquí.
 # Las tablas sin entrada se auto-detectan (se elige la primera DATE encontrada).
 DATE_COL_PRIORITY: dict[str, list[str]] = {
-    "PROVEEDORES":        ["FECHA_ULT_COMP", "FECHA_ALTA"],
-    "PEDIDOS":            ["FECH_EMI"],
-    "SOLIC_GASTOS":       ["FECH_SOLIC", "FECH_CONFIRM"],
-    "ORDEN_COMPRA":       ["FECH_OC", "FECH_CONFIRM"],
-    "ORDEN_PAGO":         ["FECH_OP", "FECH_CONFIRM"],
-    "RECEPCION":          ["FECH_RECEP"],
-    "ADJUDICACIONES":     ["FECH_ADJUD"],
-    "DEVOLUCION":         ["FECH_DEVOL"],
-    "EGRESOS":            ["FECH_EGR"],
-    "EMBARGOS":           ["FECH_EMBARGO"],
-    "REGUL_CAMBIO":       ["FECH_REGUL"],
-    "REGUL_GASTOS":       ["FECH_REGUL"],
-    "REGUL_GASTOS_EX":    ["FECH_REGUL"],
-    "ORDEN_DEVOL":        ["FECH_DEVOL"],
-    "ORDEN_REINT":        ["FECH_REINT"],
-    "ORDEN_PAGOEA":       ["FECH_OP"],
-    "REG_COMP":           ["FECH_REG"],
-    "REG_DEVEN":          ["FECH_DEV"],
-    "RG_COMP":            ["FECH_COMP"],
-    "CTA_HOJA_DE_RUTA":   ["FECH_HOJA"],
-    "RETENCIONES":        ["FECH_RETEN"],
-    "DEDUCCIONES":        ["FECH_DEDUC"],
-    "MOV_EXTRAPRES_DEV":  ["FECH_MOV"],
-    "MOV_EXTRAPRES_PAG":  ["FECH_MOV"],
-    "MOV_EXTRAPRES_REC":  ["FECH_MOV"],
-    "MOV_PRES_DEV":       ["FECH_MOV"],
-    "MOV_PRES_PAG":       ["FECH_MOV"],
-    "MOV_PRES_COMP":      ["FECH_MOV"],
+    "PROVEEDORES":   ["FECHA_ULT_COMP", "FECHA_ALTA"],
+    "PEDIDOS":       ["FECH_EMI"],
+    "SOLIC_GASTOS":  ["FECH_SOLIC", "FECH_CONFIRM"],
+    "ORDEN_COMPRA":  ["FECH_OC", "FECH_CONFIRM"],
+    "ORDEN_PAGO":    ["FECH_OP", "FECH_CONFIRM"],
+    "ADJUDICACIONES":["FECH_ADJUD"],
+    "REG_COMP":      ["FECH_REG_COMP", "FECH_CONFIRM"],
+    "RETENCIONES":   ["FECH_RETEN"],
+    "DEDUCCIONES":   ["FECH_DEDUC"],
 }
 
-# Tablas que siempre se exportan completas (no tienen fecha útil)
+# Tablas que siempre se exportan completas (catálogos/items sin DATE útil)
 FULL_LOAD_TABLES: set[str] = {
+    # Catálogos chicos referenciados por el flujo de compras
     "JURISDICCIONES",
+    "TIPOS_COMPROB",
+    "TIPO_DOC_RES",
+    # Detalle de cabeceras (no tienen FECHA propia, dependen de su cabecera)
     "PED_ITEMS",
     "OC_ITEMS",
     "SOLIC_GASTOS_ITEMS",
-    "USUARIOS_JURISDICCIONES",
-    "CALIFICACIONES",
-    "DEPENDENCIAS",
-    "ESTRUC_PROG",
-    "FORMULARIO1", "FORMULARIO2", "FORMULARIO4",
-    "FORMULARIOC1", "FORMULARIOC2", "FORMULARIOP4",
-    "METAS_PROG",
-    "CUOTAS_JURISDIC",
+    # Deducciones por OP individual (~163K filas, necesitamos 2025+2026)
+    "ORDEN_PAGO_DEDUC",
 }
 
-# Todas las tablas a exportar (mismo orden que explore_schema.py)
+# Tablas filtradas por EJERCICIO (no tienen DATE pero sí columna EJERCICIO).
+# Se exporta solo el ejercicio indicado para acotar volumen.
+EJERCICIO_FILTER_TABLES: dict[str, int] = {
+    "ORDEN_PAGO_IMPUT":     2026,  # bridge OP↔CC, 539K filas históricas
+    "ADJUDICACIONES_ITEMS": 2026,  # link PE_ITEMS ↔ OC_ITEMS
+}
+
+# Todas las tablas a exportar — set mínimo realmente usado por el cron
+# RAFAM -> Paxapos. Ver justificación en TARGET_TABLES de explore_schema.py.
 ALL_TABLES: list[str] = [
-    # Core
+    # ── Pasada 1: proveedores ──────────────────────────────────────────────
     "PROVEEDORES",
-    "JURISDICCIONES",
-    "PEDIDOS",
-    "PED_ITEMS",
-    "SOLIC_GASTOS",
+    # ── Pasada 2: órdenes de compra ────────────────────────────────────────
     "ORDEN_COMPRA",
     "OC_ITEMS",
+    # ── Pasada 3: órdenes de pago + retenciones + vínculo a gastos ─────────
     "ORDEN_PAGO",
-    "RG_COMP",
-    "CTA_HOJA_DE_RUTA",
+    "ORDEN_PAGO_IMPUT",   # bridge OP ↔ CTA_COMPROB (filtrado por EJERCICIO)
+    "CTA_COMPROB",
+    "REG_COMP",
+    "SOLIC_GASTOS",
     "RETENCIONES",
     "DEDUCCIONES",
-    # Relacionadas con PROVEEDORES
-    "ACT_IMP_PROV",
+    "ORDEN_PAGO_DEDUC",  # deducciones por OP individual (PK: EJERCICIO+NRO_OP+CODIGO_DEDUC)
+    # ── Resolución de items / mercadería ───────────────────────────────────
+    "PEDIDOS",
+    "PED_ITEMS",
     "ADJUDICACIONES",
-    "BENEFICIARIOS",
-    "CESIONARIOS",
-    "COTIZA_PROV",
-    "COTIZA_PROV_ITEMS",
-    "CTA_COMPROB",
-    "CTA_CTACTE_MOVS",
-    "CTA_PROVEEDORES_ALICUOTAS",
-    "CTA_UTE",
-    "CTR_DOCUM_PROV",
-    "DATOS_PART_CONS",
-    "DATOS_PART_CONT",
-    "DEUFLO_PROV",
-    "DEVOLUCION",
-    "EGRESOS",
-    "EMBARGOS",
-    "HISTO_ESTADOS",
-    "NOMINA_PROV",
-    "ORDEN_PAGO_DEDUC_UTE",
-    "ORDEN_PAGOEA_DEDUC_UTE",
-    "ORDEN_REINT_PRESUP",
-    "PER_AGENTES",
-    "PER_AGENTES_HIST",
-    "PER_CONCEPTOS_PROVEEDOR",
-    "REGUL_CAMBIO_OCEA",
-    "REGUL_CORREC_IMPUT",
-    "REGUL_DESAF",
-    "TES_DEPOSITOS_GARANTIAS",
-    "VI_SUBRUB_PROV",
-    # Relacionadas con JURISDICCIONES
-    "CALCULO_MODIF",
-    "CUOTAS_JURISDIC",
-    "CTA_TMP_REG_DEVEN_IMP",
-    "DEPENDENCIAS",
-    "DEVENGAMIENTOS",
-    "ESTRUC_PROG",
-    "FORMULARIO1",
-    "FORMULARIO2",
-    "FORMULARIO4",
-    "FORMULARIOC1",
-    "FORMULARIOC2",
-    "FORMULARIOP4",
-    "INGRESOS",
-    "ING_COD_INGRESOS_DET",
-    "METAS_PROG",
-    "MOV_PRES_COMP",
-    "MOV_PRES_REC_DEV",
-    "PER_CONCEPTOS_GASTOS_M",
-    "PER_SELECCION_DET",
-    "PRE_JURIS_RECURSOS",
-    "REGUL_CORREC_RECUR_IMPUT",
-    "REGUL_RECURSOS_EX_IMPUT",
-    "REGUL_RETENCIONES",
+    "ADJUDICACIONES_ITEMS",
     "SOLIC_GASTOS_ITEMS",
-    "USUARIOS_JURISDICCIONES",
-    # Relacionadas con ORDEN_PAGO
-    "CTA_IMPUT_PERSONAL",
-    "MOV_PRES_PAG",
-    "REGUL_CAMBIO",
-    # Relacionadas con ORDEN_COMPRA
-    "OC_PLAN_ENT",
-    "RECEPCION",
-    # Relacionadas con PEDIDOS
-    "PED_COTIZACIONES",
-    # Relacionadas con DEDUCCIONES
-    "ORDEN_PAGOEA_DEDUC",
-    "ORDEN_PAGO_DEDUC",
-    "REGUL_RETENCIONES_IMPUT",
-    "RETENCIONES_REGDED",
-    # Múltiples relaciones
-    "MOV_EXTRAPRES_DEV",
-    "MOV_EXTRAPRES_PAG",
-    "MOV_EXTRAPRES_REC",
-    "MOV_PRES_DEV",
-    "ORDEN_DEVOL",
-    "ORDEN_PAGOEA",
-    "ORDEN_REINT",
-    "REG_COMP",
-    "REG_DEVEN",
-    "REGUL_CAMBIO_PE_IMPUT",
-    "REGUL_CORREC_EX_IMPUT",
-    "REGUL_GASTOS",
-    "REGUL_GASTOS_EX",
-    "REGUL_OPE_DEVOL",
+    # ── Catálogos (lookups) ────────────────────────────────────────────────
+    "JURISDICCIONES",
+    "TIPOS_COMPROB",
+    "TIPO_DOC_RES",
 ]
 
 
 # ─── Conexión ─────────────────────────────────────────────────────────────────
 
 def get_connection() -> oracledb.Connection:
-    oracle_client_dir = os.getenv("ORACLE_CLIENT_DIR")
-    if oracle_client_dir:
-        oracledb.init_oracle_client(lib_dir=oracle_client_dir)
+    # Thick mode requerido para Oracle < 12.2
+    try:
+        oracle_client_dir = os.getenv("ORACLE_CLIENT_LIB_DIR") or os.getenv("ORACLE_CLIENT_DIR")
+        oracledb.init_oracle_client(lib_dir=oracle_client_dir or None)
+        print(f"[thick mode] Oracle Instant Client habilitado desde: {oracle_client_dir or 'LD_LIBRARY_PATH'}")
+    except Exception as e:
+        if "already been initialized" not in str(e):
+            print(f"[thin mode] No se pudo inicializar Oracle Instant Client: {e}")
     dsn  = oracledb.makedsn(RAFAM_SOURCE_HOST, RAFAM_SOURCE_PORT, service_name=RAFAM_SOURCE_SERVICE)
     conn = oracledb.connect(user=RAFAM_SOURCE_USER, password=RAFAM_SOURCE_PASSWORD, dsn=dsn)
     print(f"✅ Conectado a [{RAFAM_SOURCE_SERVICE}] en {RAFAM_SOURCE_HOST}:{RAFAM_SOURCE_PORT}")
@@ -268,12 +185,17 @@ def export_table(
     output_dir: Path,
     timestamp: str,
     full_load: bool,
+    ejercicio: int | None = None,
 ) -> dict:
     col_names = [c["name"] for c in columns]
     col_list  = ", ".join(col_names)
     qualified = f"{SCHEMA}.{table}"
 
-    if full_load or date_col is None:
+    if ejercicio is not None:
+        sql = f"SELECT {col_list} FROM {qualified} WHERE EJERCICIO = :1"
+        params = [ejercicio]
+        mode = f"ejercicio={ejercicio}"
+    elif full_load or date_col is None:
         sql = f"SELECT {col_list} FROM {qualified}"
         params: list = []
         mode = "completo"
@@ -357,9 +279,10 @@ def main() -> None:
 
         columns   = get_table_columns(cursor, table)
         full_load = table in FULL_LOAD_TABLES
-        date_col  = None if full_load else pick_date_column(table, columns)
+        ejercicio = EJERCICIO_FILTER_TABLES.get(table)
+        date_col  = None if (full_load or ejercicio is not None) else pick_date_column(table, columns)
 
-        if not full_load and date_col is None:
+        if not full_load and ejercicio is None and date_col is None:
             print(f"  ⚠️  {table}: sin columna DATE detectada → export completo")
             full_load = True
 
@@ -367,9 +290,15 @@ def main() -> None:
             result = export_table(
                 cursor, table, columns, date_col,
                 since, output_dir, timestamp, full_load,
+                ejercicio=ejercicio,
             )
             results.append(result)
-            icon = "📦" if full_load else "🗓️ "
+            if ejercicio is not None:
+                icon = "📅"
+            elif full_load:
+                icon = "📦"
+            else:
+                icon = "🗓️ "
             print(f"  {icon} {table:<40} {result['rows']:>8} filas  [{result['mode']}]")
         except oracledb.DatabaseError as exc:
             print(f"  ❌ {table}: error al exportar — {exc}", file=sys.stderr)

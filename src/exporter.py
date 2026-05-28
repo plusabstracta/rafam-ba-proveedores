@@ -17,7 +17,10 @@ import csv
 import json
 import logging
 import os
+import random
+import re
 import ssl
+import time
 import unicodedata
 from abc import ABC, abstractmethod
 from datetime import datetime
@@ -27,9 +30,86 @@ from urllib import parse
 from urllib import error, request
 
 from .entity_link_store import EntityLinkStore
-from .gateway_mapper import map_proveedor_migrator_row, map_proveedor_row
+from .gateway_mapper import map_proveedor_migrator_row, map_proveedor_row, resolve_centro_costo_id
 
 logger = logging.getLogger(__name__)
+
+
+# Errores HTTP transitorios que vale la pena reintentar.
+_RETRYABLE_HTTP_STATUS = frozenset({408, 425, 429, 500, 502, 503, 504})
+
+
+def _http_request_with_retries(
+    req: request.Request,
+    *,
+    timeout: float,
+    ssl_context=None,
+    max_attempts: int = 3,
+    base_backoff: float = 0.5,
+):
+    """Ejecuta urlopen con retries acotados ante errores transitorios.
+
+    Reintenta solo URLError (red caida, DNS, timeout) y HTTPError con status en
+    `_RETRYABLE_HTTP_STATUS`. Errores 4xx normales (validacion, auth) NO se
+    reintentan — falla rapido para que el caller actue.
+
+    Usa backoff exponencial con jitter aleatorio para evitar thundering herd
+    si varios cron salen al mismo tiempo. Devuelve el response object abierto;
+    el caller debe usarlo dentro de `with`.
+    """
+    last_exc: Exception | None = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return request.urlopen(req, timeout=timeout, context=ssl_context)
+        except error.HTTPError as exc:
+            # Solo reintentamos status transitorios. 4xx no transitorios suben directo.
+            if exc.code not in _RETRYABLE_HTTP_STATUS or attempt == max_attempts:
+                raise
+            last_exc = exc
+        except error.URLError as exc:
+            if attempt == max_attempts:
+                raise
+            last_exc = exc
+
+        backoff = base_backoff * (2 ** (attempt - 1)) + random.uniform(0, 0.25)
+        logger.warning(
+            "HTTP retry %d/%d a %s tras error transitorio: %s (backoff %.2fs)",
+            attempt, max_attempts - 1, req.full_url, last_exc, backoff,
+        )
+        time.sleep(backoff)
+    # Defensa: nunca se alcanza, pero si llega significa que loop salio sin raise.
+    raise RuntimeError("HTTP retries agotados sin excepcion observable") from last_exc
+
+
+# Patron para redactar campos sensibles en dumps de payload.
+_SENSITIVE_FIELDS = re.compile(
+    r'"(cuit|password|token|api_key|authorization|jwt|x[-_]api[-_]key)"\s*:\s*"[^"]*"',
+    re.IGNORECASE,
+)
+
+
+def _redact_payload_for_dump(text: str) -> str:
+    """Enmascara CUIT y secrets en string JSON serializado para no leak en dumps."""
+    return _SENSITIVE_FIELDS.sub(lambda m: f'"{m.group(1)}":"***REDACTED***"', text)
+
+
+def _dump_payload_path() -> str | None:
+    """Devuelve path de DUMP_PAYLOAD si esta habilitado y APP_ENV no es 'prod'.
+
+    En produccion bloqueamos el dump para evitar leak accidental de datos
+    fiscales (CUIT, importes, identificadores). Para forzar dump en prod hay
+    que setear `DUMP_PAYLOAD_FORCE=1` explicitamente.
+    """
+    path = os.environ.get("DUMP_PAYLOAD")
+    if not path:
+        return None
+    app_env = os.environ.get("APP_ENV", "").strip().lower()
+    if app_env == "prod" and os.environ.get("DUMP_PAYLOAD_FORCE", "").strip() != "1":
+        logger.warning(
+            "DUMP_PAYLOAD ignorado en APP_ENV=prod. Setear DUMP_PAYLOAD_FORCE=1 para forzar."
+        )
+        return None
+    return path
 
 
 class AlreadyExistsError(Exception):
@@ -44,6 +124,10 @@ class BaseExporter(ABC):
     @abstractmethod
     def write_batch(self, entity: str, columns: list[str], rows: list[tuple]) -> None:
         """Procesa un lote de filas para la entidad dada."""
+
+    def attach_source(self, source_repo) -> None:
+        """Inyecta SourceRepository para fetch secundarios. Default: no-op."""
+        return None
 
     def close(self) -> None:
         """Llamado una vez al finalizar todas las entidades. Override si necesario."""
@@ -229,7 +313,7 @@ class GatewayExporter(BaseExporter):
             ssl_context = ssl._create_unverified_context()
 
         try:
-            with request.urlopen(req, timeout=self._timeout, context=ssl_context) as resp:
+            with _http_request_with_retries(req, timeout=self._timeout, ssl_context=ssl_context) as resp:
                 status = resp.getcode()
                 final_url = resp.geturl()
                 content_type = (resp.headers.get("Content-Type") or "").lower()
@@ -280,7 +364,7 @@ class GatewayExporter(BaseExporter):
         if not self._verify_ssl:
             ssl_context = ssl._create_unverified_context()
 
-        with request.urlopen(req, timeout=self._timeout, context=ssl_context) as resp:
+        with _http_request_with_retries(req, timeout=self._timeout, ssl_context=ssl_context) as resp:
             status = resp.getcode()
             final_url = resp.geturl()
             content_type = (resp.headers.get("Content-Type") or "").lower()
@@ -489,16 +573,11 @@ class MigratorExporter(BaseExporter):
         self._dry_run = dry_run
         self._link_store = EntityLinkStore()
         self._lookup_payload = fetch_migrator_lookups([
-            "centros_costo",
             "unidades_de_medida",
             "tipos_factura",
             "tipos_de_pago",
             "tipos_retencion",
         ])
-        self._centros_costo = self._lookup_list(self._lookup_payload, "centros_costo")
-        self._centros_costo_by_name = self._build_single_index(self._centros_costo, "name")
-        self._centros_costo_by_jurisdiccion = self._build_jurisdiccion_index(self._centros_costo)
-        self._seed_centro_costo_from_lookups()
         self._unidades = self._lookup_list(self._lookup_payload, "unidades_de_medida")
         self._tipos_factura = self._lookup_list(self._lookup_payload, "tipos_factura")
         self._tipos_factura_by_codename = self._build_single_index(self._tipos_factura, "codename")
@@ -512,13 +591,21 @@ class MigratorExporter(BaseExporter):
         self._tipos_retencion_by_codename = self._build_single_index(self._tipos_retencion, "codename")
         self._tipos_retencion_by_name = self._build_single_index(self._tipos_retencion, "name")
         self._missing_mercaderia_matches: dict[str, int] = {}
+        self._source_repo = None
+        self._retencion_skipped_no_catalog: int = 0
+        self._retencion_skipped_no_match: dict[str, int] = {}
 
         if not self._verify_ssl:
             logger.warning("PAXAPOS_VERIFY_SSL=false: SSL certificate verification deshabilitada para migrator")
         if isinstance(self._lookup_payload, dict) and self._lookup_payload.get("_partial_errors"):
             logger.warning("Migrator lookups parciales: %s", self._lookup_payload.get("_partial_errors"))
 
+    def attach_source(self, source_repo) -> None:
+        self._source_repo = source_repo
+
     def _payload_options(self) -> dict:
+        # auto_create_gasto queda siempre activo: las OP vinculan/crean gastos
+        # desde el numero de comprobante RAFAM cuando Paxapos aun no lo tiene.
         return {
             "upsert": True,
             "atomic": False,
@@ -526,28 +613,36 @@ class MigratorExporter(BaseExporter):
             "send_oc_mail": False,
             "strict_mail": False,
             "auto_create_mercaderia": True,
+            "auto_create_gasto": True,
             "auto_calcular_retenciones": False,
             "notificar_proveedor_pago": False,
         }
 
     def write_batch(self, entity: str, columns: list[str], rows: list[tuple]) -> None:
-        if entity == "jurisdicciones":
-            return self._write_batch_jurisdicciones(columns, rows)
-
         if entity == "proveedores":
             return self._write_batch_proveedores(columns, rows)
 
         if entity == "ped_items":
-            return self._write_batch_ped_items(columns, rows)
+            logger.warning("Migrator [ped_items]: entidad deshabilitada — los pedidos se migran como OCs via 'oc_items'.")
+            return
 
         if entity == "oc_items":
             return self._write_batch_oc_items(columns, rows)
 
         if entity == "orden_compra":
-            return self._write_batch_orden_compra(columns, rows)
+            logger.warning(
+                "Migrator [orden_compra]: entidad deshabilitada en migrator — las OCs se migran via 'oc_items' "
+                "(que envia header + items embebidos). El header-only generaba OCs vacias en Paxapos."
+            )
+            return
 
         if entity == "solic_gastos":
-            return self._write_batch_solic_gastos(columns, rows)
+            logger.warning(
+                "Migrator [solic_gastos]: entidad deshabilitada en migrator — los gastos NO se migran desde RAFAM. "
+                "En Paxapos los crean los usuarios al subir la factura del proveedor; el endpoint de OP los auto-crea "
+                "si todavia no existen al momento de pagar (via gasto_nro_comprobante PDV-NRO_COMPROB)."
+            )
+            return
 
         if entity == "orden_pago":
             return self._write_batch_orden_pago(columns, rows)
@@ -559,78 +654,10 @@ class MigratorExporter(BaseExporter):
             )
             return
 
-        raise ValueError("Modo migrator soporta por ahora: jurisdicciones, proveedores, ped_items, oc_items, orden_compra, solic_gastos, orden_pago")
-
-    def _write_batch_jurisdicciones(self, columns: list[str], rows: list[tuple]) -> None:
-        centros_costo = []
-        rubros = []
-        clasificaciones = []
-
-        for row in rows:
-            raw = dict(zip(columns, row))
-            jurisdiccion = raw.get("JURISDICCION")
-            if not jurisdiccion:
-                continue
-            jurisdiccion = str(jurisdiccion).strip()
-            if not jurisdiccion:
-                continue
-
-            denominacion = str(raw.get("DENOMINACION") or "").strip() or jurisdiccion
-            external_id = {"jurisdiccion": jurisdiccion}
-
-            centros_costo.append({
-                "external_id": external_id,
-                "CentroCosto": {
-                    "name": denominacion,
-                    "description": f"Jurisdiccion RAFAM {jurisdiccion}",
-                },
-            })
-            rubros.append({
-                "external_id": external_id,
-                "Rubro": {"name": denominacion},
-            })
-            clasificaciones.append({
-                "external_id": external_id,
-                "Clasificacion": {"name": denominacion, "parent_id": None},
-            })
-
-        if not rubros:
-            logger.info("Migrator [jurisdicciones]: lote vacío luego del mapeo")
-            return
-
-        payload = {
-            "dry_run": self._dry_run,
-            "options": self._payload_options(),
-            "centros_costo": centros_costo,
-            "rubros": rubros,
-            "clasificaciones": clasificaciones,
-            "proveedores": [],
-            "pedidos": [],
-            "ordenes_compra": [],
-            "gastos": [],
-            "ordenes_pago": [],
-        }
-
-        url = self._import_url
-        logger.debug(
-            "Migrator request [jurisdicciones] POST %s dry_run=%s rubros=%d clasificaciones=%d",
-            url, self._dry_run, len(rubros), len(clasificaciones),
+        raise ValueError(
+            "Modo migrator soporta solo 3 entidades oficiales: proveedores, oc_items, orden_pago. "
+            f"Recibido: {entity!r}"
         )
-        parsed = self._post_json(url, payload)
-
-        stats = parsed.get("stats", {}) if isinstance(parsed, dict) else {}
-        centros_stats = stats.get("centros_costo", {}) if isinstance(stats, dict) else {}
-        rubros_stats = stats.get("rubros", {}) if isinstance(stats, dict) else {}
-        clas_stats = stats.get("clasificaciones", {}) if isinstance(stats, dict) else {}
-
-        logger.info(
-            "Migrator OK [jurisdicciones]: centros_costo=%d/%d ok, rubros=%d/%d ok, clasificaciones=%d/%d ok, dry_run=%s",
-            centros_stats.get("ok", 0), len(centros_costo),
-            rubros_stats.get("ok", 0), len(rubros),
-            clas_stats.get("ok", 0), len(clasificaciones),
-            self._dry_run,
-        )
-        self._persist_links("jurisdicciones", parsed, {})
 
     def _write_batch_proveedores(self, columns: list[str], rows: list[tuple]) -> None:
         proveedores = []
@@ -669,6 +696,7 @@ class MigratorExporter(BaseExporter):
         error_count = section_stats.get("error", 0)
 
         self._persist_links("proveedores", parsed, raw_by_source_key)
+        self._raise_on_migrator_errors(parsed)
         logger.info(
             "Migrator OK [proveedores]: %d ok, %d error, dry_run=%s",
             ok_count,
@@ -750,6 +778,8 @@ class MigratorExporter(BaseExporter):
         ok_count = section_stats.get("ok", 0)
         error_count = section_stats.get("error", 0)
 
+        self._persist_links("ped_items", parsed, {})
+        self._raise_on_migrator_errors(parsed)
         logger.info(
             "Migrator OK [ped_items->pedidos]: %d ok, %d error, pedidos=%d, items_omitidos=%d, dry_run=%s",
             ok_count,
@@ -758,7 +788,6 @@ class MigratorExporter(BaseExporter):
             unresolved_items,
             self._dry_run,
         )
-        self._persist_links("ped_items", parsed, {})
         self._log_unresolved_summary("ped_items")
 
     def _write_batch_oc_items(self, columns: list[str], rows: list[tuple]) -> None:
@@ -766,6 +795,11 @@ class MigratorExporter(BaseExporter):
         grouped: dict[tuple[int, int, int], dict] = {}
         grouped_raw: dict[tuple[int, int, int], dict] = {}
         grouped_gasto_refs: dict[tuple[int, int, int], list[str]] = {}
+        # seen_items_per_oc: dedup por ITEM_OC porque el LEFT JOIN a
+        # SOLIC_GASTOS y oc_to_cc (REG_COMP→CTA_COMPROB) puede multiplicar filas (44% multi-
+        # match en SG, 8% en CC). Sin esto, los totales en Paxapos se inflan
+        # porque sum(item.precio) cuenta cada item N veces.
+        seen_items_per_oc: dict[tuple[int, int, int], set[int]] = {}
         skipped_no_prov: set[tuple[int, int, int]] = set()
         unresolved_items = 0
 
@@ -800,7 +834,7 @@ class MigratorExporter(BaseExporter):
                     continue
 
                 pedido: dict = {
-                    "internal_id": f"rafam-oc-{ejercicio}-{uni_compra}-{nro_oc}",
+                    "internal_id": f"{ejercicio % 100}-{nro_oc}",
                     "tipo": "orden_compra",
                     "estado_aprobacion": 2,
                     "proveedor_id": remote_prov_id,
@@ -845,36 +879,28 @@ class MigratorExporter(BaseExporter):
                 if rafam_ref not in refs:
                     refs.append(rafam_ref)
 
+            # Dedup por ITEM_OC: el LEFT JOIN a SOLIC_GASTOS / oc_to_cc
+            # multiplica filas. Sin esto los items se duplican y el total
+            # (sum(precio_unitario x cantidad)) en Paxapos queda inflado.
+            item_oc = self._to_int(raw.get("ITEM_OC"))
+            seen_items = seen_items_per_oc.setdefault(key, set())
+            if item_oc is not None and item_oc in seen_items:
+                continue
+
             item = self._map_oc_item(raw)
             if item is None:
                 unresolved_items += 1
                 self._track_unresolved_item(raw.get("DESCRIPCION"), raw.get("COD_PROV"))
                 continue
+            if item_oc is not None:
+                seen_items.add(item_oc)
             grouped[key]["items"].append(item)
-
-        # ── 1b. Resolver gasto_ids por OC via link_gasto ─────────────────
-        for key, oc_data in grouped.items():
-            gasto_refs = grouped_gasto_refs.get(key, [])
-            if not gasto_refs:
-                continue
-            gasto_ids = []
-            gasto_external_ids = []
-            for ref in gasto_refs:
-                gasto_external_id = self._gasto_external_id_from_ref(ref)
-                if gasto_external_id is not None:
-                    gasto_external_ids.append(gasto_external_id)
-                remote_gasto = self._get_gasto_remote_id(ref)
-                if remote_gasto:
-                    gasto_ids.append(int(remote_gasto))
-            if gasto_external_ids:
-                oc_data["gasto_external_ids"] = gasto_external_ids
-            if gasto_ids:
-                oc_data["gasto_ids"] = gasto_ids
 
         # ── 2. Clasificar OCs por acción según estado y link previo ───────
         ocs_to_create: list[dict] = []      # estado R, sin link o link con estado != R
-        ocs_to_anular: list[dict] = []      # estado A, link previo con estado R (estaba en Paxapos)
+        ocs_to_anular: list[dict] = []      # estado A, link previo con estado R (estaba en Paxapos), sin OP
         ocs_to_skip_register: list[tuple[int, int, int]] = []  # estado N/A sin link previo R
+        ocs_to_skip_has_op: list[tuple[int, int, int]] = []    # estado A con OP asociada → no eliminar
         ocs_same_state: list[tuple[int, int, int]] = []  # estado R ya enviado, sin gastos nuevos
         created_count = 0
         anuladas_count = 0
@@ -897,29 +923,49 @@ class MigratorExporter(BaseExporter):
                 if link_previo is None or estado_previo != "R":
                     # Nueva para Paxapos: no existía o venía de otro estado
                     ocs_to_create.append(oc_data)
-                elif oc_data.get("gasto_ids"):
-                    # Ya enviada con R pero ahora tiene gastos resueltos → re-enviar para vincular
-                    ocs_to_create.append(oc_data)
                 else:
-                    # Ya estaba con R y ya tiene remote_id → skip envío, actualizar refs
+                    # Ya estaba con R y ya tiene remote_id → skip envío
                     ocs_same_state.append(key)
                     skipped_same_state += 1
             elif estado_actual == "A":
                 if link_previo and estado_previo == "R" and link_previo.get("remote_id"):
-                    # Estaba en Paxapos con R → anular
-                    oc_data["Pedido"]["estado_aprobacion"] = 4
-                    oc_data["Pedido"]["motivo_rechazo"] = "Anulada en RAFAM"
-                    ocs_to_anular.append(oc_data)
+                    if link_previo.get("has_op"):
+                        # Tiene OP asociada → NO eliminar de Paxapos
+                        logger.info(
+                            "Migrator [oc_items] OC %s-%s-%s anulada en RAFAM pero tiene OP,"
+                            " no se elimina de Paxapos",
+                            key[0], key[1], key[2],
+                        )
+                        ocs_to_skip_has_op.append(key)
+                    else:
+                        # Estaba en Paxapos con R, sin OP → soft-delete
+                        oc_data["Pedido"]["deleted"] = 1
+                        ocs_to_anular.append(oc_data)
                 else:
                     # Anulada sin haber sido R → solo registrar localmente
                     ocs_to_skip_register.append(key)
             else:
-                # Estado N u otro → solo registrar localmente
-                ocs_to_skip_register.append(key)
+                # Estado N u otro → fallback: si tiene comprobante o OP
+                # asociada en RAFAM, enviar a Paxapos (la OC ya tiene
+                # actividad downstream real).
+                has_cc = bool(str(raw.get("OC_CC_NRO", "")).strip())
+                has_op = bool(link_previo and link_previo.get("has_op"))
+                if has_cc or has_op:
+                    logger.info(
+                        "Migrator [oc_items] OC %s-%s-%s estado %s pero tiene %s,"
+                        " enviando a Paxapos como fallback",
+                        key[0], key[1], key[2], estado_actual,
+                        "comprobante+OP" if (has_cc and has_op)
+                        else ("comprobante" if has_cc else "OP"),
+                    )
+                    ocs_to_create.append(oc_data)
+                else:
+                    # Sin actividad downstream → solo registrar localmente
+                    ocs_to_skip_register.append(key)
 
         # ── 3. Registrar en link TODAS las OCs (con o sin envío) ──────────
         # Las que se saltan o registran solo localmente (R, A sin N previo)
-        for key in ocs_to_skip_register + ocs_same_state:
+        for key in ocs_to_skip_register + ocs_same_state + ocs_to_skip_has_op:
             raw = grouped_raw[key]
             source_key = json.dumps(
                 {"ejercicio": key[0], "nro_oc": key[2], "uni_compra": key[1]},
@@ -935,6 +981,7 @@ class MigratorExporter(BaseExporter):
             # Preservar remote_id si ya existía
             existing = self._link_store.get_link("orden_compra", source_key)
             remote_id = existing.get("remote_id", "") if existing else ""
+            gasto_linked_refs = existing.get("gasto_linked_refs", "") if existing else ""
 
             self._link_store.save_link(
                 entity="orden_compra",
@@ -945,6 +992,7 @@ class MigratorExporter(BaseExporter):
                 cod_prov=cod_prov,
                 importe_tot=importe_tot,
                 gasto_refs=gasto_refs,
+                gasto_linked_refs=gasto_linked_refs,
             )
 
         # ── 4. Enviar OCs a crear + OCs a anular en un solo payload ───────
@@ -959,12 +1007,14 @@ class MigratorExporter(BaseExporter):
             # Agregar gasto_refs para persist
             gasto_refs_list = grouped_gasto_refs.get(key, [])
             raw_by_source_key[sk]["_GASTO_REFS"] = ",".join(gasto_refs_list) if gasto_refs_list else ""
+            raw_by_source_key[sk]["_GASTO_LINKED_REFS"] = ""
 
         if not ordenes_compra:
             logger.info(
-                "Migrator [oc_items]: nada que enviar (skip_estado=%d, mismo_estado=%d, sin_items=%d)",
+                "Migrator [oc_items]: nada que enviar (skip_estado=%d, mismo_estado=%d, skip_has_op=%d, sin_items=%d)",
                 len(ocs_to_skip_register),
                 skipped_same_state,
+                len(ocs_to_skip_has_op),
                 unresolved_items,
             )
             return
@@ -995,18 +1045,20 @@ class MigratorExporter(BaseExporter):
         ok_count = section_stats.get("ok", 0)
         error_count = section_stats.get("error", 0)
 
+        self._persist_links("oc_items", parsed, raw_by_source_key)
+        self._raise_on_migrator_errors(parsed)
         logger.info(
             "Migrator OK [oc_items->ordenes_compra]: %d ok, %d error, crear=%d, anular=%d, "
-            "skip_estado=%d, mismo_estado=%d, dry_run=%s",
+            "skip_estado=%d, mismo_estado=%d, skip_has_op=%d, dry_run=%s",
             ok_count,
             error_count,
             len(ocs_to_create),
             len(ocs_to_anular),
             len(ocs_to_skip_register),
             skipped_same_state,
+            len(ocs_to_skip_has_op),
             self._dry_run,
         )
-        self._persist_links("oc_items", parsed, raw_by_source_key)
         self._log_unresolved_summary("oc_items")
 
     def _write_batch_orden_compra(self, columns: list[str], rows: list[tuple]) -> None:
@@ -1027,6 +1079,11 @@ class MigratorExporter(BaseExporter):
         grouped: dict[tuple[int, int, int], dict] = {}
         grouped_raw: dict[tuple[int, int, int], dict] = {}
         grouped_gasto_refs: dict[tuple[int, int, int], list[str]] = {}
+        # seen_items_per_oc: dedup por ITEM_OC porque el LEFT JOIN a
+        # SOLIC_GASTOS y oc_to_cc (REG_COMP→CTA_COMPROB) puede multiplicar filas (44% multi-
+        # match en SG, 8% en CC). Sin esto, los totales en Paxapos se inflan
+        # porque sum(item.precio) cuenta cada item N veces.
+        seen_items_per_oc: dict[tuple[int, int, int], set[int]] = {}
         skipped_no_prov: set[tuple[int, int, int]] = set()
         unresolved_items = 0
 
@@ -1061,7 +1118,7 @@ class MigratorExporter(BaseExporter):
                     continue
 
                 pedido: dict = {
-                    "internal_id": f"rafam-oc-{ejercicio}-{uni_compra}-{nro_oc}",
+                    "internal_id": f"{ejercicio % 100}-{nro_oc}",
                     "tipo": "orden_compra",
                     "estado_aprobacion": 2,
                     "proveedor_id": remote_prov_id,
@@ -1105,36 +1162,28 @@ class MigratorExporter(BaseExporter):
                 if rafam_ref not in refs:
                     refs.append(rafam_ref)
 
+            # Dedup por ITEM_OC: el LEFT JOIN a SOLIC_GASTOS / oc_to_cc
+            # multiplica filas. Sin esto los items se duplican y el total
+            # (sum(precio_unitario x cantidad)) en Paxapos queda inflado.
+            item_oc = self._to_int(raw.get("ITEM_OC"))
+            seen_items = seen_items_per_oc.setdefault(key, set())
+            if item_oc is not None and item_oc in seen_items:
+                continue
+
             item = self._map_oc_item(raw)
             if item is None:
                 unresolved_items += 1
                 self._track_unresolved_item(raw.get("DESCRIPCION"), raw.get("COD_PROV"))
                 continue
+            if item_oc is not None:
+                seen_items.add(item_oc)
             grouped[key]["items"].append(item)
-
-        # ── 1b. Resolver gasto_ids por OC via link_gasto ─────────────────
-        for key, oc_data in grouped.items():
-            gasto_refs = grouped_gasto_refs.get(key, [])
-            if not gasto_refs:
-                continue
-            gasto_ids = []
-            gasto_external_ids = []
-            for ref in gasto_refs:
-                gasto_external_id = self._gasto_external_id_from_ref(ref)
-                if gasto_external_id is not None:
-                    gasto_external_ids.append(gasto_external_id)
-                remote_gasto = self._get_gasto_remote_id(ref)
-                if remote_gasto:
-                    gasto_ids.append(int(remote_gasto))
-            if gasto_external_ids:
-                oc_data["gasto_external_ids"] = gasto_external_ids
-            if gasto_ids:
-                oc_data["gasto_ids"] = gasto_ids
 
         # ── 2. Clasificar OCs por acción según estado y link previo ───────
         ocs_to_create: list[dict] = []
         ocs_to_anular: list[dict] = []
         ocs_to_skip_register: list[tuple[int, int, int]] = []
+        ocs_to_skip_has_op: list[tuple[int, int, int]] = []
         ocs_same_state: list[tuple[int, int, int]] = []
 
         for key, oc_data in grouped.items():
@@ -1153,22 +1202,41 @@ class MigratorExporter(BaseExporter):
             if estado_actual == "R":
                 if link_previo is None or estado_previo != "R":
                     ocs_to_create.append(oc_data)
-                elif oc_data.get("gasto_ids"):
-                    ocs_to_create.append(oc_data)
                 else:
                     ocs_same_state.append(key)
             elif estado_actual == "A":
                 if link_previo and estado_previo == "R" and link_previo.get("remote_id"):
-                    oc_data["Pedido"]["estado_aprobacion"] = 4
-                    oc_data["Pedido"]["motivo_rechazo"] = "Anulada en RAFAM"
-                    ocs_to_anular.append(oc_data)
+                    if link_previo.get("has_op"):
+                        logger.info(
+                            "Migrator [orden_compra] OC %s-%s-%s anulada en RAFAM pero tiene OP,"
+                            " no se elimina de Paxapos",
+                            key[0], key[1], key[2],
+                        )
+                        ocs_to_skip_has_op.append(key)
+                    else:
+                        oc_data["Pedido"]["deleted"] = 1
+                        ocs_to_anular.append(oc_data)
                 else:
                     ocs_to_skip_register.append(key)
             else:
-                ocs_to_skip_register.append(key)
+                # Estado N u otro → fallback: si tiene comprobante o OP
+                # asociada en RAFAM, enviar a Paxapos.
+                has_cc = bool(str(raw.get("OC_CC_NRO", "")).strip())
+                has_op = bool(link_previo and link_previo.get("has_op"))
+                if has_cc or has_op:
+                    logger.info(
+                        "Migrator [orden_compra] OC %s-%s-%s estado %s pero tiene %s,"
+                        " enviando a Paxapos como fallback",
+                        key[0], key[1], key[2], estado_actual,
+                        "comprobante+OP" if (has_cc and has_op)
+                        else ("comprobante" if has_cc else "OP"),
+                    )
+                    ocs_to_create.append(oc_data)
+                else:
+                    ocs_to_skip_register.append(key)
 
         # ── 3. Registrar en link TODAS las OCs que no se envían ───────────
-        for key in ocs_to_skip_register + ocs_same_state:
+        for key in ocs_to_skip_register + ocs_same_state + ocs_to_skip_has_op:
             raw = grouped_raw[key]
             source_key = json.dumps(
                 {"ejercicio": key[0], "nro_oc": key[2], "uni_compra": key[1]},
@@ -1183,6 +1251,7 @@ class MigratorExporter(BaseExporter):
 
             existing = self._link_store.get_link("orden_compra", source_key)
             remote_id = existing.get("remote_id", "") if existing else ""
+            gasto_linked_refs = existing.get("gasto_linked_refs", "") if existing else ""
 
             self._link_store.save_link(
                 entity="orden_compra",
@@ -1193,6 +1262,7 @@ class MigratorExporter(BaseExporter):
                 cod_prov=cod_prov,
                 importe_tot=importe_tot,
                 gasto_refs=gasto_refs,
+                gasto_linked_refs=gasto_linked_refs,
             )
 
         # ── 4. Enviar OCs a crear + OCs a anular ─────────────────────────
@@ -1206,12 +1276,14 @@ class MigratorExporter(BaseExporter):
             raw_by_source_key[sk] = grouped_raw[key]
             gasto_refs_list = grouped_gasto_refs.get(key, [])
             raw_by_source_key[sk]["_GASTO_REFS"] = ",".join(gasto_refs_list) if gasto_refs_list else ""
+            raw_by_source_key[sk]["_GASTO_LINKED_REFS"] = ""
 
         if not ordenes_compra:
             logger.info(
-                "Migrator [orden_compra]: nada que enviar (skip_estado=%d, mismo_estado=%d, sin_items=%d)",
+                "Migrator [orden_compra]: nada que enviar (skip_estado=%d, mismo_estado=%d, skip_has_op=%d, sin_items=%d)",
                 len(ocs_to_skip_register),
                 len(ocs_same_state),
+                len(ocs_to_skip_has_op),
                 unresolved_items,
             )
             return
@@ -1242,18 +1314,20 @@ class MigratorExporter(BaseExporter):
         ok_count = section_stats.get("ok", 0)
         error_count = section_stats.get("error", 0)
 
+        self._persist_links("orden_compra", parsed, raw_by_source_key)
+        self._raise_on_migrator_errors(parsed)
         logger.info(
             "Migrator OK [orden_compra]: %d ok, %d error, crear=%d, anular=%d, "
-            "skip_estado=%d, mismo_estado=%d, dry_run=%s",
+            "skip_estado=%d, mismo_estado=%d, skip_has_op=%d, dry_run=%s",
             ok_count,
             error_count,
             len(ocs_to_create),
             len(ocs_to_anular),
             len(ocs_to_skip_register),
             len(ocs_same_state),
+            len(ocs_to_skip_has_op),
             self._dry_run,
         )
-        self._persist_links("orden_compra", parsed, raw_by_source_key)
         self._log_unresolved_summary("orden_compra")
 
     def _write_batch_solic_gastos(self, columns: list[str], rows: list[tuple]) -> None:
@@ -1313,11 +1387,12 @@ class MigratorExporter(BaseExporter):
         ok_count = section_stats.get("ok", 0)
         error_count = section_stats.get("error", 0)
 
+        self._persist_links("solic_gastos", parsed, raw_by_source_key)
+        self._raise_on_migrator_errors(parsed)
         logger.info(
             "Migrator OK [solic_gastos->gastos]: %d ok, %d error, gastos=%d, dry_run=%s",
             ok_count, error_count, len(gastos), self._dry_run,
         )
-        self._persist_links("solic_gastos", parsed, raw_by_source_key)
 
     def _map_solic_gasto(self, raw: dict) -> dict | None:
         ejercicio = self._to_int(raw.get("EJERCICIO"))
@@ -1347,28 +1422,42 @@ class MigratorExporter(BaseExporter):
             "fecha": fecha,
             "importe_total": importe_total,
             "importe_neto": importe_total,  # RAFAM no discrimina IVA
-            "punto_de_venta": "RAFAM",
         }
 
-        tipo_factura_id = self._resolve_tipo_factura_id(raw.get("TIPO_DOC"))
+        cta_count = self._to_int(raw.get("CTA_COMPROB_COUNT"))
+        if cta_count != 1:
+            logger.debug(
+                "Migrator [solic_gastos] SG %s-%s-%s omitida: CTA_COMPROB_COUNT=%s",
+                ejercicio, deleg_solic, nro_solic, raw.get("CTA_COMPROB_COUNT"),
+            )
+            return None
+
+        nro_comprob = str(raw.get("CTA_NRO_COMPROB") or "").strip()
+        if not nro_comprob:
+            logger.debug(
+                "Migrator [solic_gastos] SG %s-%s-%s omitida: sin CTA_COMPROB.NRO_COMPROB",
+                ejercicio, deleg_solic, nro_solic,
+            )
+            return None
+
+        tipo_factura_id = self._resolve_tipo_factura_id(raw.get("CTA_TIPO_COMPROB") or raw.get("TIPO_DOC"))
         if tipo_factura_id is not None:
             gasto_data["tipo_factura_id"] = tipo_factura_id
 
-        nro_doc = raw.get("NRO_DOC")
-        if nro_doc and str(nro_doc).strip() not in ("0", "", "None"):
-            gasto_data["factura_nro"] = str(nro_doc).strip().zfill(8)
+        # Parsear NRO_COMPROB: si tiene guion, separar en punto_de_venta + factura_nro
+        dash_pos = nro_comprob.find("-")
+        if dash_pos > 0:
+            gasto_data["punto_de_venta"] = nro_comprob[:dash_pos]
+            gasto_data["factura_nro"] = nro_comprob[dash_pos + 1:]
+        else:
+            gasto_data["factura_nro"] = nro_comprob
 
-        # clasificacion_id via EntityLinkStore (requiere haber sincronizado jurisdicciones)
-        jurisdiccion = raw.get("JURISDICCION")
-        if jurisdiccion is not None:
-            cls_key = json.dumps({"jurisdiccion": str(jurisdiccion)}, sort_keys=True)
-            cls_link = self._link_store.get_remote_id("clasificacion", cls_key)
-            if cls_link:
-                gasto_data["clasificacion_id"] = int(cls_link)
+
 
         # fecha_vencimiento: FECH_NECESIDAD con fallback a FECH_ENTREGA
         fech_venc = (
-            self._format_date_only(raw.get("FECH_NECESIDAD"))
+            self._format_date_only(raw.get("CTA_FECH_VENCIM"))
+            or self._format_date_only(raw.get("FECH_NECESIDAD"))
             or self._format_date_only(raw.get("FECH_ENTREGA"))
         )
         if fech_venc:
@@ -1423,13 +1512,172 @@ class MigratorExporter(BaseExporter):
                     refs.append(ref)
         return refs
 
+    def _pedido_id_from_op_row(self, raw: dict) -> int | None:
+        """Devuelve el pedido_id si la fila ya lo trae; no resuelve links locales."""
+        for field in ("pedido_id", "PEDIDO_ID", "PAXAPOS_PEDIDO_ID"):
+            pedido_id = self._to_int(raw.get(field))
+            if pedido_id is not None:
+                return pedido_id
+        return None
+
+    def _resolve_pedido_id_from_oc_link(self, raw: dict) -> int | None:
+        """Resuelve pedido_id consultando link_store con la clave de OC RAFAM
+        provista por el REG_COMP exacto imputado en ORDEN_PAGO_IMPUT.
+
+        El backend usa pedido_id para vincular el Gasto auto-creado por la OP
+        a la OC original. Sin esta resolución, el Gasto queda huérfano de OC.
+        """
+        ej = self._to_int(raw.get("SG_OC_EJERCICIO"))
+        uni = self._to_int(raw.get("SG_OC_UNI_COMPRA"))
+        nro = self._to_int(raw.get("SG_OC_NRO"))
+        if ej is None or uni is None or nro is None:
+            return None
+        source_key = json.dumps(
+            {"ejercicio": ej, "nro_oc": nro, "uni_compra": uni},
+            sort_keys=True,
+        )
+        link = self._link_store.get_link("orden_compra", source_key)
+        if not link:
+            return None
+        remote_id = link.get("remote_id")
+        try:
+            return int(remote_id) if remote_id is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    def _build_gasto_from_op_row(
+        self, raw: dict
+    ) -> tuple[dict | None, tuple[int, str, str] | None]:
+        """Construye un bloque Gasto a partir de un row de OP enriquecido con CTA_COMPROB.
+
+        Devuelve (gasto_payload, dedup_key) donde dedup_key es
+        (proveedor_id, punto_de_venta, factura_nro) — la clave de upsert real
+        de Paxapos. Si faltan datos esenciales (factura_nro, proveedor_id,
+        importe o fecha), devuelve (None, None).
+        """
+        cc_nro = str(raw.get("OPI_NRO_COMPROB") or "").strip()
+        if not cc_nro:
+            return None, None
+
+        # proveedor_id: priorizar el del comprobante (OPI_COD_PROV) que es el
+        # emisor real de la factura; fallback al de la OC y al de la OP.
+        remote_prov_id: int | None = None
+        for cod_prov in (
+            raw.get("OPI_COD_PROV"),
+            raw.get("SG_OC_COD_PROV"),
+            raw.get("COD_PROV"),
+        ):
+            if cod_prov is None or str(cod_prov).strip() == "":
+                continue
+            remote_prov = self._link_store.get_remote_id(
+                "proveedores", str(cod_prov).strip()
+            )
+            if remote_prov:
+                remote_prov_id = int(remote_prov)
+                break
+        if remote_prov_id is None:
+            return None, None
+
+        # importe: priorizar CTA_COMPROB.IMPORTE_COMPR (dato fiscal real).
+        importe_raw = raw.get("CTA_IMPORTE_COMPR")
+        if importe_raw is None:
+            return None, None
+        try:
+            importe_total = round(float(importe_raw), 2)
+        except (TypeError, ValueError):
+            return None, None
+
+        # importe_neto: si CTA tiene IMPORTE_SIN_IVA usarlo, si no = total.
+        importe_sin_iva_raw = raw.get("CTA_IMPORTE_SIN_IVA")
+        try:
+            importe_neto = (
+                round(float(importe_sin_iva_raw), 2)
+                if importe_sin_iva_raw is not None
+                else importe_total
+            )
+        except (TypeError, ValueError):
+            importe_neto = importe_total
+
+        # fecha: CTA_COMPROB.FECH_COMPROB; obligatoria en Paxapos.
+        fecha = self._format_date_only(raw.get("CTA_FECH_COMPROB"))
+        if not fecha:
+            return None, None
+
+        gasto_data: dict = {
+            "fecha": fecha,
+            "importe_total": importe_total,
+            "importe_neto": importe_neto,
+            "proveedor_id": remote_prov_id,
+        }
+        pedido_id = self._to_int(raw.get("_PAXAPOS_PEDIDO_ID") or raw.get("pedido_id"))
+        if pedido_id is not None:
+            gasto_data["pedido_id"] = pedido_id
+
+        # tipo_factura_id desde OPI_TIPO_COMPROB
+        tipo_factura_id = self._resolve_tipo_factura_id(raw.get("OPI_TIPO_COMPROB"))
+        if tipo_factura_id is not None:
+            gasto_data["tipo_factura_id"] = tipo_factura_id
+
+        # Parsear NRO_COMPROB: si tiene guion, separar punto_de_venta + factura_nro
+        dash_pos = cc_nro.find("-")
+        if dash_pos > 0:
+            punto_de_venta = cc_nro[:dash_pos]
+            factura_nro = cc_nro[dash_pos + 1:]
+        else:
+            punto_de_venta = ""
+            factura_nro = cc_nro
+        gasto_data["punto_de_venta"] = punto_de_venta
+        gasto_data["factura_nro"] = factura_nro
+
+        # fecha_vencimiento opcional
+        fech_venc = self._format_date_only(raw.get("CTA_FECH_VENCIM"))
+        if fech_venc:
+            gasto_data["fecha_vencimiento"] = fech_venc
+
+        # external_id: si el REG_COMP exacto del OPI trae SG asociada, usar el
+        # formato canónico; si no, usar uno basado en el comprobante fiscal.
+        sg_ej = self._to_int(raw.get("EJERCICIO"))
+        sg_deleg = self._to_int(raw.get("SG_DELEG_SOLIC"))
+        sg_nro = self._to_int(raw.get("SG_NRO_SOLIC"))
+        if sg_ej is not None and sg_deleg is not None and sg_nro is not None:
+            external_id = self._gasto_external_id(sg_ej, sg_deleg, sg_nro)
+        else:
+            external_id = {
+                "rafam_ref": (
+                    f"CC-{raw.get('EJERCICIO')}-{raw.get('OPI_TIPO_COMPROB') or ''}-"
+                    f"{cc_nro}-{raw.get('OPI_COD_PROV') or ''}"
+                )
+            }
+
+        # tipo_factura_id forma parte del dedup_key porque un mismo proveedor puede
+        # tener Factura A y Nota de Credito A con identico PDV+factura_nro (RAFAM
+        # CC_TIPO_COMPROB FAA vs NCA), y son comprobantes distintos en Paxapos.
+        dedup_key = (remote_prov_id, punto_de_venta, factura_nro, tipo_factura_id)
+        return {"external_id": external_id, "Gasto": gasto_data}, dedup_key
+
     def _write_batch_orden_pago(self, columns: list[str], rows: list[tuple]) -> None:
-        # Agrupa por (EJERCICIO, NRO_OP) y acumula las refs de gastos del LEFT JOIN
+        # Agrupa por (EJERCICIO, NRO_OP) y acumula las refs de gastos del REG_COMP
+        # exacto de ORDEN_PAGO_IMPUT cuando existe.
+        # NOTA: las retenciones NO vienen en este batch — se traen por separado
+        # via source_repo.fetch_retenciones_for_ops() para evitar producto cartesiano
+        # con los comprobantes pagados. Ver source_repository._build_orden_pago_statement.
         grouped: dict[tuple[int, int], dict] = {}
         grouped_gasto_refs: dict[tuple[int, int], list[str]] = {}
-        grouped_retenciones: dict[tuple[int, int], dict[str, dict]] = {}
-        grouped_reco: dict[tuple[int, int], tuple] = {}  # RECO_DEU_COMPRA fallback data
+        grouped_cc_nros: dict[tuple[int, int], list[str]] = {}
+        grouped_cc_keys: dict[tuple[int, int], list[tuple[str, str, str]]] = {}
+        grouped_pedido_ids: dict[tuple[int, int], list[int]] = {}
+        grouped_pedido_internal_ids: dict[tuple[int, int], list[str]] = {}
+        grouped_oc_source_keys: dict[tuple[int, int], list[str]] = {}
         raw_by_source_key: dict[str, dict] = {}
+        # cc_raw_by_key: dedup por comprobante fiscal real para emitir gastos[]
+        # con datos de CTA_COMPROB (importe, fecha, tipo, vencimiento). La key
+        # es (CC_TIPO, CC_NRO, CC_COD_PROV) — PK lógica del comprobante en RAFAM.
+        cc_raw_by_key: dict[tuple[str, str, str], dict] = {}
+        skipped_estado: dict[str, int] = {}
+        skipped_confirmado: dict[str, int] = {}
+        skipped_no_fech_confirm = 0
+        skipped_importe_invalido: dict[str, int] = {}
+        skipped_existing_keys: set[tuple[int, int]] = set()
 
         for row in rows:
             raw = dict(zip(columns, row))
@@ -1449,58 +1697,145 @@ class MigratorExporter(BaseExporter):
                 if rafam_ref not in refs:
                     refs.append(rafam_ref)
 
-            # Collect RECO_DEU_COMPRA for fallback resolution (OP → OC → gasto_refs)
-            if key not in grouped_reco:
-                reco_compra = raw.get("RECO_DEU_COMPRA")
-                reco_ejer = raw.get("RECO_DEU_COMPRA_EJER")
-                if reco_compra is not None and str(reco_compra).strip():
-                    grouped_reco[key] = (reco_compra, reco_ejer)
+            # Recolectar nro_comprobante (CC) directamente desde ORDEN_PAGO_IMPUT
+            # (path PRIMARIO). OPI_NRO_COMPROB / OPI_TIPO_COMPROB / OPI_COD_PROV
+            # son ya las claves canonicas del comprobante asociado a esta OP.
+            # No hay promocion de columnas: los datos vienen del bridge real
+            # OP_IMPUT, no de una vista derivada.
+            cc_nro = str(raw.get("OPI_NRO_COMPROB") or "").strip()
+            if cc_nro:
+                cc_nros = grouped_cc_nros.setdefault(key, [])
+                if cc_nro not in cc_nros:
+                    cc_nros.append(cc_nro)
+                # Guardar raw representativo por comprobante para emitir gastos[]
+                # con datos de CTA_COMPROB (importe/fecha/vencimiento/tipo).
+                cc_tipo = str(raw.get("OPI_TIPO_COMPROB") or "").strip()
+                cc_prov = str(raw.get("OPI_COD_PROV") or "").strip()
+                cc_key = (cc_tipo, cc_nro, cc_prov)
+                cc_keys = grouped_cc_keys.setdefault(key, [])
+                if cc_key not in cc_keys:
+                    cc_keys.append(cc_key)
+                existing = cc_raw_by_key.get(cc_key)
+                # Preferir el raw que ya trae datos fiscales reales (CTA_COMPROB)
+                if existing is None or (
+                    raw.get("CTA_IMPORTE_COMPR") is not None
+                    and existing.get("CTA_IMPORTE_COMPR") is None
+                ):
+                    cc_raw_by_key[cc_key] = raw
 
-            # Also collect CTA_HOJA_DE_RUTA refs if available
-            hdr_sg_nro = self._to_int(raw.get("HDR_SG_NRO"))
-            hdr_sg_deleg = self._to_int(raw.get("HDR_SG_DELEG"))
-            if hdr_sg_nro is not None and hdr_sg_deleg is not None:
-                hdr_ej = self._to_int(raw.get("HDR_SG_EJERCICIO")) or ejercicio
-                rafam_ref = f"SG-{hdr_ej}-{hdr_sg_deleg}-{hdr_sg_nro}"
-                refs = grouped_gasto_refs.setdefault(key, [])
-                if rafam_ref not in refs:
-                    refs.append(rafam_ref)
+            # pedido_id: prioridad a la fila (override manual). Si no viene,
+            # se intenta resolver via link_store usando la OC del REG_COMP
+            # exacto imputado por la OP.
+            pedido_id = self._pedido_id_from_op_row(raw)
+            if pedido_id is None:
+                pedido_id = self._resolve_pedido_id_from_oc_link(raw)
+            if pedido_id is not None:
+                pedido_ids = grouped_pedido_ids.setdefault(key, [])
+                if pedido_id not in pedido_ids:
+                    pedido_ids.append(pedido_id)
+
+            # Registrar el internal_id candidato solo para diagnostico. Ya no se
+            # envia como fallback: una OP sin pedido_id local podria crear un
+            # gasto suelto si la OC no existe en Paxapos.
+            oc_ej = self._to_int(raw.get("SG_OC_EJERCICIO"))
+            oc_nro = self._to_int(raw.get("SG_OC_NRO"))
+            if oc_ej is not None and oc_nro is not None:
+                internal_id = f"{oc_ej % 100}-{oc_nro}"
+                internals = grouped_pedido_internal_ids.setdefault(key, [])
+                if internal_id not in internals:
+                    internals.append(internal_id)
+
+                # Rastrear OC source_key para marcar has_op despu\u00e9s del env\u00edo
+                oc_uni = self._to_int(raw.get("SG_OC_UNI_COMPRA"))
+                if oc_uni is not None:
+                    oc_sk = json.dumps(
+                        {"ejercicio": oc_ej, "nro_oc": oc_nro, "uni_compra": oc_uni},
+                        sort_keys=True,
+                    )
+                    oc_sks = grouped_oc_source_keys.setdefault(key, [])
+                    if oc_sk not in oc_sks:
+                        oc_sks.append(oc_sk)
 
             estado = str(raw.get("ESTADO_OP", "")).strip().upper()
-            if estado == "A":  # Anulada: omitir
+            if estado != "C":
+                skipped_estado[estado or "(vacio)"] = skipped_estado.get(estado or "(vacio)", 0) + 1
+                continue
+            confirmado = str(raw.get("CONFIRMADO", "")).strip().upper()
+            if confirmado != "S":
+                skipped_confirmado[confirmado or "(vacio)"] = skipped_confirmado.get(confirmado or "(vacio)", 0) + 1
+                continue
+            fecha_confirm = self._format_date_only(raw.get("FECH_CONFIRM") or "")
+            if not fecha_confirm:
+                skipped_no_fech_confirm += 1
                 continue
 
-            retencion = self._map_retencion(raw, ejercicio, nro_op)
-            if retencion is not None:
-                ret_key = json.dumps(retencion.get("external_id", {}), sort_keys=True)
-                grouped_retenciones.setdefault(key, {})[ret_key] = retencion
+            sk = json.dumps({"ejercicio": ejercicio, "nro_op": nro_op}, sort_keys=True)
+            existing_op = self._link_store.get_link("orden_pago", sk)
+            if existing_op and existing_op.get("remote_id"):
+                skipped_existing_keys.add(key)
+                continue
 
             if key in grouped:
                 continue
 
             # Guardar raw para extras en persist_links
-            sk = json.dumps({"ejercicio": ejercicio, "nro_op": nro_op}, sort_keys=True)
             raw_by_source_key[sk] = raw
 
+            # Resolver proveedor_id del Egreso. Regla canonica:
+            # Egreso.proveedor_id = ORDEN_PAGO.COD_PROV (a quien efectivamente
+            # se le paga; puede ser cesionario en casos UTE/cesion de credito).
+            # NO confundir con el emisor de la factura (OPI_COD_PROV) ni con
+            # el proveedor de la OC original (SG_OC_COD_PROV) — esos son del
+            # Gasto y del Pedido respectivamente, y Paxapos los maneja como
+            # entidades distintas linkeadas via Gasto.pedido_id y HABTM.
+            # Fallbacks por si COD_PROV de la OP viene NULL en RAFAM (raro).
+            remote_prov_id: int | None = None
+            for cod_prov in (raw.get("COD_PROV"), raw.get("OPI_COD_PROV"), raw.get("SG_OC_COD_PROV")):
+                if cod_prov is None or str(cod_prov).strip() == "":
+                    continue
+                remote_prov = self._link_store.get_remote_id("proveedores", str(cod_prov).strip())
+                if remote_prov:
+                    remote_prov_id = int(remote_prov)
+                    break
+
             importe = raw.get("IMPORTE_TOTAL")
+            # Validar IMPORTE_TOTAL antes de crear el Egreso. Si es NULL,
+            # no parseable o <=0 NO se exporta: en RAFAM esto suele ser una
+            # OP de ajuste contable o anulacion (CONFIRMADO=S, ESTADO_OP=C
+            # con importe 0). Si las dejaramos pasar, se crean Egresos en
+            # cero vinculados al mismo Gasto, mostrando "varios pagos" para
+            # un mismo comprobante (1 con importe, otros en 0).
+            if importe is None:
+                skipped_importe_invalido["null"] = skipped_importe_invalido.get("null", 0) + 1
+                logger.warning(
+                    "Migrator [orden_pago] OP %s-%s omitida: IMPORTE_TOTAL es NULL en RAFAM",
+                    ejercicio, nro_op,
+                )
+                continue
             try:
-                total = round(float(importe), 2) if importe is not None else 0.0
+                total = round(float(importe), 2)
             except (TypeError, ValueError):
-                total = 0.0
+                skipped_importe_invalido["no_parseable"] = skipped_importe_invalido.get("no_parseable", 0) + 1
+                logger.warning(
+                    "Migrator [orden_pago] OP %s-%s omitida: IMPORTE_TOTAL %r no parseable",
+                    ejercicio, nro_op, importe,
+                )
+                continue
+            if total <= 0:
+                skipped_importe_invalido["<=0"] = skipped_importe_invalido.get("<=0", 0) + 1
+                logger.warning(
+                    "Migrator [orden_pago] OP %s-%s omitida: IMPORTE_TOTAL=%s (probable ajuste contable o anulacion)",
+                    ejercicio, nro_op, total,
+                )
+                continue
 
             egreso: dict = {
                 "identificador_pago": f"RAFAM-OP-{ejercicio}-{nro_op}",
                 "total": total,
-                "tipo_de_pago_id": self._resolve_tipo_pago_id(),
-                "estado": 3 if estado == "C" else 0,
+                "tipo_de_pago_id": self._resolve_tipo_pago_id(raw),
+                "estado": 3,
+                "fecha": fecha_confirm,
             }
-
-            # Solo marcar como pagada si está confirmada
-            if estado == "C":
-                fecha = self._format_date_only(raw.get("FECH_CONFIRM") or "") \
-                    or self._format_date_only(raw.get("FECH_OP") or "")
-                if fecha:
-                    egreso["fecha"] = fecha
 
             concepto = raw.get("CONCEPTO") or raw.get("OBSERVACIONES")
             if concepto and str(concepto).strip():
@@ -1510,74 +1845,223 @@ class MigratorExporter(BaseExporter):
                 "external_id": {"ejercicio": ejercicio, "nro_op": nro_op},
                 "Egreso": egreso,
             }
+            if remote_prov_id is not None:
+                grouped[key]["proveedor_id"] = remote_prov_id
+
+            # Guardar IMPORTE_LIQUIDO para neto_transferido
+            importe_liquido = raw.get("IMPORTE_LIQUIDO")
+            if importe_liquido is not None:
+                try:
+                    neto = round(float(importe_liquido), 2)
+                    if neto >= 0:
+                        grouped[key]["_importe_liquido"] = neto
+                except (TypeError, ValueError):
+                    pass
+
+        # Fetch deducciones por OP individual (ORDEN_PAGO_DEDUC por (EJERCICIO, NRO_OP))
+        deducciones_by_op: dict[tuple[int, int], list[dict]] = {}
+        if grouped and self._source_repo is not None:
+            op_keys_for_deduc = list(grouped.keys())
+            result = self._source_repo.fetch_deducciones_for_ops(op_keys_for_deduc)
+            if result is not None:
+                deducciones_by_op = result
 
         ordenes_pago = []
+        included_cc_keys: list[tuple[str, str, str]] = []
+        included_cc_key_set: set[tuple[str, str, str]] = set()
+        cc_key_to_pedido_id: dict[tuple[str, str, str], int] = {}
         skipped_no_gasto = 0
-        resolved_via_reco = 0
+        skipped_no_oc_link = 0
+        skipped_multiple_oc = 0
+        warned_facturas_exceed_oc = 0
         for key, op in grouped.items():
-            gasto_refs = grouped_gasto_refs.get(key, [])
-            # Fallback: resolve via RECO_DEU_COMPRA → OC link_store → gasto_refs
-            if not gasto_refs and key in grouped_reco:
-                reco_compra, reco_ejer = grouped_reco[key]
-                gasto_refs = self._resolve_gasto_refs_via_oc(key[0], reco_compra, reco_ejer)
-                if gasto_refs:
-                    resolved_via_reco += 1
-                    logger.debug(
-                        "Migrator [orden_pago] OP %s-%s: gasto resuelto via RECO_DEU_COMPRA=%s → %s",
-                        key[0], key[1], reco_compra, gasto_refs,
-                    )
-            if not gasto_refs:
+            cc_nros = grouped_cc_nros.get(key, [])
+            if not cc_nros:
                 skipped_no_gasto += 1
                 logger.debug(
-                    "Migrator [orden_pago] OP %s-%s omitida: sin gasto vinculado (NRO_CANCE + RECO_DEU_COMPRA sin match)",
+                    "Migrator [orden_pago] OP %s-%s omitida: sin OPI_NRO_COMPROB",
                     key[0], key[1],
                 )
                 continue
-            # Resolver gasto_ids via link_store (RAFAM rafam_ref → Paxapos gasto id)
-            gasto_ids = []
-            gasto_external_ids = []
-            unresolved_refs = []
-            for ref in gasto_refs:
-                gasto_external_id = self._gasto_external_id_from_ref(ref)
-                if gasto_external_id is not None:
-                    gasto_external_ids.append(gasto_external_id)
-                remote_gasto = self._get_gasto_remote_id(ref)
-                if remote_gasto:
-                    gasto_ids.append(int(remote_gasto))
-                else:
-                    unresolved_refs.append(ref)
 
-            if not gasto_ids:
-                skipped_no_gasto += 1
+            # Asignar gasto_nro_comprobante (string o array)
+            if len(cc_nros) == 1:
+                op["gasto_nro_comprobante"] = cc_nros[0]
+            else:
+                op["gasto_nro_comprobante"] = cc_nros
+
+            pedido_ids = grouped_pedido_ids.get(key, [])
+            if len(pedido_ids) == 1:
+                pedido_id = pedido_ids[0]
+                op["pedido_id"] = pedido_id
+            elif len(pedido_ids) > 1:
+                skipped_multiple_oc += 1
+                logger.warning(
+                    "Migrator [orden_pago] OP %s-%s omitida: multiples OCs/pedido_id recibidos (%s)",
+                    key[0], key[1], pedido_ids,
+                )
+                continue
+            else:
+                skipped_no_oc_link += 1
+                internal_ids = grouped_pedido_internal_ids.get(key, [])
                 logger.debug(
-                    "Migrator [orden_pago] OP %s-%s: gastos sin link remoto: %s",
-                    key[0], key[1], unresolved_refs,
+                    "Migrator [orden_pago] OP %s-%s omitida: sin OC migrada en link_store "
+                    "(pedido_internal_id candidatos=%s)",
+                    key[0], key[1], internal_ids,
                 )
                 continue
 
-            if unresolved_refs:
-                logger.warning(
-                    "Migrator [orden_pago] OP %s-%s: %d/%d gastos sin link remoto: %s",
-                    key[0], key[1], len(unresolved_refs), len(gasto_refs), unresolved_refs,
-                )
+            for cc_key in grouped_cc_keys.get(key, []):
+                if cc_key not in included_cc_key_set:
+                    included_cc_key_set.add(cc_key)
+                    included_cc_keys.append(cc_key)
+                cc_key_to_pedido_id.setdefault(cc_key, pedido_id)
 
-            op["gasto_ids"] = gasto_ids
-            if gasto_external_ids:
-                op["gasto_external_ids"] = gasto_external_ids
-            retenciones = list(grouped_retenciones.get(key, {}).values())
-            if retenciones:
-                op["retenciones"] = retenciones
+            # Mapear deducciones (de ORDEN_PAGO_DEDUC por NRO_OP)
+            ret_payload = []
+            for ded in deducciones_by_op.get(key, []):
+                mapped = self._map_deduccion_dict(ded, key[0], key[1])
+                if mapped is not None:
+                    ret_payload.append(mapped)
+            if ret_payload:
+                # Validar que la suma de retenciones no supere el total del Egreso.
+                # RAFAM puede tener deducciones acumuladas que exceden el importe de
+                # la OP individual (dato inconsistente upstream). Paxapos rechaza
+                # estas OPs con error, así que las dejamos sin retenciones y logeamos.
+                total_egreso = op["Egreso"]["total"]
+                suma_retenciones = sum(r["monto_retenido"] for r in ret_payload)
+                if suma_retenciones > total_egreso:
+                    logger.warning(
+                        "Migrator [orden_pago] OP %s-%s: retenciones ($%.2f) superan total ($%.2f). "
+                        "Descartando retenciones para evitar rechazo de Paxapos.",
+                        key[0], key[1], suma_retenciones, total_egreso,
+                    )
+                else:
+                    op["retenciones"] = ret_payload
+
+            # neto_transferido = IMPORTE_LIQUIDO de RAFAM (si disponible)
+            importe_liquido = op.pop("_importe_liquido", None)
+            if importe_liquido is not None:
+                op["Egreso"]["neto_transferido"] = importe_liquido
+
+            # ── Validación: suma facturas vs total OC ─────────────────────
+            # Si la suma de los importes de las facturas imputadas a esta OP
+            # supera el total de la OC vinculada, emitir WARNING (dato
+            # inconsistente upstream — una OC de $X nunca debería tener
+            # facturas que sumen más que $X).
+            oc_sks = grouped_oc_source_keys.get(key, [])
+            if oc_sks and grouped_cc_keys.get(key):
+                suma_facturas = 0.0
+                for ck in grouped_cc_keys[key]:
+                    cr = cc_raw_by_key.get(ck)
+                    if cr and cr.get("CTA_IMPORTE_COMPR") is not None:
+                        try:
+                            suma_facturas += round(float(cr["CTA_IMPORTE_COMPR"]), 2)
+                        except (TypeError, ValueError):
+                            pass
+                if suma_facturas > 0:
+                    for oc_sk in oc_sks:
+                        oc_link = self._link_store.get_link("orden_compra", oc_sk)
+                        if oc_link and oc_link.get("importe_tot"):
+                            try:
+                                oc_total = round(float(oc_link["importe_tot"]), 2)
+                            except (TypeError, ValueError):
+                                continue
+                            if suma_facturas > oc_total:
+                                warned_facturas_exceed_oc += 1
+                                logger.warning(
+                                    "Migrator [orden_pago] OP %s-%s: suma facturas ($%.2f) "
+                                    "supera total OC ($%.2f). Comprobantes: %s. OC: %s",
+                                    key[0], key[1], suma_facturas, oc_total,
+                                    cc_nros, oc_sk,
+                                )
+
             ordenes_pago.append(op)
 
         if skipped_no_gasto:
             logger.warning(
-                "Migrator [orden_pago]: %d OPs omitidas sin gasto vinculado, %d resueltas via RECO_DEU_COMPRA",
-                skipped_no_gasto, resolved_via_reco,
+                "Migrator [orden_pago]: %d OPs omitidas sin gasto vinculado "
+                "(ni ORDEN_PAGO_IMPUT ni fallback SG→REG_COMP→CTA_COMPROB resolvieron)",
+                skipped_no_gasto,
             )
+        if skipped_no_oc_link:
+            logger.warning(
+                "Migrator [orden_pago]: %d OPs omitidas sin OC migrada/linkeada; "
+                "no se crean pagos ni gastos sueltos",
+                skipped_no_oc_link,
+            )
+        if skipped_multiple_oc:
+            logger.warning(
+                "Migrator [orden_pago]: %d OPs omitidas por multiples OCs en un mismo pago; "
+                "se requiere mapeo por gasto antes de enviarlas",
+                skipped_multiple_oc,
+            )
+        if warned_facturas_exceed_oc:
+            logger.warning(
+                "Migrator [orden_pago]: %d OPs con suma de facturas que supera el total de la OC vinculada",
+                warned_facturas_exceed_oc,
+            )
+        if skipped_estado:
+            logger.info("Migrator [orden_pago]: OPs omitidas por estado: %s", skipped_estado)
+        if skipped_confirmado:
+            logger.info("Migrator [orden_pago]: OPs omitidas por CONFIRMADO: %s", skipped_confirmado)
+        if skipped_no_fech_confirm:
+            logger.info("Migrator [orden_pago]: %d OPs omitidas sin FECH_CONFIRM", skipped_no_fech_confirm)
+        if skipped_importe_invalido:
+            logger.warning(
+                "Migrator [orden_pago]: OPs omitidas por IMPORTE_TOTAL invalido: %s. "
+                "Esto evita crear Egresos en $0 que ensucian el panel de pagos.",
+                skipped_importe_invalido,
+            )
+        if skipped_existing_keys:
+            logger.info("Migrator [orden_pago]: %d OPs omitidas por link local existente", len(skipped_existing_keys))
+        if self._retencion_skipped_no_catalog:
+            logger.warning(
+                "Migrator [orden_pago]: %d retenciones omitidas porque tipos_retencion lookup esta vacio. "
+                "Cargar account_tipo_impuestos en el tenant Paxapos.",
+                self._retencion_skipped_no_catalog,
+            )
+            self._retencion_skipped_no_catalog = 0
+        if self._retencion_skipped_no_match:
+            logger.warning(
+                "Migrator [orden_pago]: retenciones omitidas sin match en lookup: %s",
+                self._retencion_skipped_no_match,
+            )
+            self._retencion_skipped_no_match = {}
 
         if not ordenes_pago:
             logger.info("Migrator [orden_pago]: lote vacío luego del mapeo")
             return
+
+        # Construir gastos[] con datos completos desde CTA_COMPROB para que
+        # Paxapos pueda crear el Gasto si aún no existe (auto_create_gasto del
+        # endpoint solo arma un stub mínimo). El upsert en Paxapos dedup por
+        # proveedor_id + factura_nro + punto_de_venta, así que enviar gastos
+        # ya migrados es no-op.
+        gastos_payload: list[dict] = []
+        seen_dedup_keys: set[tuple] = set()
+        skipped_gastos_incomplete = 0
+        for cc_key in included_cc_keys:
+            cc_raw = cc_raw_by_key.get(cc_key)
+            if cc_raw is None:
+                continue
+            cc_raw_for_gasto = dict(cc_raw)
+            pedido_id = cc_key_to_pedido_id.get(cc_key)
+            if pedido_id is not None:
+                cc_raw_for_gasto["_PAXAPOS_PEDIDO_ID"] = pedido_id
+            gasto, dedup_key = self._build_gasto_from_op_row(cc_raw_for_gasto)
+            if gasto is None:
+                skipped_gastos_incomplete += 1
+                continue
+            if dedup_key in seen_dedup_keys:
+                continue
+            seen_dedup_keys.add(dedup_key)
+            gastos_payload.append(gasto)
+        if skipped_gastos_incomplete:
+            logger.info(
+                "Migrator [orden_pago]: %d comprobantes sin datos suficientes para auto-crear gasto",
+                skipped_gastos_incomplete,
+            )
 
         payload = {
             "dry_run": self._dry_run,
@@ -1585,14 +2069,14 @@ class MigratorExporter(BaseExporter):
             "proveedores": [],
             "pedidos": [],
             "ordenes_compra": [],
-            "gastos": [],
+            "gastos": gastos_payload,
             "ordenes_pago": ordenes_pago,
         }
 
         url = self._import_url
         logger.debug(
-            "Migrator request [orden_pago] POST %s dry_run=%s ops=%d omitidas=%d",
-            url, self._dry_run, len(ordenes_pago), skipped_no_gasto,
+            "Migrator request [orden_pago] POST %s dry_run=%s ops=%d omitidas=%d gastos=%d",
+            url, self._dry_run, len(ordenes_pago), skipped_no_gasto, len(gastos_payload),
         )
         parsed = self._post_json(url, payload)
 
@@ -1601,11 +2085,42 @@ class MigratorExporter(BaseExporter):
         ok_count = section_stats.get("ok", 0)
         error_count = section_stats.get("error", 0)
 
+        self._persist_links("orden_pago", parsed, raw_by_source_key)
+        self._raise_on_migrator_errors(parsed)
+
+        # ── Marcar OCs asociadas con has_op ───────────────────────────────
+        # Para cada OP enviada con éxito, flaggear sus OCs vinculadas para que
+        # no se eliminen de Paxapos si la OC pasa a estado A en RAFAM.
+        op_results = (parsed.get("results", {}) or {}).get("ordenes_pago", [])
+        if isinstance(op_results, list):
+            marked_oc_sks: set[str] = set()
+            for result in op_results:
+                if not isinstance(result, dict) or not result.get("success"):
+                    continue
+                ext = result.get("external_id") or {}
+                ej = ext.get("ejercicio")
+                nro = ext.get("nro_op")
+                if ej is None or nro is None:
+                    continue
+                op_key = (int(ej), int(nro))
+                for oc_sk in grouped_oc_source_keys.get(op_key, []):
+                    if oc_sk not in marked_oc_sks:
+                        self._link_store.mark_oc_has_op(oc_sk)
+                        marked_oc_sks.add(oc_sk)
+            if marked_oc_sks:
+                logger.info(
+                    "Migrator [orden_pago]: %d OCs marcadas con has_op",
+                    len(marked_oc_sks),
+                )
+
+        # Nota: si hubo OPs omitidas por falta de CC_NRO, se registran como warning
+        # arriba pero NO se levanta excepción: las OPs enviables se procesaron OK,
+        # y los reintentos se manejan via pending_state_field=N + reprocess_days=30
+        # configurado en ENTITY_CONFIGS['orden_pago'].
         logger.info(
             "Migrator OK [orden_pago]: %d ok, %d error, ops=%d, omitidas=%d, dry_run=%s",
             ok_count, error_count, len(ordenes_pago), skipped_no_gasto, self._dry_run,
         )
-        self._persist_links("orden_pago", parsed, raw_by_source_key)
 
     def _map_row(self, entity: str, raw: dict) -> dict | None:
         if entity == "proveedores":
@@ -1627,18 +2142,19 @@ class MigratorExporter(BaseExporter):
             "unidad_de_medida_id": self._resolve_unidad_medida_id(raw),
         }
 
+        # precio_unitario: Paxapos lo multiplica por cantidad y guarda el total en PedidoMercaderia.precio.
         if raw.get("COSTO_UNI") is not None:
-            item["precio"] = round(float(raw.get("COSTO_UNI")), 2)
+            item["precio_unitario"] = round(float(raw.get("COSTO_UNI")), 2)
 
         descripcion = raw.get("DESCRIP_BIE")
         if descripcion:
             item["descripcion"] = str(descripcion)[:255]
             item["observacion"] = str(descripcion)[:255]
 
-        # rubro_id via link_store (JURISDICCION de PED_ITEMS → rubro Paxapos)
-        rubro_id = self._resolve_rubro_id(raw)
-        if rubro_id is not None:
-            item["rubro_id"] = rubro_id
+        # centro_costo_id via link_store (JURISDICCION de PED_ITEMS → centro_costo Paxapos)
+        centro_costo_id = self._resolve_centro_costo_id(raw.get("JURISDICCION"))
+        if centro_costo_id is not None:
+            item["centro_costo_id"] = centro_costo_id
 
         return item
 
@@ -1689,8 +2205,9 @@ class MigratorExporter(BaseExporter):
             "unidad_de_medida_id": self._resolve_unidad_medida_id(raw),
         }
 
+        # precio_unitario: Paxapos lo multiplica por cantidad y guarda el total en PedidoMercaderia.precio.
         if raw.get("IMP_UNITARIO") is not None:
-            item["precio"] = round(float(raw.get("IMP_UNITARIO")), 2)
+            item["precio_unitario"] = round(float(raw.get("IMP_UNITARIO")), 2)
 
         if raw.get("CANT_RECIB") is not None:
             item["recibida_cantidad"] = float(raw.get("CANT_RECIB"))
@@ -1702,15 +2219,31 @@ class MigratorExporter(BaseExporter):
         if descripcion:
             item["name"] = str(descripcion).strip()[:255]
 
-        # rubro_id via link_store (JURISDICCION de SOLIC_GASTOS JOIN → rubro Paxapos)
-        rubro_id = self._resolve_rubro_id(raw, jurisdiccion_key="SG_JURISDICCION")
-        if rubro_id is not None:
-            item["rubro_id"] = rubro_id
+        # centro_costo_id via link_store (JURISDICCION de SOLIC_GASTOS JOIN → centro_costo Paxapos)
+        centro_costo_id = self._resolve_centro_costo_id(raw.get("SG_JURISDICCION"))
+        if centro_costo_id is not None:
+            item["centro_costo_id"] = centro_costo_id
 
         return item
 
     def _resolve_tipo_factura_id(self, tipo_doc) -> int | None:
+        """Mapea un codigo RAFAM CTA_COMPROB.TIPO al tipo_factura.id de Paxapos.
+
+        Estrategia:
+        1) Mapping directo a ID via RAFAM_TIPO_COMPROB_TO_PAXAPOS_ID (fuente de verdad).
+        2) Fallback a lookup por codename/name del tenant (por si el catalogo difiere).
+        3) Default fijo (RAFAM_TIPO_COMPROB_DEFAULT_ID = 7 "Otros") o env override.
+        """
         if tipo_doc:
+            from .gateway_mapper import (
+                RAFAM_TIPO_COMPROB_TO_PAXAPOS_ID,
+                RAFAM_TIPO_COMPROB_DEFAULT_ID,
+            )
+            code = str(tipo_doc).strip().upper()
+            mapped_id = RAFAM_TIPO_COMPROB_TO_PAXAPOS_ID.get(code)
+            if mapped_id is not None:
+                return mapped_id
+            # Fallback: lookup en catalogo del tenant por codename / name
             text = self._normalize_text(tipo_doc)
             by_codename = self._tipos_factura_by_codename.get(text)
             if by_codename and self._to_int(by_codename.get("id")) is not None:
@@ -1718,14 +2251,63 @@ class MigratorExporter(BaseExporter):
             by_name = self._tipos_factura_by_name.get(text)
             if by_name and self._to_int(by_name.get("id")) is not None:
                 return int(by_name.get("id"))
+            # Default mapper si nada matchea
+            if self._default_tipo_factura_id is not None:
+                return self._default_tipo_factura_id
+            return RAFAM_TIPO_COMPROB_DEFAULT_ID
         return self._default_tipo_factura_id
 
-    def _resolve_tipo_pago_id(self) -> int:
+    def _resolve_tipo_pago_id(self, raw: dict | None = None) -> int:
+        """Mapea ORDEN_PAGO.TIPO_CANCE al tipo_de_pago.id de Paxapos.
+
+        Mapeo via RAFAM_TIPO_CANCE_TO_PAXAPOS_PAGO_ID; default 1 (Transferencia bancaria).
+        """
+        if raw:
+            from .gateway_mapper import (
+                RAFAM_TIPO_CANCE_TO_PAXAPOS_PAGO_ID,
+                RAFAM_TIPO_CANCE_DEFAULT_PAGO_ID,
+            )
+            tipo_cance = str(raw.get("TIPO_CANCE") or "").strip().upper()
+            mapped_id = RAFAM_TIPO_CANCE_TO_PAXAPOS_PAGO_ID.get(tipo_cance)
+            if mapped_id is not None:
+                return mapped_id
+            return RAFAM_TIPO_CANCE_DEFAULT_PAGO_ID
         return self._default_tipo_pago_id
 
     def _map_retencion(self, raw: dict, ejercicio: int, nro_op: int) -> dict | None:
-        cod_ret = raw.get("RET_COD_RET")
-        importe = raw.get("RET_IMPORTE")
+        """Mapea una retencion RAFAM cruda (claves RET_*) al formato Paxapos.
+
+        Wrapper conveniente sobre `_map_retencion_dict`: traduce los nombres de
+        columna RAFAM (RET_COD_RET / RET_IMPORTE / RET_DESCRIPCION) al dict
+        canonico esperado y agrega `tipo` (alias normalizado: ganancias/iibb/
+        suss/iva) al payload resultante.
+        """
+        cod_ret = raw.get("RET_COD_RET") if raw.get("RET_COD_RET") is not None else raw.get("COD_RET")
+        importe = raw.get("RET_IMPORTE") if raw.get("RET_IMPORTE") is not None else raw.get("IMPORTE")
+        descripcion = raw.get("RET_DESCRIPCION") if raw.get("RET_DESCRIPCION") is not None else raw.get("DESCRIPCION")
+
+        if cod_ret is None or importe is None:
+            return None
+
+        ret_dict = {"cod_ret": cod_ret, "importe": importe, "descripcion": descripcion or ""}
+        result = self._map_retencion_dict(ret_dict, ejercicio, nro_op)
+        if result is None:
+            return None
+
+        alias = self._retencion_alias(descripcion or str(cod_ret))
+        if alias:
+            result["tipo"] = alias
+        return result
+
+    def _map_retencion_dict(self, ret: dict, ejercicio: int, nro_op: int) -> dict | None:
+        """Mapea una retencion (dict con cod_ret/importe/descripcion) al formato Paxapos.
+
+        Pre-resuelve tipo_impuesto_id contra el catalogo del tenant (lookups.tipos_retencion).
+        Si el catalogo esta vacio o no hay match, OMITE la retencion (con contador para warning)
+        en vez de mandar al servidor para que falle.
+        """
+        cod_ret = ret.get("cod_ret")
+        importe = ret.get("importe")
         if cod_ret is None or importe is None:
             return None
 
@@ -1740,7 +2322,23 @@ class MigratorExporter(BaseExporter):
         if monto_retenido == 0:
             return None
 
-        descripcion = str(raw.get("RET_DESCRIPCION") or "").strip()
+        descripcion = str(ret.get("descripcion") or "").strip()
+
+        tipo_retencion_id = self._resolve_tipo_retencion_id(cod_text, descripcion)
+        if tipo_retencion_id is None:
+            # Intentar via alias (ganancias/iibb/suss/iva) → buscar en catalogo
+            alias = self._retencion_alias(descripcion or cod_text)
+            if alias:
+                tipo_retencion_id = self._resolve_tipo_retencion_id_by_alias(alias)
+
+        if tipo_retencion_id is None:
+            if not self._tipos_retencion:
+                self._retencion_skipped_no_catalog += 1
+            else:
+                key = descripcion or f"COD_RET={cod_text}"
+                self._retencion_skipped_no_match[key] = self._retencion_skipped_no_match.get(key, 0) + 1
+            return None
+
         retencion: dict = {
             "external_id": {
                 "ejercicio": ejercicio,
@@ -1749,22 +2347,106 @@ class MigratorExporter(BaseExporter):
             },
             "monto_retenido": monto_retenido,
             "numero_certificado": f"RAFAM-RET-{ejercicio}-{nro_op}-{cod_text}",
+            "tipo_impuesto_id": tipo_retencion_id,
         }
-
-        tipo_retencion_id = self._resolve_tipo_retencion_id(cod_text, descripcion)
-        if tipo_retencion_id is not None:
-            retencion["tipo_impuesto_id"] = tipo_retencion_id
-        else:
-            alias = self._retencion_alias(descripcion or cod_text)
-            if alias:
-                retencion["tipo"] = alias
-            elif descripcion:
-                retencion["tipo_impuesto_name"] = descripcion
 
         if descripcion:
             retencion["observacion"] = f"Retencion RAFAM {descripcion} OP {ejercicio}/{nro_op}"
 
         return retencion
+
+    def _map_deduccion_dict(self, ded: dict, ejercicio: int, nro_op: int) -> dict | None:
+        """Mapea una deduccion de ORDEN_PAGO_DEDUC al formato Paxapos retenciones.
+
+        Usa codigo_deduc/importe_reten/descripcion para resolver tipo_impuesto_id.
+        """
+        codigo_deduc = ded.get("codigo_deduc")
+        importe_reten = ded.get("importe_reten")
+        if codigo_deduc is None or importe_reten is None:
+            return None
+
+        cod_text = str(codigo_deduc).strip()
+        if not cod_text:
+            return None
+
+        try:
+            monto_retenido = float(importe_reten)
+        except (TypeError, ValueError):
+            return None
+        if monto_retenido == 0:
+            return None
+
+        descripcion = str(ded.get("descripcion") or "").strip()
+
+        tipo_retencion_id = self._resolve_tipo_retencion_id(cod_text, descripcion)
+        if tipo_retencion_id is None:
+            alias = self._retencion_alias(descripcion or cod_text)
+            if alias:
+                tipo_retencion_id = self._resolve_tipo_retencion_id_by_alias(alias)
+
+        if tipo_retencion_id is None:
+            if not self._tipos_retencion:
+                self._retencion_skipped_no_catalog += 1
+            else:
+                key = descripcion or f"CODIGO_DEDUC={cod_text}"
+                self._retencion_skipped_no_match[key] = self._retencion_skipped_no_match.get(key, 0) + 1
+            return None
+
+        retencion: dict = {
+            "external_id": {
+                "ejercicio": ejercicio,
+                "nro_op": nro_op,
+                "codigo_deduc": cod_text,
+            },
+            "monto_retenido": monto_retenido,
+            "numero_certificado": f"RAFAM-RET-{ejercicio}-{nro_op}-{cod_text}",
+            "tipo_impuesto_id": tipo_retencion_id,
+        }
+
+        # Alicuota si está disponible
+        alicuota = ded.get("alicuota")
+        if alicuota is not None:
+            try:
+                alicuota_val = float(alicuota)
+                if alicuota_val > 0:
+                    retencion["alicuota"] = alicuota_val
+            except (TypeError, ValueError):
+                pass
+
+        # Certificado de deducción
+        comprob_deduc = ded.get("comprob_deduc")
+        if comprob_deduc is not None and str(comprob_deduc).strip():
+            retencion["numero_certificado"] = str(comprob_deduc).strip()
+
+        if descripcion:
+            retencion["observacion"] = f"Deduccion RAFAM {descripcion} OP {ejercicio}/{nro_op}"
+
+        return retencion
+
+    def _resolve_tipo_retencion_id_by_alias(self, alias: str) -> int | None:
+        """Busca un tipo_impuesto en lookups por alias normalizado (ganancias/iibb/suss/iva).
+
+        Match por name normalizado conteniendo el alias.
+        """
+        if not alias or not self._tipos_retencion:
+            return None
+        target_tokens = {
+            "ganancias": ("ganancia",),
+            "iibb": ("iibb", "ingresos brutos", "ingreso bruto"),
+            "suss": ("suss", "seguridad social"),
+            "iva": ("iva",),
+        }.get(alias, (alias,))
+
+        for tr in self._tipos_retencion:
+            name_norm = self._normalize_text(tr.get("name") or "")
+            if not name_norm:
+                continue
+            for tok in target_tokens:
+                if self._normalize_text(tok) in name_norm:
+                    tid = self._to_int(tr.get("id"))
+                    if tid is not None:
+                        return tid
+        return None
 
     def _resolve_tipo_retencion_id(self, cod_ret, descripcion) -> int | None:
         cod_text = str(cod_ret).strip() if cod_ret is not None else ""
@@ -1786,63 +2468,13 @@ class MigratorExporter(BaseExporter):
                 return int(row.get("id"))
         return None
 
-    _JURISDICCION_DESC_PREFIX = "Jurisdiccion RAFAM "
-
-    @classmethod
-    def _build_jurisdiccion_index(cls, centros_costo: list[dict]) -> dict[str, dict]:
-        idx: dict[str, dict] = {}
-        for cc in centros_costo:
-            desc = str(cc.get("description") or "").strip()
-            if desc.startswith(cls._JURISDICCION_DESC_PREFIX):
-                code = desc[len(cls._JURISDICCION_DESC_PREFIX):].strip()
-                if code and cc.get("id") is not None:
-                    idx[code] = cc
-        return idx
-
-    def _seed_centro_costo_from_lookups(self) -> None:
-        seeded = 0
-        for code, cc in self._centros_costo_by_jurisdiccion.items():
-            remote_id = self._to_int(cc.get("id"))
-            if remote_id is None:
-                continue
-            source_key = json.dumps({"jurisdiccion": code}, sort_keys=True)
-            existing = self._link_store.get_remote_id("centro_costo", source_key)
-            if existing:
-                continue
-            self._link_store.save_link(
-                entity="centro_costo",
-                source_key=source_key,
-                remote_id=str(remote_id),
-            )
-            seeded += 1
-        if seeded:
-            logger.info("Migrator: seeded %d centro_costo links from Paxapos lookups", seeded)
-
     def _resolve_centro_costo_id(self, jurisdiccion) -> int | None:
         if jurisdiccion is None:
             return None
-        jurisdiccion_text = str(jurisdiccion).strip()
-        if not jurisdiccion_text:
+        text = str(jurisdiccion).strip()
+        if not text:
             return None
-
-        source_key = json.dumps({"jurisdiccion": jurisdiccion_text}, sort_keys=True)
-        for key in (source_key, jurisdiccion_text):
-            remote = self._link_store.get_remote_id("centro_costo", key)
-            if remote and self._to_int(remote) is not None:
-                return int(remote)
-
-        # Fallback: buscar en lookups por jurisdiccion parseada de description
-        cc = self._centros_costo_by_jurisdiccion.get(jurisdiccion_text)
-        if cc:
-            remote_id = self._to_int(cc.get("id"))
-            if remote_id is not None:
-                self._link_store.save_link(
-                    entity="centro_costo",
-                    source_key=source_key,
-                    remote_id=str(remote_id),
-                )
-                return remote_id
-        return None
+        return resolve_centro_costo_id(text)
 
     @staticmethod
     def _retencion_alias(value) -> str | None:
@@ -1903,6 +2535,12 @@ class MigratorExporter(BaseExporter):
         keys.append(json.dumps({"rafam_ref": rafam_ref}, sort_keys=True))
         return keys
 
+    @staticmethod
+    def _split_ref_set(value) -> set[str]:
+        if not value:
+            return set()
+        return {part.strip() for part in str(value).split(",") if part.strip()}
+
     def _get_gasto_remote_id(self, rafam_ref: str) -> str | None:
         for source_key in self._gasto_source_keys_from_ref(rafam_ref):
             remote = self._link_store.get_remote_id("gasto", source_key)
@@ -1923,18 +2561,19 @@ class MigratorExporter(BaseExporter):
         return ""
 
     def _resolve_unidad_medida_id(self, raw: dict) -> int:
-        return 5  # Unidad (id=5 en Paxapos) — hardcoded por contrato
+        # Intentar resolver via link_store (si ya se mapeó previamente)
+        uni_med = raw.get("UNI_MED")
+        if uni_med is not None:
+            uni_med_str = str(uni_med).strip()
+            if uni_med_str:
+                remote = self._link_store.get_remote_id("unidad_medida", uni_med_str)
+                if remote and self._to_int(remote) is not None:
+                    return int(remote)
+        # Default = 5 (Unidad) — id en compras_unidad_de_medidas del tenant.
+        from .gateway_mapper import _UM_DEFAULT
+        return _UM_DEFAULT
 
-    def _resolve_rubro_id(self, raw: dict, jurisdiccion_key: str = "JURISDICCION") -> int | None:
-        """Resuelve rubro_id desde JURISDICCION via entity_link_store."""
-        jurisdiccion = raw.get(jurisdiccion_key)
-        if jurisdiccion is None:
-            return None
-        rubro_key = json.dumps({"jurisdiccion": str(jurisdiccion)}, sort_keys=True)
-        remote = self._link_store.get_remote_id("rubro", rubro_key)
-        if remote:
-            return int(remote)
-        return None
+
 
     def _mercaderia_external_ref_oc_item(self, raw: dict) -> dict | None:
         ejercicio = self._to_int(raw.get("EJERCICIO"))
@@ -2003,13 +2642,27 @@ class MigratorExporter(BaseExporter):
 
     def _post_json(self, url: str, payload: dict) -> dict:
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        # Debug opcional: si DUMP_PAYLOAD esta seteado y APP_ENV != prod, vuelca
+        # request+response a un archivo. Campos sensibles (cuit, tokens) son
+        # enmascarados antes de escribir.
+        dump_path = _dump_payload_path()
+        if dump_path:
+            try:
+                serialized = json.dumps(payload, ensure_ascii=False, indent=2)
+                redacted = _redact_payload_for_dump(serialized)
+                with open(dump_path, "ab") as fh:
+                    fh.write(("\n=== POST " + url + " ===\n").encode("utf-8"))
+                    fh.write(redacted.encode("utf-8"))
+                    fh.write(b"\n")
+            except OSError:
+                pass
         req = request.Request(url=url, data=data, headers=self._headers(), method="POST")
         ssl_context = None
         if not self._verify_ssl:
             ssl_context = ssl._create_unverified_context()
 
         try:
-            with request.urlopen(req, timeout=self._timeout, context=ssl_context) as resp:
+            with _http_request_with_retries(req, timeout=self._timeout, ssl_context=ssl_context) as resp:
                 status = resp.getcode()
                 final_url = resp.geturl()
                 content_type = (resp.headers.get("Content-Type") or "").lower()
@@ -2031,7 +2684,16 @@ class MigratorExporter(BaseExporter):
                 parsed = json.loads(body) if body else {}
                 if isinstance(parsed, dict) and parsed.get("errors"):
                     logger.debug("Migrator response errors=%s", parsed.get("errors"))
-                self._raise_on_migrator_errors(parsed)
+                if dump_path:
+                    try:
+                        serialized_resp = json.dumps(parsed, ensure_ascii=False, indent=2)
+                        redacted_resp = _redact_payload_for_dump(serialized_resp)
+                        with open(dump_path, "ab") as fh:
+                            fh.write(b"--- RESPONSE ---\n")
+                            fh.write(redacted_resp.encode("utf-8"))
+                            fh.write(b"\n")
+                    except OSError:
+                        pass
                 return parsed
         except error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace") if exc.fp else ""
@@ -2041,16 +2703,48 @@ class MigratorExporter(BaseExporter):
 
     @staticmethod
     def _raise_on_migrator_errors(parsed: dict) -> None:
+        """
+        Procesa la respuesta del migrator y reporta errores parciales.
+
+        Comportamiento por defecto (NO ESTRICTO): los errores parciales por fila
+        (validacion, datos invalidos, etc.) NO levantan excepcion. Las filas OK
+        del batch ya fueron persistidas; reintentar el batch entero solo
+        reprocesaria las filas validas (potencialmente generando duplicados o
+        cargando trabajo al backend) y las filas invalidas seguirian fallando.
+        Solo logueamos los errores con detalle para que el operador los corrija
+        en el origen (ej: CUIT mal cargado en RAFAM).
+
+        Comportamiento ESTRICTO (opt-in via RAFAM_STRICT_PARTIAL_ERRORS=true):
+        levanta RuntimeError si hay cualquier error parcial. Util para tests
+        o entornos donde se quiere abortar ante el primer error.
+
+        En ambos modos los errores se logean con full detail (errors[] y stats).
+        """
         if not isinstance(parsed, dict):
             return
 
+        strict = _env_bool("RAFAM_STRICT_PARTIAL_ERRORS", False)
+
+        has_errors = False
         errors = parsed.get("errors")
         if isinstance(errors, list) and errors:
-            sample = json.dumps(errors[:3], ensure_ascii=False)
-            raise RuntimeError(f"Migrator devolvio errores parciales: {sample}")
+            # Loguear TODOS los errores (no solo sample) para diagnostico en prod.
+            # En general son pocos y vale la pena tener trazabilidad completa.
+            log_fn = logger.error if strict else logger.warning
+            log_fn(
+                "Migrator devolvio %d error(es) parcial(es) (filas individuales fallaron, "
+                "el resto del batch SI se proceso): %s",
+                len(errors),
+                json.dumps(errors[:20], ensure_ascii=False),
+            )
+            if len(errors) > 20:
+                logger.warning("... y %d error(es) mas omitidos del log", len(errors) - 20)
+            has_errors = True
 
         stats = parsed.get("stats")
         if not isinstance(stats, dict):
+            if has_errors and strict:
+                raise RuntimeError("Migrator devolvio errores parciales")
             return
 
         failed = []
@@ -2066,7 +2760,17 @@ class MigratorExporter(BaseExporter):
                 failed.append(f"{section}={error_count}")
 
         if failed:
-            raise RuntimeError(f"Migrator reporto errores en stats: {', '.join(failed)}")
+            log_fn = logger.error if strict else logger.warning
+            log_fn(
+                "Migrator stats: %s fila(s) fallaron pero el batch continuo. "
+                "Las filas OK ya fueron persistidas.",
+                ", ".join(failed),
+            )
+            has_errors = True
+
+        if has_errors and strict:
+            details = ", ".join(failed) if failed else "ver errors en respuesta"
+            raise RuntimeError(f"Migrator devolvio errores parciales: {details}")
 
     def _persist_links(self, entity: str, parsed: dict, raw_by_source_key: dict[str, dict]) -> None:
         if self._dry_run or not isinstance(parsed, dict):
@@ -2078,8 +2782,6 @@ class MigratorExporter(BaseExporter):
 
         if entity == "proveedores":
             self._persist_links_proveedores(results, raw_by_source_key)
-        elif entity == "jurisdicciones":
-            self._persist_links_jurisdicciones(results)
         elif entity == "ped_items":
             self._persist_links_section(results, "pedidos", "pedido", ["ejercicio", "num_ped"])
         elif entity == "oc_items":
@@ -2118,63 +2820,6 @@ class MigratorExporter(BaseExporter):
                 cod_estado=cod_estado,
             )
 
-    def _persist_links_jurisdicciones(self, results: dict) -> None:
-        """Persiste entity_links para centros de costo, rubros y clasificaciones."""
-        centros_costo = results.get("centros_costo", [])
-        if isinstance(centros_costo, list):
-            for cc in centros_costo:
-                if not isinstance(cc, dict) or not cc.get("success"):
-                    continue
-                external_id = cc.get("external_id") or {}
-                if not isinstance(external_id, dict):
-                    continue
-                jurisdiccion = external_id.get("jurisdiccion")
-                remote_id = cc.get("id")
-                if jurisdiccion is None or remote_id is None:
-                    continue
-                self._link_store.save_link(
-                    entity="centro_costo",
-                    source_key=json.dumps({"jurisdiccion": str(jurisdiccion)}, sort_keys=True),
-                    remote_id=str(remote_id),
-                )
-
-        rubros = results.get("rubros", [])
-        if isinstance(rubros, list):
-            for r in rubros:
-                if not isinstance(r, dict) or not r.get("success"):
-                    continue
-                external_id = r.get("external_id") or {}
-                if not isinstance(external_id, dict):
-                    continue
-                jurisdiccion = external_id.get("jurisdiccion")
-                remote_id = r.get("id")
-                # r.get('id') is not None evita descartar id=0 (falsy)
-                if jurisdiccion is None or remote_id is None:
-                    continue
-                self._link_store.save_link(
-                    entity="rubro",
-                    source_key=json.dumps({"jurisdiccion": str(jurisdiccion)}, sort_keys=True),
-                    remote_id=str(remote_id),
-                )
-
-        clasificaciones = results.get("clasificaciones", [])
-        if isinstance(clasificaciones, list):
-            for c in clasificaciones:
-                if not isinstance(c, dict) or not c.get("success"):
-                    continue
-                external_id = c.get("external_id") or {}
-                if not isinstance(external_id, dict):
-                    continue
-                jurisdiccion = external_id.get("jurisdiccion")
-                remote_id = c.get("id")
-                if jurisdiccion is None or remote_id is None:
-                    continue
-                self._link_store.save_link(
-                    entity="clasificacion",
-                    source_key=json.dumps({"jurisdiccion": str(jurisdiccion)}, sort_keys=True),
-                    remote_id=str(remote_id),
-                )
-
     def _persist_links_orden_compra(self, results: dict, raw_by_source_key: dict[str, dict]) -> None:
         """Persiste entity_links para ordenes_compra con extras (estado_oc, fech_confirm, etc.)."""
         section = results.get("ordenes_compra", [])
@@ -2205,6 +2850,11 @@ class MigratorExporter(BaseExporter):
             importe_tot = str(raw.get("OC_IMPORTE_TOT")) if raw.get("OC_IMPORTE_TOT") is not None else None
 
             gasto_refs = raw.get("_GASTO_REFS", "")
+            gasto_linked_refs = raw.get("_GASTO_LINKED_REFS", "")
+
+            # gasto_ids returned by Paxapos in the OC response
+            paxapos_gasto_ids_list = result.get("gasto_ids") or []
+            paxapos_gasto_ids = ",".join(str(g) for g in paxapos_gasto_ids_list) if paxapos_gasto_ids_list else ""
 
             self._link_store.save_link(
                 entity="orden_compra",
@@ -2215,6 +2865,8 @@ class MigratorExporter(BaseExporter):
                 cod_prov=cod_prov,
                 importe_tot=importe_tot,
                 gasto_refs=gasto_refs,
+                gasto_linked_refs=gasto_linked_refs,
+                paxapos_gasto_ids=paxapos_gasto_ids,
             )
 
     def _persist_links_solic_gastos(self, results: dict, raw_by_source_key: dict[str, dict]) -> None:
@@ -2264,7 +2916,7 @@ class MigratorExporter(BaseExporter):
                 )
 
     def _persist_links_orden_pago(self, results: dict, raw_by_source_key: dict[str, dict]) -> None:
-        """Persiste entity_links para ordenes_pago con extras (estado_op, importe_total)."""
+        """Persiste entity_links para ordenes_pago con extras de auditoria."""
         section = results.get("ordenes_pago", [])
         if not isinstance(section, list):
             return
@@ -2288,6 +2940,8 @@ class MigratorExporter(BaseExporter):
 
             raw = raw_by_source_key.get(source_key, {})
             estado_op = str(raw.get("ESTADO_OP", "")).strip().upper() or None
+            confirmado = str(raw.get("CONFIRMADO", "")).strip().upper() or None
+            fech_confirm = self._format_date_only(raw.get("FECH_CONFIRM", "")) or None
             importe_total = str(raw.get("IMPORTE_TOTAL")) if raw.get("IMPORTE_TOTAL") is not None else None
 
             self._link_store.save_link(
@@ -2295,6 +2949,8 @@ class MigratorExporter(BaseExporter):
                 source_key=source_key,
                 remote_id=str(remote_id),
                 estado_op=estado_op,
+                confirmado=confirmado,
+                fech_confirm=fech_confirm,
                 importe_total=importe_total,
             )
 
@@ -2508,7 +3164,7 @@ def _fetch_migrator_json(endpoint_env: str, default_endpoint: str, query_params:
         ssl_context = ssl._create_unverified_context()
 
     try:
-        with request.urlopen(req, timeout=timeout, context=ssl_context) as resp:
+        with _http_request_with_retries(req, timeout=timeout, ssl_context=ssl_context) as resp:
             content_type = (resp.headers.get("Content-Type") or "").lower()
             body = resp.read().decode("utf-8", errors="replace")
             if "json" not in content_type:
@@ -2521,7 +3177,10 @@ def _fetch_migrator_json(endpoint_env: str, default_endpoint: str, query_params:
         raise RuntimeError(f"URL error: {exc.reason}") from exc
 
 
-def _env_bool(name: str, default: str = "true") -> bool:
+def _env_bool(name: str, default="true") -> bool:
+    """Lee env var como bool. default puede ser str (ej: 'true') o bool."""
+    if isinstance(default, bool):
+        default = "true" if default else "false"
     value = os.getenv(name, default)
     return value.strip().lower() in {"1", "true", "yes", "on"}
 

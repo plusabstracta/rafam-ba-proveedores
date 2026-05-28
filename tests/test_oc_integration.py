@@ -7,13 +7,13 @@ luego procesa oc_items y valida que los payloads sean correctos.
 
 Requiere: RAFAM_SOURCE_BACKEND=sqlite.
 """
-import json
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 from sqlalchemy import create_engine, text
 
+from main import _iter_grouped_batches
 from src.exporter import MigratorExporter
 from src.models import Checkpoint
 from src.source_repository import SourceRepository
@@ -33,7 +33,7 @@ def dev_engine():
 
 @pytest.fixture(scope="module")
 def exporter_with_links(dev_engine):
-    """MigratorExporter con proveedores y rubros pre-linkeados desde la DB local."""
+    """MigratorExporter con proveedores y centros de costo pre-linkeados desde la DB local."""
     with patch("src.exporter.fetch_migrator_lookups") as ml:
         ml.return_value = {
             "unidades_de_medida": [{"id": "1", "name": "Unidad"}],
@@ -57,19 +57,6 @@ def exporter_with_links(dev_engine):
                 entity="proveedores",
                 source_key=str(cod),
                 remote_id=str(10000 + int(cod)),
-            )
-        # Pre-linkear rubros (jurisdicciones)
-        for (j,) in conn.execute(text("SELECT JURISDICCION FROM JURISDICCIONES")).fetchall():
-            jurisdiccion_key = json.dumps({"jurisdiccion": str(j)}, sort_keys=True)
-            exp._link_store.save_link(
-                entity="rubro",
-                source_key=jurisdiccion_key,
-                remote_id=str(abs(hash(j)) % 1000 + 1),
-            )
-            exp._link_store.save_link(
-                entity="centro_costo",
-                source_key=jurisdiccion_key,
-                remote_id=str(abs(hash(j)) % 1000 + 1),
             )
     return exp
 
@@ -95,10 +82,7 @@ def oc_payloads(dev_engine, exporter_with_links):
         stmt = repo.build_statement("oc_items", cp)
         result = conn.execute(stmt)
         columns = list(result.keys())
-        all_rows = [tuple(r) for r in result.fetchall()]
-
-        for i in range(0, len(all_rows), 500):
-            batch = all_rows[i : i + 500]
+        for batch in _iter_grouped_batches(result, columns, ["EJERCICIO", "UNI_COMPRA", "NRO_OC"], 500):
             exporter_with_links.write_batch("oc_items", columns, batch)
 
     # Flatten all OCs from all payloads

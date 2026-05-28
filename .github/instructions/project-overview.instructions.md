@@ -32,14 +32,15 @@ a un portal de proveedores basado en **Paxapos** (CakePHP 2) a través de APIs R
 
 ### Entidades sincronizadas (orden de dependencia)
 
-1. `jurisdicciones` → `rubros` + `clasificaciones` — catálogo base, cada jurisdicción agrupa sus propios proveedores
-2. `proveedores` — dependen de jurisdicciones/rubros
-3. `ped_items` → `pedidos` — solicitudes internas
-4. `oc_items` → `ordenes_compra` — requieren proveedor
-5. `solic_gastos` → `gastos` — facturas del proveedor
-6. `orden_pago` → `ordenes_pago` — requieren gastos ya importados
+1. `proveedores` (tabla RAFAM `PROVEEDORES`)
+2. `orden_compra` + `oc_items` (tablas RAFAM `ORDEN_COMPRA`/`OC_ITEMS`) — requieren proveedor
+3. `cta_comprob` (tabla RAFAM `CTA_COMPROB`) — facturas reales del proveedor; resuelve OC vía `REG_COMP`
+4. `orden_pago` (tabla RAFAM `ORDEN_PAGO`) — requieren gasto/factura ya importado; vincula gastos vía `CTA_HOJA_DE_RUTA`
+5. `retenciones` (tabla RAFAM `RETENCIONES`) — vinculadas al pago; tipo resuelto por `DEDUCCIONES.DESCRIPCION`
 
-**Regla:** el orden de ejecución es estricto. Cada entidad depende de las anteriores.
+**Regla:** el orden de ejecución es estricto. Cada entidad depende de las anteriores. El campo `JURISDICCION` no es una entidad: se mapea a `centro_costo_id` vía `_JURISDICCION_CENTRO_COSTO_MAP` en `gateway_mapper.py`.
+
+> Mapeo completo RAFAM ↔ Paxapos: ver [docs/rafam_paxapos_equivalencias.md](../../docs/rafam_paxapos_equivalencias.md) (fuente de verdad).
 
 ---
 
@@ -127,8 +128,7 @@ No agregar aliases ni fallbacks legacy a `DB_*`, `SQLITE_DB_PATH`, `CHECKPOINT_D
 
 - `README.md` explica uso diario y perfiles operativos.
 - `.env.example` es la plantilla única por roles y debe listar solo variables runtime vigentes.
-- `docs/deployment.md` documenta instalación/operación por perfil.
-- `docs/tablas_datos_paxapos.md` documenta mapeos RAFAM->Paxapos y debe cambiar junto con payload/mappers.
+- `docs/rafam_paxapos_equivalencias.md` es la **única fuente de verdad** sobre qué tablas RAFAM se migran y cómo se mapean a Paxapos.
 - `.github/instructions/*.instructions.md` debe reflejar las mismas reglas que los docs para evitar drift de ingeniería.
 - Todo cambio de configuración, contrato Paxapos, orden de entidades, payload o comandos Makefile debe actualizar docs e instrucciones relacionadas en el mismo commit.
 
@@ -151,17 +151,16 @@ Controller: `Plugin/Account/Controller/RafamMigracionesController.php`
 
 Orden interno de procesamiento (hardcodeado en foreach):
 ```
-rubros → clasificaciones → proveedores → pedidos → ordenes_compra → gastos → ordenes_pago
+proveedores → ordenes_compra → gastos → ordenes_pago
 ```
-Se pueden enviar todas las entidades en un solo payload y el endpoint respeta el orden.
+Se pueden enviar todas las entidades en un solo payload y el endpoint respeta el orden. Las retenciones viajan dentro del bloque de la OP correspondiente.
 
 #### Órdenes de Compra (`_importPedido`)
 
 - Modelo: `Compras.Pedido` → tabla `compras_pedidos` (con `tablePrefix = 'compras_'`).
-- Upsert por `Pedido.internal_id` (formato: `rafam-oc-{ej}-{uni}-{nro}`).
+- Upsert por `Pedido.internal_id` (formato: `{ej}-{nro}`).
 - Estado: `estado_aprobacion` — valor `4` para anular una OC existente.
-- Acepta `gasto_ids: [int]` para vincular OC↔Gasto via HABTM (tanto en create como en update).
-- Acepta `gasto_external_ids: [string]` como fallback (resuelve buscando traza `RAFAM:{...}` en `Gasto.observacion`).
+- Acepta `gasto_nro_comprobante` para vincular OC↔Gasto por número fiscal; si el gasto no existe, el endpoint lo auto-crea.
 - Respuesta: `{success, id, mode: create|update, external_id}`.
 
 #### Gastos (`_importGasto`)
@@ -172,7 +171,7 @@ Se pueden enviar todas las entidades en un solo payload y el endpoint respeta el
 - Sin proveedor o sin factura_nro → siempre INSERT nuevo (sin posibilidad de dedup).
 - Campos obligatorios: `importe_total`, `fecha`. Todo lo demás es opcional.
 - **No existe mecanismo de anulación** — omitir gastos con `ESTADO_SOLIC=A` del envío.
-- **No acepta `pedido_id`** — el vínculo Gasto↔OC solo se establece desde el lado de la OC (via `gasto_ids`).
+- Acepta `pedido_id`; Paxapos lo usa para vincular el gasto encontrado o auto-creado con la OC por `Gasto.pedido_id`.
 - Asociaciones relevantes: `belongsTo => Proveedor, Clasificacion`, `hasMany => Compras.Pedido`, `HABTM => Egreso` (via `account_egresos_gastos`).
 - Respuesta: `{success, id, mode: create|update, external_id}`.
 
@@ -182,37 +181,36 @@ Se pueden enviar todas las entidades en un solo payload y el endpoint respeta el
 - Upsert por `Egreso.identificador_pago` (formato: `RAFAM-OP-{ej}-{nro}`). Si no viene, se autogenera como `RAFAM-{md5(externalId)}`.
 - Si ya existe → `skip_existing` (NO actualiza estado ni campos). No hay forma de hacer N→C post-creación.
 - Requiere mínimo 1 gasto resoluble — falla explícitamente si `gastoIds` está vacío.
-- `gasto_ids` (IDs numéricos) tiene prioridad. `gasto_external_ids` es fallback automático.
+- Usa `gasto_nro_comprobante` como nexo obligatorio hacia gastos; el endpoint auto-crea el gasto si no existe y usa `pedido_id` para vincularlo a la OC. El script debe resolver `pedido_id` contra `link_orden_compra` y omitir OP/gastos si no hay OC linkeada.
 - Feature flag: `Site.ordenes_de_pago` debe estar en `true` — si no, devuelve HTTP 400 inmediatamente.
-- Estados del Egreso: `0=Pendiente, 1=Aprobado, 2=Rechazado, 3=Pagado`. No existe "Anulado" — omitir OPs con `ESTADO_OP=A` del envío.
-- Si no se envía `estado`: con `fecha` → auto `PAGADO(3)`, sin `fecha` → auto `PENDIENTE(0)`.
+- Estados del Egreso: `0=Pendiente, 1=Aprobado, 2=Rechazado, 3=Pagado`. Enviar solo OPs RAFAM con `ESTADO_OP=C`, `CONFIRMADO=S`, `FECH_CONFIRM` presente y OC resuelta a `pedido_id`; omitir anuladas, pendientes, no confirmadas, sin fecha o sin OC linkeada.
+- Si no se envía `estado`: con `fecha` → auto `PAGADO(3)`, sin `fecha` → auto `PENDIENTE(0)`. Para OPs confirmadas RAFAM, enviar `fecha=FECH_CONFIRM`.
 - `allowedFields` del save: `identificador_pago, fecha, tipo_de_pago_id, total, observacion, estado, fecha_programada, cuenta_bancaria_id, numero_operacion`. Notar que `proveedor_id` NO está.
-- Respuesta: `{success, id, mode: create|skip_existing, external_id, gasto_ids}`.
+- Respuesta: `{success, id, mode: create|skip_existing, external_id, gasto_ids, gastos_creados}`.
 
 #### Cadena de vínculos en Paxapos
 
 ```
-OC (compras_pedidos.gasto_id) ──HABTM──► Gasto ◄──HABTM (account_egresos_gastos)── Egreso (OP)
+OC (compras_pedidos.id) ◄── account_gastos.pedido_id ── Gasto ◄──HABTM (account_egresos_gastos)── Egreso (OP)
 ```
 
-- OC→Gasto: se establece enviando `gasto_ids` en el payload de la OC.
-- Gasto→OC: no hay forma desde `_importGasto`.
-- OP→Gasto: se establece enviando `gasto_ids` en el payload de la OP.
+- OC→Gasto: se establece enviando `gasto_nro_comprobante`; si el gasto no existe, se auto-crea.
+- Gasto→OC: si se envia `pedido_id`, Paxapos vincula el gasto por `account_gastos.pedido_id`.
+- OP→Gasto: se establece enviando `gasto_nro_comprobante`; si el gasto no existe, se auto-crea y luego se vincula a la OP.
 
 #### Cadena de vínculos en RAFAM (fuente)
 
 ```
-OC_ITEMS ──(DELEG_SOLIC, NRO_SOLIC)──► SOLIC_GASTOS ◄──(SG_DELEG_SOLIC, SG_NRO_SOLIC)── ORDEN_PAGO
-                                              ▲
-                         ORDEN_PAGO.RECO_DEU_COMPRA ──► ORDEN_COMPRA.NRO_OC (nexo OP↔OC)
+CTA_COMPROB ◄──(REG_COMP)──► ORDEN_COMPRA
+      ▲
+      │ (CTA_HOJA_DE_RUTA: vista desnormalizada)
+      │
+  ORDEN_PAGO ──► RETENCIONES (EJERCICIO + NRO_CANCE = ORDEN_PAGO.EJERCICIO + NRO_OP)
 ```
 
-El Gasto (SOLIC_GASTOS) es el puente entre OC y OP. Tres niveles de resolución:
-1. SG directo (SG_DELEG_SOLIC + SG_NRO_SOLIC) — ~5%
-2. CTA_HOJA_DE_RUTA JOIN (solo Oracle) — vista desnormalizada PE→SG→OC→OP
-3. RECO_DEU_COMPRA → OC link_store → gasto_refs — ~85%, funciona Oracle + SQLite
-
-> `NRO_CANCE` NO es el nexo OP↔OC; es para RETENCIONES.
+- **CTA_COMPROB ↔ ORDEN_COMPRA:** vía `REG_COMP`. Permite setear `account_gastos.pedido_id`.
+- **ORDEN_PAGO ↔ CTA_COMPROB:** se lee desde `CTA_HOJA_DE_RUTA` para armar el HABTM `account_egresos_gastos`.
+- **RETENCIONES ↔ ORDEN_PAGO:** match directo por `EJERCICIO + NRO_CANCE`. El tipo de retención se resuelve por substring sobre `DEDUCCIONES.DESCRIPCION`.
 
 #### Colisión de columnas en JOINs
 
@@ -229,12 +227,10 @@ Cada entidad tiene una tabla `link_<entity>` en SQLite con columnas base (`sourc
 | Entidad | Extras | source_key format |
 |---|---|---|
 | `proveedores` | `cuit`, `cod_estado` | `"<COD_PROV>"` |
-| `clasificacion` | — | `json({"jurisdiccion": "..."}`) |
-| `rubro` | — | `json({"jurisdiccion": "..."})` |
-| `pedido` | — | `json({"ejercicio": N, "num_ped": N})` |
-| `orden_compra` | `fech_confirm`, `estado_oc`, `cod_prov`, `importe_tot` | `json({"ejercicio": N, "nro_oc": N, "uni_compra": N})` |
-| `gasto` | `estado_solic`, `importe_tot`, `cod_prov` | `json({"rafam_ref": "SG-ej-deleg-nro"})` |
-| `orden_pago` | `estado_op`, `importe_total` | `json({"ejercicio": N, "nro_op": N})` |
+| `orden_compra` | `fech_confirm`, `estado_oc`, `cod_prov`, `importe_tot`, `gasto_refs`, `gasto_linked_refs` | `json({"ejercicio": N, "nro_oc": N, "uni_compra": N})` |
+| `gasto` | `estado_comprob`, `importe_tot`, `cod_prov` | `json({"ejercicio": N, "nro_reg_comp": N})` |
+| `orden_pago` | `estado_op`, `confirmado`, `fech_confirm`, `importe_total` | `json({"ejercicio": N, "nro_op": N})` |
+| `retencion` | `cod_deduc`, `importe` | `json({"ejercicio": N, "nro_cance": N, "cod_deduc": N})` |
 
 Los extras permiten detectar cambios de estado entre corridas (ej: `estado_oc` guardado vs actual).
 

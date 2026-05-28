@@ -1,452 +1,520 @@
 # RAFAM BA Proveedores Sync
 
-Sincronizador incremental de RAFAM (Oracle) hacia Paxapos, con ejecución por entidad,
-checkpoints persistentes y modo de desarrollo offline usando snapshots CSV.
+Sincronizador incremental de RAFAM (Oracle) hacia Paxapos. El script lee RAFAM en modo
+solo lectura, transforma los datos al contrato del portal de proveedores y los envia al
+migrator RAFAM de Paxapos, manteniendo checkpoints y vinculos RAFAM -> Paxapos en una
+SQLite local.
 
-## Objetivos del proyecto
+Este README cubre el uso diario para desarrollo y el procedimiento recomendado para ejecutar
+en produccion.
 
-- Extraer datos de RAFAM de forma incremental.
-- Procesar y exportar por entidad (`proveedores`, `orden_compra`, `orden_pago`, etc.).
-- Evitar full reload en cada corrida mediante checkpoints.
-- Permitir desarrollo sin acceso a producción (SQLite cargado desde CSV).
+## Documentacion canonica
 
-## Stack técnico
+- [docs/rafam_paxapos_equivalencias.md](docs/rafam_paxapos_equivalencias.md): fuente de verdad de tablas RAFAM, mapeos y contrato Paxapos.
+- [docs/deployment.md](docs/deployment.md): guia extendida de instalacion y operacion.
+- [docs/rafam_der.drawio](docs/rafam_der.drawio): DER grafico del flujo RAFAM.
 
-- Python 3.11+
-- SQLAlchemy 2.x
-- Driver Oracle: `oracledb` (vía `oracle+oracledb://`)
-- SQLite para estado local del sync y modo dev local
-- Pytest
+## Que hace el script
 
-## Arquitectura
+Flujo principal:
 
-- `main.py`: CLI (`status`, `run`, `reset`) y orquestación.
-- `src/source_repository.py`: construcción de consultas SQLAlchemy por entidad.
-- `src/sync_engine.py`: lógica incremental y avance de cursores.
-- `src/checkpoint_store.py`: persistencia ORM de checkpoints en la SQLite local de estado.
-- `src/exporter.py`: destinos de salida (`csv`, `noop`).
-- `scripts/load_csv_to_sqlite.py`: carga snapshots CSV a SQLite para desarrollo.
-
-## Arquitectura de entornos
-
-El flujo tiene tres lugares claramente separados:
-
-- **SOURCE RAFAM**: Oracle RAFAM real, o un snapshot SQLite para desarrollo.
-- **LOCAL**: este servidor/script, con una SQLite de estado para checkpoints y links RAFAM->Paxapos.
-- **DESTINATION Paxapos**: portal de proveedores/CakePHP 2 donde se exporta la información procesada.
-
-El origen soporta dos modos con `RAFAM_SOURCE_BACKEND`:
-
-- `oracle`: conecta a RAFAM productivo o entorno Oracle de integración.
-- `sqlite`: usa una base local (`state/dev_rafam.db`) para desarrollo y tests manuales.
-
-## Perfiles de uso
-
-Hay dos perfiles operativos y no necesitan completar las mismas variables:
-
-- **Operador RAFAM / CSV**: tiene acceso al Oracle RAFAM y genera snapshots CSV. Solo completa `APP_*`, `RAFAM_SOURCE_*` y, si corresponde, `ORACLE_CLIENT_DIR`. No necesita `PAXAPOS_*`.
-- **Operador Paxapos / importacion**: importa o sincroniza hacia Paxapos. Completa `RAFAM_SOURCE_*` o `RAFAM_SOURCE_SQLITE_DB_PATH`, `LOCAL_STATE_DB_PATH` y las variables `PAXAPOS_*` que correspondan al modo usado.
-
-Flujo RAFAM-only:
-
-```bash
-make setup
-make export-rafam-csv
-make export-rafam-csv MONTHS=6 TABLES=PROVEEDORES,ORDEN_PAGO
+```text
+Oracle RAFAM / snapshot SQLite
+        -> main.py + SQLAlchemy
+        -> SQLite local de estado
+        -> Paxapos CakePHP 2 migrator API
 ```
 
-Ese flujo no consulta ni valida credenciales Paxapos.
+Principios operativos:
 
-## Setup rápido (desarrollo local)
+- Oracle RAFAM es solo lectura. El script nunca escribe en RAFAM.
+- Los checkpoints se guardan en `LOCAL_STATE_DB_PATH`.
+- Si una corrida falla, no avanza checkpoint; la siguiente reintenta desde el ultimo lote exitoso.
+- `--dry-run` no avanza checkpoints.
+- El modo migrator usa lock local (`state/migrator.lock`) para evitar corridas concurrentes.
 
-1. Crear entorno virtual e instalar dependencias.
+## Entidades y orden real de migracion
+
+El contrato funcional migra estas tablas RAFAM: `PROVEEDORES`, `ORDEN_COMPRA`, `OC_ITEMS`,
+`CTA_COMPROB`, `ORDEN_PAGO` y `RETENCIONES`.
+
+En el CLI actual, el modo migrator productivo se ejecuta en 3 pasos oficiales:
+
+| Paso | Comando/entidad CLI | Payload Paxapos | Notas |
+| --- | --- | --- | --- |
+| 1 | `proveedores` | `proveedores[]` | Crea/actualiza proveedores. |
+| 2 | `oc_items` | `ordenes_compra[]` | Arma cabecera de OC + items embebidos. |
+| 3 | `orden_pago` | `ordenes_pago[]` + `gastos[]` + retenciones | Vincula o auto-crea gastos desde datos de `CTA_COMPROB` solo cuando la OP resuelve una OC migrada. |
+
+No ejecutar `orden_compra` en migrator para produccion: esa entidad queda reemplazada por
+`oc_items`, que manda la OC completa con items. `solic_gastos` tambien esta deshabilitada en
+migrator productivo: los gastos se resuelven desde el flujo de OP o se crean en Paxapos.
+
+## Requisitos
+
+- Python 3.11 o superior.
+- `make`.
+- Acceso a Oracle RAFAM para produccion o para exportar snapshots.
+- Oracle Instant Client cuando el servidor Oracle lo requiera.
+- Acceso HTTP al portal Paxapos destino para migrator.
+
+El proyecto no usa `requests` ni `httpx`; las llamadas HTTP salen por `urllib`.
+
+## Setup inicial
+
+Desde la carpeta del proyecto:
+
+```bash
+cd rafam-ba-proveedores
+make setup
+```
+
+Eso crea `.venv`, instala `requirements.txt` y copia `.env.example` a `.env` si no existe.
+
+Si preferis hacerlo manualmente:
 
 ```bash
 python -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
-```
-
-2. Configurar entorno.
-
-```bash
 cp .env.example .env
 ```
 
-Para desarrollo offline con snapshots, usar `RAFAM_SOURCE_BACKEND=sqlite`. Para exportar desde RAFAM real, usar `RAFAM_SOURCE_BACKEND=oracle` y completar las credenciales `RAFAM_SOURCE_*`.
+Usamos `.venv/bin/python` en los comandos para evitar problemas con Python de sistema.
 
-3. Cargar CSVs a SQLite local.
+## Desarrollo local con snapshots SQLite
 
-```bash
-.venv/bin/python scripts/load_csv_to_sqlite.py --csv-dir output --output-db state/dev_rafam.db
-```
+Este modo permite trabajar sin acceso al Oracle productivo. Usa CSVs exportados previamente y
+los carga en `state/dev_rafam.db`.
 
-4. Ejecutar sincronización por entidad.
-
-```bash
-.venv/bin/python main.py run --entity proveedores
-.venv/bin/python main.py status
-```
-
-## Uso recomendado (Makefile)
-
-Flujo diario simplificado para el equipo:
-
-```bash
-make setup
-make export-rafam-csv
-make load-dev
-make run-proveedores
-make status
-```
-
-Comandos utiles:
-
-```bash
-make help
-make export-rafam-csv
-make run-all
-make run-orden_compra
-make run-proveedores-gateway
-make run-proveedores-gateway-force-update
-make run-proveedores-migrator-dry
-make migrator-spec
-make reset-proveedores
-make reset-all
-make test
-```
-
-Con variables opcionales:
-
-```bash
-make run-orden_compra BATCH=1000 LIMIT=5000 EXPORT=csv
-```
-
-## Gateway Paxapos (JSON)
-
-Para enviar datos traducidos a Paxapos desde este script:
-
-```bash
-make run-proveedores-gateway
-```
-
-El exporter `gateway` es el endpoint directo legacy de Paxapos para proveedores. Usa el mismo destino `PAXAPOS_URL`/`PAXAPOS_TENANT` que el migrator, pero llama endpoints JSON específicos.
-Para `proveedores` usa por defecto:
-
-```text
-{PAXAPOS_URL}/account/proveedores.json
-```
-
-Headers enviados:
-
-```text
-Content-Type: application/json
-Accept: application/json
-X-Tenant-Id: {PAXAPOS_TENANT}
-Authorization: Bearer {PAXAPOS_JWT}
-```
-
-Configuracion recomendada en `.env`:
+### 1. Configurar `.env` para desarrollo offline
 
 ```dotenv
 APP_ENV=dev
 LOG_LEVEL=DEBUG
-PAXAPOS_URL=https://proveedores.madariaga.gob.ar
-PAXAPOS_TENANT=madariaga
-PAXAPOS_JWT=...
-PAXAPOS_VERIFY_SSL=true
-PAXAPOS_PROVEEDORES_ENDPOINT=account/proveedores.json
-PAXAPOS_PROVEEDORES_UPDATE_ENDPOINT=account/proveedores/edit/{id}.json
-```
 
-Contrato actual del gateway:
-
-- `PAXAPOS_URL`: dominio base del portal de proveedores.
-- `PAXAPOS_TENANT`: tenant enviado en header `X-Tenant-Id` y usado en paths del migrator RAFAM.
-- `PAXAPOS_JWT`: token JWT enviado como `Authorization: Bearer ...` para endpoints directos.
-- `PAXAPOS_VERIFY_SSL`: `false` solo para desarrollo con certificados no confiables.
-- `PAXAPOS_PROVEEDORES_ENDPOINT`: path del endpoint JSON directo.
-- `PAXAPOS_PROVEEDORES_UPDATE_ENDPOINT`: path para update cuando se usa `--force-update` (`{id}` = id remoto).
-
-Modo de operacion (gateway):
-
-- Default (`--force-update` ausente): create-only. Si ya existe vinculacion local, se saltea.
-- Con `--force-update`: si existe vinculacion local RAFAM->Paxapos, se envia update al endpoint de edicion.
-
-## RAFAM Migrator API
-
-El modo `migrator` es el importador batch RAFAM que vive dentro del mismo Paxapos/Portal configurado por `PAXAPOS_URL` y `PAXAPOS_TENANT`. Por eso sus rutas se configuran como paths relativos `PAXAPOS_RAFAM_*_PATH`, no como otra URL base.
-
-Para usar el importador batch oficial de Paxapos en vez del endpoint directo de proveedores:
-
-```dotenv
-PAXAPOS_URL=https://proveedores.madariaga.gob.ar
-PAXAPOS_TENANT=madariaga
-PAXAPOS_API_KEY=...
-PAXAPOS_VERIFY_SSL=true
-PAXAPOS_TIMEOUT_SECONDS=20
-PAXAPOS_RAFAM_IMPORT_PATH=rafam/migracion/importar.json
-PAXAPOS_RAFAM_SPEC_PATH=rafam/migracion/spec.json
-PAXAPOS_RAFAM_LOOKUPS_PATH=rafam/migracion/lookups.json
-```
-
-Uso estandar actualizado:
-
-- URL formada como `{PAXAPOS_URL}/{PAXAPOS_TENANT}/{PAXAPOS_RAFAM_*_PATH}`.
-- Ejemplo producción: `https://proveedores.madariaga.gob.ar/madariaga/rafam/migracion/spec.json`.
-- Ejemplo desarrollo: `https://dev.paxapos.com/prueba/rafam/migracion/spec.json`.
-- `PAXAPOS_RAFAM_*_PATH` siempre debe ser un path relativo, nunca una URL completa.
-- `PAXAPOS_URL` no incluye tenant; `PAXAPOS_TENANT` se usa en la URL y también en el header `X-Tenant-Id`.
-
-Uso inicial recomendado:
-
-```bash
-make migrator-spec
-make migrator-lookups
-make run-proveedores-migrator-dry LIMIT=20 BATCH=20
-make run-proveedores-migrator LIMIT=20 BATCH=20
-make run-ped_items-migrator-dry LIMIT=50 BATCH=50
-make run-oc_items-migrator-dry LIMIT=50 BATCH=50
-```
-
-Comportamiento actual del modo `migrator`:
-
-- Soporta `proveedores`.
-- Soporta `jurisdicciones` como `centros_costo` + `rubros` + `clasificaciones`, y guarda los IDs remotos en SQLite para resolver FKs.
-- Soporta `ped_items` (genera bloque `pedidos` con items para migrator).
-- Soporta `oc_items` (genera bloque `ordenes_compra` con items para migrator).
-- Soporta `solic_gastos` (genera bloque `gastos` — facturas del proveedor).
-- Soporta `orden_pago` (genera bloque `ordenes_pago` — vinculadas a gastos vía `gasto_ids` y fallback `gasto_external_ids`).
-- Si existen tablas RAFAM `RETENCIONES`/`DEDUCCIONES`, agrega retenciones al payload de `ordenes_pago`.
-- Envía payload batch al endpoint `/rafam/migracion/importar.json`.
-- Si Paxapos devuelve errores parciales (`errors` o `stats.*.error > 0`), la corrida falla y no avanza checkpoint.
-- Las opciones batch del migrator activan `auto_create_mercaderia=true` y desactivan el cálculo/notificación automática de retenciones/pagos.
-- `--dry-run` manda `dry_run=true` y no avanza checkpoints.
-- En modo real, persiste el vínculo RAFAM -> Paxapos usando `results.proveedores[].id`.
-
-Catálogos remotos del migrator:
-
-- `make migrator-lookups`
-- `.venv/bin/python main.py lookups`
-- `.venv/bin/python main.py lookups --only mercaderias,unidades_de_medida,tipos_factura,tipos_de_pago,proveedores,gastos`
-
-Notas de mapeo `ped_items` -> `pedidos` y `oc_items` -> `ordenes_compra`:
-
-- `mercaderia_external_ref`: se envía referencia determinística RAFAM para resolución server-side en migrator.
-- `unidad_de_medida_id`: primero busca override local `link_unidad_medida` por `UNI_MED` RAFAM; luego match por `name` normalizado de `unidades_de_medida`; fallback `PAXAPOS_RAFAM_DEFAULT_UNIDAD_ID`, luego lookup `Unidad`, y finalmente `7`.
-- `centro_costo_id`: se resuelve desde `link_centro_costo` generado al importar `jurisdicciones`.
-- Si un item no puede construir referencia externa mínima, se omite y se informa en logs.
-- El matching textual de mercaderías ya no es responsabilidad del script Python.
-
-Notas de mapeo `solic_gastos` -> `gastos`:
-
-- `external_id`: `{ejercicio, deleg_solic, nro_solic}` según spec beta; el link store conserva también el alias legacy `SG-{ejercicio}-{deleg_solic}-{nro_solic}`.
-- `tipo_factura_id`: match por `codename` o `name` de `tipos_factura`; fallback `PAXAPOS_RAFAM_DEFAULT_TIPO_FACTURA_ID`.
-- Excluye solicitudes con `ESTADO_SOLIC=A` (anuladas).
-- `factura_nro`: formateado a 8 dígitos (zfill) desde `NRO_DOC` de RAFAM.
-
-Notas de mapeo `orden_pago` -> `ordenes_pago`:
-
-- `gasto_ids`: IDs internos de Paxapos resueltos desde `link_gasto`.
-- `gasto_external_ids`: referencia estructurada `{ejercicio, deleg_solic, nro_solic}` que el migrator puede resolver como fallback.
-- `retenciones`: si el origen tiene `RETENCIONES`, se mapean por `COD_RET`/`IMPORTE`; el tipo se resuelve desde `link_tipo_retencion`, lookup `tipos_retencion`, o alias (`ganancias`, `iva`, `iibb`, `suss`).
-- Requiere que los gastos (solic_gastos) estén importados previamente.
-- `identificador_pago`: formato `RAFAM-OP-{ejercicio}-{nro_op}` para upsert.
-- `fecha`: solo se envía si `ESTADO_OP=C` (confirmada/pagada).
-- Excluye OPs con `ESTADO_OP=A` (anuladas).
-- OPs sin gasto vinculado vía JOIN `NRO_CANCE=NRO_SOLIC` se omiten con warning.
-
-Comportamiento por entorno:
-
-- `APP_ENV=dev`: si no definis `LOG_LEVEL`, usa `DEBUG`
-- `APP_ENV=prod`: si no definis `LOG_LEVEL`, usa `INFO`
-- `PAXAPOS_VERIFY_SSL=false`: desactiva validacion SSL del destino, util solo en desarrollo.
-- `PAXAPOS_VERIFY_SSL=true`: requerido en produccion.
-
-Payload enviado (CakePHP 2):
-
-```json
-{
-	"Proveedor": {
-		"name": "...",
-		"razon_social": "...",
-		"cuit": "20123456789",
-		"mail": "...",
-		"telefono": "...",
-		"domicilio": "...",
-		"localidad": "...",
-		"provincia": "...",
-		"codigo_postal": "...",
-		"tipo_documento_id": 1,
-		"iva_condicion_id": 1
-	}
-}
-```
-
-Nota sobre rutas CakePHP 2:
-
-- En endpoints directos gateway, el tenant viaja por header `X-Tenant-Id`.
-- En migrator RAFAM, el tenant viaja en la URL final y también por header `X-Tenant-Id`.
-- `PAXAPOS_URL` nunca debe incluir el tenant; el tenant vive en `PAXAPOS_TENANT`.
-- El endpoint de proveedores se consume directo como `account/proveedores.json`.
-
-## CLI
-
-```bash
-.venv/bin/python main.py status
-.venv/bin/python main.py spec --target migrator
-.venv/bin/python main.py lookups --only mercaderias,proveedores
-.venv/bin/python main.py run
-.venv/bin/python main.py run --entity proveedores
-.venv/bin/python main.py run --entity proveedores --export gateway --force-update
-.venv/bin/python main.py run --entity proveedores --export migrator --dry-run
-.venv/bin/python main.py run --entity orden_compra --batch-size 500 --limit 1000
-.venv/bin/python main.py reset --entity proveedores
-.venv/bin/python main.py reset --all
-```
-
-## Checkpoints incrementales
-
-Cada entidad guarda checkpoints en la SQLite configurada por `LOCAL_STATE_DB_PATH`:
-
-- `last_id`
-- `last_ts`
-- `last_run`
-- `records_sent`
-- `status`
-
-Si una corrida falla, no se avanza cursor. La siguiente corrida reintenta sin pérdida.
-
-## Oracle en contenedor (opcional para integración)
-
-Para pruebas de integración SQL Oracle, pueden usar Oracle Free en Docker:
-
-```bash
-docker run -d -p 1521:1521 \
-	-e ORACLE_PASSWORD=TuPasswordSeguro123 \
-	--name oracle-free \
-	container-registry.oracle.com/database/free:latest
-```
-
-Notas:
-
-- No es obligatorio para el día a día del equipo.
-- Para desarrollo funcional y lógica incremental, SQLite + CSV suele ser suficiente.
-- Recomendada su utilización para validar compatibilidad SQL Oracle antes de release.
-
-## Recomendación de flujo profesional
-
-1. Desarrollo diario: `RAFAM_SOURCE_BACKEND=sqlite` con snapshots CSV.
-2. QA técnico: correr pruebas de integración con Oracle en contenedor.
-3. Producción: `RAFAM_SOURCE_BACKEND=oracle` desde Debian con acceso a RAFAM real.
-
-## Ejecución en producción (Migrator API)
-
-Orden de ejecución obligatorio — cada paso depende del anterior:
-
-### 1. Validación previa (dry-run)
-
-Antes de escribir datos reales, verificar con dry-run que todo se mapea correctamente:
-
-```bash
-# Verificar que el migrator es accesible
-make migrator-spec
-make migrator-lookups
-
-# Dry-run de cada entidad con volumen limitado
-make run-proveedores-migrator-dry   LIMIT=100 BATCH=100
-make run-ped_items-migrator-dry     LIMIT=100 BATCH=100
-make run-oc_items-migrator-dry      LIMIT=100 BATCH=100
-make run-solic_gastos-migrator-dry   LIMIT=100 BATCH=100
-make run-orden_pago-migrator-dry     LIMIT=100 BATCH=100
-```
-
-Verificar en los logs que no haya errores y que los conteos `ok` sean correctos.
-
-### 2. Importación real (orden estricto)
-
-```bash
-# Paso 1: Proveedores (sin dependencias)
-make run-proveedores-migrator BATCH=500
-
-# Paso 2: Pedidos (solicitudes internas)
-make run-ped_items-migrator BATCH=500
-
-# Paso 3: Órdenes de compra (necesitan proveedor)
-make run-oc_items-migrator BATCH=500
-
-# Paso 4: Gastos/Facturas (necesitan existir para vincular con OPs)
-make run-solic_gastos-migrator BATCH=500
-
-# Paso 5: Órdenes de pago (necesitan gastos ya importados)
-make run-orden_pago-migrator BATCH=500
-```
-
-**Importante:** `orden_pago` DEBE ejecutarse después de `solic_gastos` porque
-resuelve sus gastos vía `gasto_external_ids` buscando la traza RAFAM:{...}
-que el migrator guarda en la observación de cada gasto importado.
-
-### 3. Variables de entorno para producción con importación Paxapos
-
-```dotenv
-APP_ENV=prod
-LOG_LEVEL=INFO
-RAFAM_SOURCE_BACKEND=oracle
-RAFAM_SOURCE_HOST=ip.del.servidor.rafam
-RAFAM_SOURCE_PORT=1521
-RAFAM_SOURCE_SERVICE=BDRAFAM
-RAFAM_SOURCE_USER=usuario_lectura
-RAFAM_SOURCE_PASSWORD=secreto
+RAFAM_SOURCE_BACKEND=sqlite
+RAFAM_SOURCE_SQLITE_DB_PATH=state/dev_rafam.db
 
 LOCAL_STATE_DB_PATH=state/checkpoint.db
 
-PAXAPOS_URL=https://proveedores.madariaga.gob.ar
-PAXAPOS_TENANT=madariaga
-PAXAPOS_API_KEY=api_key_real
+# Solo completar si vas a probar el migrator contra Paxapos.
+PAXAPOS_URL=
+PAXAPOS_TENANT=
+PAXAPOS_API_KEY=
 PAXAPOS_VERIFY_SSL=true
-PAXAPOS_TIMEOUT_SECONDS=30
+PAXAPOS_TIMEOUT_SECONDS=20
 PAXAPOS_RAFAM_IMPORT_PATH=rafam/migracion/importar.json
 PAXAPOS_RAFAM_SPEC_PATH=rafam/migracion/spec.json
 PAXAPOS_RAFAM_LOOKUPS_PATH=rafam/migracion/lookups.json
 PAXAPOS_RAFAM_DEFAULT_UNIDAD_ID=1
 PAXAPOS_RAFAM_DEFAULT_TIPO_FACTURA_ID=
 PAXAPOS_RAFAM_DEFAULT_TIPO_PAGO_ID=1
-RAFAM_SYNC_BATCH_DELAY_SECONDS=2
+RAFAM_SYNC_BATCH_DELAY_SECONDS=0
+RAFAM_EJERCICIO_MIN=2026
 ```
 
-Para producción RAFAM-only que solo genera CSVs, el bloque `PAXAPOS_*` no es necesario.
-Antes de una importación real, confirmar `PAXAPOS_RAFAM_DEFAULT_UNIDAD_ID` con `make migrator-lookups`, porque los IDs de catálogos pueden variar por tenant.
+Si solo vas a generar CSV o probar lectura local con `--export csv`, no hace falta completar
+`PAXAPOS_*`.
 
-### 4. Verificación post-importación
+### 2. Cargar CSVs a SQLite
+
+Con los snapshots incluidos o generados en `output/rafam_ultimos_3_meses`:
 
 ```bash
-# Ver estado de checkpoints
-make status
-
-# Si algo falló, se puede re-ejecutar el mismo make.
-# El sistema es incremental: no duplica datos ya enviados.
+make load-dev CSV_DIR=output/rafam_ultimos_3_meses DEV_DB=state/dev_rafam.db
 ```
 
-### 5. Re-ejecución y recuperación de errores
+El loader toma el CSV mas reciente de cada entidad, normaliza columnas de joins y crea una vista
+`CTA_HOJA_DE_RUTA` derivada cuando hace falta.
 
-- Si una corrida falla a mitad de camino, el checkpoint no avanza.
-- La siguiente ejecución retoma desde el último lote exitoso.
-- Para forzar una recarga completa de una entidad:
+### 3. Ejecutar pruebas locales sin Paxapos
+
+Exportar a CSV:
+
+```bash
+make run-proveedores EXPORT=csv LIMIT=100
+make run-oc_items EXPORT=csv LIMIT=100
+make run-orden_pago EXPORT=csv LIMIT=100
+```
+
+Validar queries y checkpoints sin escribir archivos:
+
+```bash
+.venv/bin/python main.py run --entity proveedores --export noop --limit 100
+.venv/bin/python main.py status
+```
+
+Resetear estado local:
+
+```bash
+make reset-all
+```
+
+### 4. Probar migrator en desarrollo
+
+Completar `PAXAPOS_URL`, `PAXAPOS_TENANT` y `PAXAPOS_API_KEY` en `.env` y validar el destino:
+
+```bash
+make migrator-spec
+make migrator-lookups
+```
+
+Dry-run completo con volumen limitado:
+
+```bash
+make migrate-all-dry LIMIT=20 BATCH=20
+```
+
+Dry-run por paso:
+
+```bash
+make migrate-proveedores-dry LIMIT=20 BATCH=20
+make migrate-oc-dry          LIMIT=20 BATCH=20
+make migrate-op-dry          LIMIT=20 BATCH=20
+```
+
+Recordatorio: `--dry-run` envia `dry_run=true` al migrator y no avanza checkpoints.
+
+### 5. Tests
+
+```bash
+make test
+```
+
+Los tests corren contra SQLite/mocks y no requieren Oracle.
+
+## Exportar snapshots desde RAFAM
+
+Perfil RAFAM-only: sirve para el operador que tiene acceso a Oracle y solo necesita generar CSVs.
+No requiere variables `PAXAPOS_*`.
+
+`.env` minimo:
+
+```dotenv
+APP_ENV=prod
+LOG_LEVEL=INFO
+
+RAFAM_SOURCE_BACKEND=oracle
+RAFAM_SOURCE_HOST=<ip-servidor-rafam>
+RAFAM_SOURCE_PORT=1521
+RAFAM_SOURCE_SERVICE=BDRAFAM
+RAFAM_SOURCE_USER=<usuario-solo-lectura>
+RAFAM_SOURCE_PASSWORD=<password>
+
+# Opcional si hace falta thick mode / Instant Client.
+ORACLE_CLIENT_DIR=/opt/oracle/instantclient
+```
+
+Exportar ultimos 3 meses:
+
+```bash
+.venv/bin/python scripts/export_last_3_months.py
+```
+
+Exportar otro rango o tablas puntuales:
+
+```bash
+.venv/bin/python scripts/export_last_3_months.py --months 6
+.venv/bin/python scripts/export_last_3_months.py --months 6 --tables PROVEEDORES,ORDEN_PAGO,RETENCIONES
+```
+
+Los CSV quedan en `output/rafam_ultimos_3_meses/` por defecto.
+
+## Produccion con Paxapos migrator
+
+Este es el modo recomendado para importar datos reales hacia el portal de proveedores.
+
+### 1. Preparar `.env` productivo
+
+```dotenv
+APP_ENV=prod
+LOG_LEVEL=INFO
+
+RAFAM_SOURCE_BACKEND=oracle
+RAFAM_SOURCE_HOST=<ip-servidor-rafam>
+RAFAM_SOURCE_PORT=1521
+RAFAM_SOURCE_SERVICE=BDRAFAM
+RAFAM_SOURCE_USER=<usuario-solo-lectura>
+RAFAM_SOURCE_PASSWORD=<password>
+ORACLE_CLIENT_DIR=/opt/oracle/instantclient
+
+LOCAL_STATE_DB_PATH=state/checkpoint.db
+
+PAXAPOS_URL=https://proveedores.madariaga.gob.ar
+PAXAPOS_TENANT=madariaga
+PAXAPOS_API_KEY=<api-key-real>
+PAXAPOS_VERIFY_SSL=true
+PAXAPOS_TIMEOUT_SECONDS=30
+
+PAXAPOS_RAFAM_IMPORT_PATH=rafam/migracion/importar.json
+PAXAPOS_RAFAM_SPEC_PATH=rafam/migracion/spec.json
+PAXAPOS_RAFAM_LOOKUPS_PATH=rafam/migracion/lookups.json
+
+# Confirmar IDs con make migrator-lookups antes de importar.
+PAXAPOS_RAFAM_DEFAULT_UNIDAD_ID=1
+PAXAPOS_RAFAM_DEFAULT_TIPO_FACTURA_ID=
+PAXAPOS_RAFAM_DEFAULT_TIPO_PAGO_ID=1
+
+RAFAM_SYNC_BATCH_DELAY_SECONDS=2
+RAFAM_EJERCICIO_MIN=2026
+```
+
+Notas importantes:
+
+- `PAXAPOS_URL` no incluye tenant.
+- Las URLs migrator se arman como `{PAXAPOS_URL}/{PAXAPOS_TENANT}/{PAXAPOS_RAFAM_*_PATH}`.
+- El tenant tambien viaja en header `X-Tenant-Id`.
+- Para scripts productivos se recomienda `PAXAPOS_API_KEY`.
+- `PAXAPOS_VERIFY_SSL=false` solo debe usarse en desarrollo.
+- `RAFAM_EJERCICIO_MIN` no filtra proveedores ni la query de OPs; aplica a OCs (`orden_compra`/`oc_items`). Si una OP confirmada dentro del alcance actual (`EJERCICIO >= mínimo` o `FECH_CONFIRM` desde el 1/1 del mínimo) requiere una OC anterior, esa OC se incluye igual para no crear pagos o gastos sueltos. Las OPs históricas fuera de ese alcance no arrastran OCs viejas.
+
+### 2. Validacion previa obligatoria
+
+Antes de escribir datos reales:
+
+```bash
+make migrator-spec
+make migrator-lookups
+make status
+```
+
+Confirmar en `migrator-lookups` los IDs default de unidad, tipo de factura y tipo de pago.
+
+Luego correr dry-run con volumen acotado:
+
+```bash
+make migrate-all-dry LIMIT=100 BATCH=100
+```
+
+Si falla el dry-run, corregir mapeos/configuracion antes de avanzar.
+
+### 3. Primera importacion real
+
+Ejecutar en orden estricto:
+
+```bash
+make migrate-proveedores BATCH=500
+make migrate-oc          BATCH=500
+make migrate-op          BATCH=500
+```
+
+Atajo equivalente:
+
+```bash
+make migrate-all BATCH=500
+```
+
+En modo real, cada paso avanza checkpoint solo si el lote termina sin errores parciales del
+migrator.
+
+### 4. Corridas incrementales
+
+Para una corrida completa incremental:
+
+```bash
+.venv/bin/python main.py run --export migrator --batch-size 500
+```
+
+Ese comando, sin `--entity`, ejecuta solo las 3 entidades oficiales del migrator en orden:
+`proveedores`, `oc_items`, `orden_pago`.
+
+Tambien se puede usar:
+
+```bash
+make migrate-all BATCH=500
+```
+
+### 5. Crontab Debian sin sudo para las 3 pasadas oficiales
+
+Si no hay acceso `sudo` al servidor, configurar el cron del usuario que tiene el proyecto y la
+`.env` productiva. El ejemplo usa `flock` para evitar corridas superpuestas si una importacion
+tarda mas que el intervalo.
+
+Preparar carpetas una vez, desde el usuario que ejecuta el migrator:
+
+```bash
+cd /home/rafam/rafam-ba-proveedores
+mkdir -p logs state
+```
+
+Reemplazar `/home/rafam/rafam-ba-proveedores` por la ruta real del proyecto en el servidor.
+
+Editar el crontab del usuario:
+
+```bash
+crontab -e
+```
+
+Agregar:
+
+```cron
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+MAILTO=""
+
+RAFAM_DIR=/home/rafam/rafam-ba-proveedores
+
+# Pipeline oficial cada 15 minutos.
+# Cada entidad corre independiente: si una falla, las otras siguen.
+# Logs rotativos por mes en logs/rafam-{entidad}-YYYY-MM.log (gestionado por main.py).
+# flock con lock separado por entidad evita corridas superpuestas.
+
+# 1) PROVEEDORES -> account_proveedores
+*/15 * * * * cd "$RAFAM_DIR" && /usr/bin/flock -n state/prov.lock .venv/bin/python main.py run --entity proveedores --export migrator --batch-size 500
+
+# 2) ORDEN_COMPRA + OC_ITEMS -> compras_pedidos + items
+*/15 * * * * cd "$RAFAM_DIR" && /usr/bin/flock -n state/oc.lock .venv/bin/python main.py run --entity oc_items --export migrator --batch-size 500
+
+# 3) ORDEN_PAGO + CTA_COMPROB + RETENCIONES -> egresos + gastos + retenciones
+*/15 * * * * cd "$RAFAM_DIR" && /usr/bin/flock -n state/op.lock .venv/bin/python main.py run --entity orden_pago --export migrator --batch-size 500
+```
+
+Notas sobre el crontab:
+
+- No hace falta redirigir stdout/stderr con `>>`: `main.py` escribe automaticamente a
+  `logs/rafam-{entidad}-YYYY-MM.log` (rotacion mensual). Se puede cambiar la carpeta con
+  la variable de entorno `RAFAM_LOG_DIR`.
+- Cada entidad tiene su propio lock (`prov.lock`, `oc.lock`, `op.lock`). Si una tarda
+  mas de 15 minutos, `flock -n` salta esa entidad sin bloquear las otras.
+- Si una entidad falla (ej: CUIT invalido en proveedores), OC y OP siguen corriendo.
+
+Verificar que quedo instalado:
+
+```bash
+crontab -l
+```
+
+Ver logs en vivo (reemplazar `YYYY-MM` por el mes actual):
+
+```bash
+tail -f logs/rafam-proveedores-2026-05.log
+tail -f logs/rafam-oc_items-2026-05.log
+tail -f logs/rafam-orden_pago-2026-05.log
+```
+
+Para probar exactamente lo que ejecuta cron antes de dejarlo activo:
+
+```bash
+cd /home/rafam/rafam-ba-proveedores
+.venv/bin/python main.py run --entity proveedores --export migrator --batch-size 500 --dry-run
+.venv/bin/python main.py run --entity oc_items --export migrator --batch-size 500 --dry-run
+.venv/bin/python main.py run --entity orden_pago --export migrator --batch-size 500 --dry-run
+```
+
+### 6. Verificacion post-importacion
+
+```bash
+make status
+```
+
+Revisar tambien los logs del portal Paxapos si el migrator devuelve errores parciales.
+
+## Recuperacion y re-ejecucion
+
+Si una corrida falla:
+
+1. El checkpoint de la entidad queda en error o sin avanzar.
+2. Corregir la causa en datos/configuracion/mapeo.
+3. Ejecutar nuevamente el mismo comando.
+
+Para forzar recarga completa de una entidad:
 
 ```bash
 make reset-proveedores
-make run-proveedores-migrator
+make migrate-proveedores BATCH=500
 ```
 
----
-
-## Tests
+Para reiniciar todo el pipeline:
 
 ```bash
-.venv/bin/python -m pytest -q
+make reset-all
+make migrate-all BATCH=500
 ```
 
-## Nota de ejecucion
+`reset` borra tambien vinculos locales RAFAM -> Paxapos para la entidad afectada. Usarlo con cuidado en produccion.
 
-Los comandos del README usan `.venv/bin/python` a proposito para evitar errores
-por Python de sistema (`externally-managed-environment`) y mantener ejecuciones
-consistentes entre desarrolladores.
+## Modo gateway directo legacy
+
+El exporter `gateway` existe para proveedores y usa endpoints JSON directos de Paxapos. Es util para
+mantenimiento puntual, pero el flujo productivo recomendado es `--export migrator`.
+
+Variables necesarias:
+
+```dotenv
+PAXAPOS_URL=https://proveedores.madariaga.gob.ar
+PAXAPOS_TENANT=madariaga
+PAXAPOS_JWT=<jwt>
+PAXAPOS_PROVEEDORES_ENDPOINT=account/proveedores.json
+PAXAPOS_PROVEEDORES_UPDATE_ENDPOINT=account/proveedores/edit/{id}.json
+```
+
+Crear solo proveedores nuevos:
+
+```bash
+.venv/bin/python main.py run --entity proveedores --export gateway
+```
+
+Actualizar proveedores ya vinculados localmente:
+
+```bash
+.venv/bin/python main.py run --entity proveedores --export gateway --force-update
+```
+
+## Referencia rapida de comandos
+
+| Comando | Uso |
+| --- | --- |
+| `make setup` | Crea `.venv`, instala dependencias y crea `.env` si no existe. |
+| `make load-dev CSV_DIR=...` | Carga CSVs a `state/dev_rafam.db`. |
+| `make status` | Muestra checkpoints. |
+| `make run-proveedores EXPORT=csv` | Export local de proveedores. |
+| `make run-oc_items EXPORT=csv` | Export local de OCs con items. |
+| `make run-orden_pago EXPORT=csv` | Export local de OPs. |
+| `make migrator-spec` | Consulta contrato remoto del migrator. |
+| `make migrator-lookups` | Consulta catalogos remotos. |
+| `make migrate-proveedores-dry` | Dry-run de proveedores. |
+| `make migrate-oc-dry` | Dry-run de OCs. |
+| `make migrate-op-dry` | Dry-run de OPs. |
+| `make migrate-all-dry` | Dry-run del pipeline oficial completo. |
+| `make migrate-all` | Import real del pipeline oficial completo. |
+| `make reset-all` | Resetea checkpoints y links locales. |
+| `make test` | Corre pytest. |
+
+Variables Make utiles:
+
+```bash
+BATCH=500 LIMIT=100 EXPORT=csv CSV_DIR=output/rafam_ultimos_3_meses DEV_DB=state/dev_rafam.db
+```
+
+## Archivos generados
+
+| Ruta | Descripcion |
+| --- | --- |
+| `state/dev_rafam.db` | Snapshot SQLite de RAFAM para desarrollo. |
+| `state/checkpoint.db` | Checkpoints y vinculos RAFAM -> Paxapos. |
+| `state/migrator.lock` | Lock de corridas concurrentes (migrator). |
+| `state/prov.lock`, `oc.lock`, `op.lock` | Locks de cron por entidad. |
+| `output/*.csv` | Exportaciones CSV por entidad. |
+| `output/rafam_ultimos_3_meses/*.csv` | Snapshots exportados desde Oracle. |
+| `logs/rafam-{entidad}-YYYY-MM.log` | Logs rotativos mensuales por entidad (auto-generados). |
+
+No commitear `.env`, `state/*.db`, logs ni CSVs productivos.
+
+## Problemas comunes
+
+| Sintoma | Causa probable | Accion |
+| --- | --- | --- |
+| `Faltan RAFAM_SOURCE_USER/RAFAM_SOURCE_PASSWORD` | `.env` incompleto para Oracle. | Completar credenciales o usar `RAFAM_SOURCE_BACKEND=sqlite`. |
+| `DPI-1047` | Oracle Instant Client no encontrado. | Configurar `ORACLE_CLIENT_DIR` o instalar Instant Client. |
+| `ORA-12170` | Sin red/VPN hacia Oracle. | Verificar conectividad al host RAFAM. |
+| `ORA-01017` | Usuario/password Oracle incorrectos. | Revisar credenciales con DBA. |
+| `Respuesta no JSON` o redirect a login | Auth Paxapos incorrecta o endpoint equivocado. | Validar `PAXAPOS_API_KEY`, tenant y paths. |
+| Checkpoint no avanza | Hubo error en el lote. | Leer logs, corregir y reejecutar. |
+| Lock activo / exit 75 | Ya hay un `main.py run` corriendo. | Esperar a que termine; si quedo stale, verificar procesos antes de borrar `state/migrator.lock`. |
+
+## Seguridad operativa
+
+- No subir `.env` ni logs con credenciales.
+- No pegar salidas de comandos que expandan variables sensibles.
+- En produccion usar `PAXAPOS_VERIFY_SSL=true`.
+- El usuario Oracle debe tener permisos `SELECT` solamente sobre las tablas RAFAM necesarias.

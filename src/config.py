@@ -4,16 +4,44 @@ The query layer builds SQLAlchemy expressions from this metadata, avoiding
 hand-written SQL in application code.
 """
 
+import os
+from pathlib import Path
+
+from dotenv import load_dotenv
+
 from .models import EntityConfig
+
+# load_dotenv() MUST run before reading env vars, because this module is
+# imported before main.py calls load_dotenv().  It's idempotent so safe
+# to call multiple times.
+# Use explicit path because find_dotenv() from src/ may not locate the
+# project root .env depending on python-dotenv version.
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+load_dotenv(_PROJECT_ROOT / ".env")
 
 SCHEMA = "OWNER_RAFAM"
 
+_raw_ejercicio_min = os.getenv("RAFAM_EJERCICIO_MIN", "0").strip()
+try:
+    _EJERCICIO_MIN = int(_raw_ejercicio_min) if _raw_ejercicio_min else None
+except ValueError:
+    import logging as _logging
+    _logging.getLogger(__name__).warning(
+        "RAFAM_EJERCICIO_MIN invalido: %r — ignorado (sin filtro de ejercicio)",
+        _raw_ejercicio_min,
+    )
+    _EJERCICIO_MIN = None
+_EJERCICIO_MIN = _EJERCICIO_MIN or None
+_EJERCICIO_MIN_ENTITIES = {
+    "orden_compra",
+    "oc_items",
+}
+
+
+def _ejercicio_min_for(entity: str) -> int | None:
+    return _EJERCICIO_MIN if entity in _EJERCICIO_MIN_ENTITIES else None
+
 ENTITY_CONFIGS: dict[str, EntityConfig] = {
-    "jurisdicciones": EntityConfig(
-        name="jurisdicciones",
-        table_name="JURISDICCIONES",
-        full_load=True,  # small reference table — always full scan
-    ),
     "proveedores": EntityConfig(
         name="proveedores",
         table_name="PROVEEDORES",
@@ -23,11 +51,13 @@ ENTITY_CONFIGS: dict[str, EntityConfig] = {
         name="pedidos",
         table_name="PEDIDOS",
         ts_field="FECH_EMI",
+        ejercicio_min=_ejercicio_min_for("pedidos"),
     ),
     "ped_items": EntityConfig(
         name="ped_items",
         table_name="PED_ITEMS",
         full_load=True,  # no reliable cursor column yet — confirm with explore_schema.py
+        ejercicio_min=_ejercicio_min_for("ped_items"),
     ),
     "orden_compra": EntityConfig(
         name="orden_compra",
@@ -37,11 +67,13 @@ ENTITY_CONFIGS: dict[str, EntityConfig] = {
         pending_state_field="ESTADO_OC",
         pending_state_value="N",
         pending_reprocess_days=30,
+        ejercicio_min=_ejercicio_min_for("orden_compra"),
     ),
     "oc_items": EntityConfig(
         name="oc_items",
         table_name="OC_ITEMS",
         full_load=True,  # no date/timestamp column in table
+        ejercicio_min=_ejercicio_min_for("oc_items"),
     ),
     "solic_gastos": EntityConfig(
         name="solic_gastos",
@@ -52,15 +84,17 @@ ENTITY_CONFIGS: dict[str, EntityConfig] = {
         pending_state_field="ESTADO_SOLIC",
         pending_state_value="C",
         pending_reprocess_days=30,
+        ejercicio_min=_ejercicio_min_for("solic_gastos"),
     ),
     "orden_pago": EntityConfig(
         name="orden_pago",
         table_name="ORDEN_PAGO",
-        ts_field="FECH_OP",
-        # Re-process pending payments from recent days in case their
-        # state changed from N→C or N→A after they were first synced.
+        ts_field="FECH_CONFIRM",
+        # Re-process confirmed normal payments from recent days in case their
+        # linked gastos became available after the first attempt.
         pending_state_field="ESTADO_OP",
-        pending_state_value="N",
+        pending_state_value="C",
         pending_reprocess_days=30,
+        ejercicio_min=_ejercicio_min_for("orden_pago"),
     ),
 }

@@ -97,7 +97,9 @@ class TestExtractCursorValues:
         rows = [(1, ts_old), (2, ts_new), (3, None)]
 
         _, last_ts = engine.extract_cursor_values(columns, rows, "proveedores")
-        assert last_ts == ts_new
+        # extract_cursor_values normaliza naive -> aware UTC para evitar
+        # comparaciones rotas downstream.
+        assert last_ts == ts_new.replace(tzinfo=timezone.utc)
 
     def test_extracts_max_id(self, engine):
         columns = ["NRO_PEDIDO", "FECHA_PEDIDO"]
@@ -141,8 +143,10 @@ class TestSourceRepository:
             stmt = repo.build_statement("proveedores", cp)
             rows = repo.execute(stmt).all()
 
-        assert len(rows) == 1
-        assert rows[0].COD_PROV == 2
+        # Cursor `>=`: la fila con ts == checkpoint se reenvia (idempotencia
+        # remota deduplica). Esperamos las 2 filas, no solo la nueva.
+        assert len(rows) == 2
+        assert {r.COD_PROV for r in rows} == {1, 2}
 
     def test_incremental_filter_full_load_ignores_checkpoint(self):
         """Entidades full_load devuelven todos los registros sin importar el checkpoint."""

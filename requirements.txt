@@ -2,3 +2,4 @@ oracledb
 SQLAlchemy>=2.0
 python-dotenv
 pytest
+coverage

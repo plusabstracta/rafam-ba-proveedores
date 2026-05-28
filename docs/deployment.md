@@ -92,14 +92,15 @@ El script usa un usuario de **solo lectura**. El DBA debe ejecutar:
 CREATE USER rafam_ro IDENTIFIED BY <password>;
 GRANT CREATE SESSION TO rafam_ro;
 
-GRANT SELECT ON OWNER_RAFAM.PROVEEDORES    TO rafam_ro;
-GRANT SELECT ON OWNER_RAFAM.JURISDICCIONES TO rafam_ro;
-GRANT SELECT ON OWNER_RAFAM.PEDIDOS        TO rafam_ro;
-GRANT SELECT ON OWNER_RAFAM.PED_ITEMS      TO rafam_ro;
-GRANT SELECT ON OWNER_RAFAM.SOLIC_GASTOS   TO rafam_ro;
-GRANT SELECT ON OWNER_RAFAM.ORDEN_COMPRA   TO rafam_ro;
-GRANT SELECT ON OWNER_RAFAM.OC_ITEMS       TO rafam_ro;
-GRANT SELECT ON OWNER_RAFAM.ORDEN_PAGO     TO rafam_ro;
+GRANT SELECT ON OWNER_RAFAM.PROVEEDORES       TO rafam_ro;
+GRANT SELECT ON OWNER_RAFAM.ORDEN_COMPRA      TO rafam_ro;
+GRANT SELECT ON OWNER_RAFAM.OC_ITEMS          TO rafam_ro;
+GRANT SELECT ON OWNER_RAFAM.CTA_COMPROB       TO rafam_ro;
+GRANT SELECT ON OWNER_RAFAM.REG_COMP          TO rafam_ro;
+GRANT SELECT ON OWNER_RAFAM.CTA_HOJA_DE_RUTA  TO rafam_ro;
+GRANT SELECT ON OWNER_RAFAM.ORDEN_PAGO        TO rafam_ro;
+GRANT SELECT ON OWNER_RAFAM.RETENCIONES       TO rafam_ro;
+GRANT SELECT ON OWNER_RAFAM.DEDUCCIONES       TO rafam_ro;
 ```
 
 ---
@@ -156,14 +157,12 @@ Dependiendo del volumen puede tardar. Se recomienda:
 
 ```bash
 # Correr entidad por entidad para monitorear
-.venv/bin/python main.py run --entity=jurisdicciones
 .venv/bin/python main.py run --entity=proveedores
-.venv/bin/python main.py run --entity=pedidos
-.venv/bin/python main.py run --entity=ped_items
-.venv/bin/python main.py run --entity=solic_gastos
 .venv/bin/python main.py run --entity=orden_compra
 .venv/bin/python main.py run --entity=oc_items
+.venv/bin/python main.py run --entity=cta_comprob
 .venv/bin/python main.py run --entity=orden_pago
+.venv/bin/python main.py run --entity=retenciones
 ```
 
 ---

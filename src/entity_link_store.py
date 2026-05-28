@@ -9,17 +9,14 @@ _TABLE_PREFIX = "link_"
 # Override via the ``schemas`` parameter in EntityLinkStore.__init__().
 DEFAULT_LINK_SCHEMAS: dict[str, list[str]] = {
     "proveedores": ["cuit", "cod_estado"],
-    "centro_costo": [],
-    "clasificacion": [],
-    "rubro": [],
     "unidad_medida": ["name", "codigo"],
     "tipo_factura": ["name", "codigo"],
     "tipo_pago": ["name", "codigo"],
     "tipo_retencion": ["name", "codigo"],
     "pedido": [],
-    "orden_compra": ["fech_confirm", "estado_oc", "cod_prov", "importe_tot", "gasto_refs"],
+    "orden_compra": ["fech_confirm", "estado_oc", "cod_prov", "importe_tot", "gasto_refs", "gasto_linked_refs", "paxapos_gasto_ids", "has_op"],
     "gasto": ["estado_solic", "importe_tot", "cod_prov"],
-    "orden_pago": ["estado_op", "importe_total"],
+    "orden_pago": ["estado_op", "confirmado", "fech_confirm", "importe_total"],
 }
 
 
@@ -39,8 +36,17 @@ class EntityLinkStore:
             db_path = os.getenv("LOCAL_STATE_DB_PATH", "state/checkpoint.db")
         self._db_path = Path(db_path)
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(self._db_path))
+        # timeout=5: tolera locks transitorios. WAL + busy_timeout aplicados
+        # explicitamente porque sqlite3.connect() crudo no comparte los pragmas
+        # de SQLAlchemy (db.py) — son procesos/conexiones distintas.
+        self._conn = sqlite3.connect(str(self._db_path), timeout=5.0)
         self._conn.row_factory = sqlite3.Row
+        try:
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA synchronous=NORMAL")
+            self._conn.execute("PRAGMA busy_timeout=5000")
+        except sqlite3.Error:
+            pass
         self._schemas = schemas if schemas is not None else DEFAULT_LINK_SCHEMAS
         self._created_tables: set[str] = set()
         self._ensure_all_tables()
@@ -85,6 +91,22 @@ class EntityLinkStore:
 
     def close(self) -> None:
         self._conn.close()
+
+    # ── reset ─────────────────────────────────────────────────────────────
+
+    def clear_entity(self, entity: str) -> int:
+        """Delete all links for a single entity. Returns rows deleted."""
+        table = self._ensure_table(entity)
+        cursor = self._conn.execute(f"DELETE FROM [{table}]")
+        self._conn.commit()
+        return cursor.rowcount
+
+    def clear_all(self) -> dict[str, int]:
+        """Delete all links for every entity in the schema. Returns {entity: rows_deleted}."""
+        result: dict[str, int] = {}
+        for entity in self._schemas:
+            result[entity] = self.clear_entity(entity)
+        return result
 
     # ── public API ────────────────────────────────────────────────────────
 
@@ -135,6 +157,15 @@ class EntityLinkStore:
         if not row:
             return None
         return dict(row)
+
+    def mark_oc_has_op(self, source_key: str) -> None:
+        """Flag an OC as having an associated OP (orden de pago)."""
+        table = self._ensure_table("orden_compra")
+        self._conn.execute(
+            f"UPDATE [{table}] SET [has_op] = '1', updated_at = datetime('now') WHERE source_key = ?",
+            (source_key,),
+        )
+        self._conn.commit()
 
     def get_sent_oc_gasto_refs(self) -> set[str]:
         """Return gasto rafam_refs linked to OCs that have been sent to Paxapos."""
