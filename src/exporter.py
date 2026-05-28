@@ -1668,6 +1668,7 @@ class MigratorExporter(BaseExporter):
         grouped_pedido_ids: dict[tuple[int, int], list[int]] = {}
         grouped_pedido_internal_ids: dict[tuple[int, int], list[str]] = {}
         grouped_oc_source_keys: dict[tuple[int, int], list[str]] = {}
+        grouped_has_opi: set[tuple[int, int]] = set()
         raw_by_source_key: dict[str, dict] = {}
         # cc_raw_by_key: dedup por comprobante fiscal real para emitir gastos[]
         # con datos de CTA_COMPROB (importe, fecha, tipo, vencimiento). La key
@@ -1687,6 +1688,12 @@ class MigratorExporter(BaseExporter):
                 continue
 
             key = (ejercicio, nro_op)
+
+            if any(
+                str(raw.get(field) or "").strip()
+                for field in ("OPI_NRO_REG_COMP", "OPI_TIPO_COMPROB", "OPI_NRO_COMPROB", "OPI_COD_PROV")
+            ):
+                grouped_has_opi.add(key)
 
             # Recolectar ref de gasto desde columnas del LEFT JOIN
             sg_deleg = self._to_int(raw.get("SG_DELEG_SOLIC"))
@@ -1871,6 +1878,9 @@ class MigratorExporter(BaseExporter):
         included_cc_key_set: set[tuple[str, str, str]] = set()
         cc_key_to_pedido_id: dict[tuple[str, str, str], int] = {}
         skipped_no_gasto = 0
+        skipped_no_opi = 0
+        skipped_no_comprobante = 0
+        skipped_no_oc_canonica = 0
         skipped_no_oc_link = 0
         skipped_multiple_oc = 0
         warned_facturas_exceed_oc = 0
@@ -1878,10 +1888,18 @@ class MigratorExporter(BaseExporter):
             cc_nros = grouped_cc_nros.get(key, [])
             if not cc_nros:
                 skipped_no_gasto += 1
-                logger.debug(
-                    "Migrator [orden_pago] OP %s-%s omitida: sin OPI_NRO_COMPROB",
-                    key[0], key[1],
-                )
+                if key not in grouped_has_opi:
+                    skipped_no_opi += 1
+                    logger.debug(
+                        "Migrator [orden_pago] OP %s-%s omitida: sin ORDEN_PAGO_IMPUT",
+                        key[0], key[1],
+                    )
+                else:
+                    skipped_no_comprobante += 1
+                    logger.debug(
+                        "Migrator [orden_pago] OP %s-%s omitida: sin OPI_NRO_COMPROB",
+                        key[0], key[1],
+                    )
                 continue
 
             # Asignar gasto_nro_comprobante (string o array)
@@ -1902,12 +1920,22 @@ class MigratorExporter(BaseExporter):
                 )
                 continue
             else:
-                skipped_no_oc_link += 1
+                oc_source_keys = grouped_oc_source_keys.get(key, [])
                 internal_ids = grouped_pedido_internal_ids.get(key, [])
+                if not oc_source_keys:
+                    skipped_no_oc_canonica += 1
+                    logger.debug(
+                        "Migrator [orden_pago] OP %s-%s omitida: sin OC canonica en "
+                        "REG_COMP imputado por ORDEN_PAGO_IMPUT (pedido_internal_id candidatos=%s)",
+                        key[0], key[1], internal_ids,
+                    )
+                    continue
+
+                skipped_no_oc_link += 1
                 logger.debug(
                     "Migrator [orden_pago] OP %s-%s omitida: sin OC migrada en link_store "
-                    "(pedido_internal_id candidatos=%s)",
-                    key[0], key[1], internal_ids,
+                    "(oc_source_keys=%s, pedido_internal_id candidatos=%s)",
+                    key[0], key[1], oc_source_keys, internal_ids,
                 )
                 continue
 
@@ -1981,8 +2009,14 @@ class MigratorExporter(BaseExporter):
         if skipped_no_gasto:
             logger.warning(
                 "Migrator [orden_pago]: %d OPs omitidas sin gasto vinculado "
-                "(ni ORDEN_PAGO_IMPUT ni fallback SG→REG_COMP→CTA_COMPROB resolvieron)",
-                skipped_no_gasto,
+                "(sin ORDEN_PAGO_IMPUT=%d, sin OPI_NRO_COMPROB=%d)",
+                skipped_no_gasto, skipped_no_opi, skipped_no_comprobante,
+            )
+        if skipped_no_oc_canonica:
+            logger.warning(
+                "Migrator [orden_pago]: %d OPs omitidas sin OC canonica en RAFAM; "
+                "no se crean pagos ni gastos sueltos",
+                skipped_no_oc_canonica,
             )
         if skipped_no_oc_link:
             logger.warning(
