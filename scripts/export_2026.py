@@ -55,14 +55,19 @@ DATE_COL_PRIORITY: dict[str, list[str]] = {
     "ORDEN_PAGO":   ["FECH_OP", "FECH_CONFIRM"],
     "CTA_COMPROB":  ["FECH_MOVIM", "FECH_COMPROB"],
     "REG_COMP":     ["FECH_REG_COMP", "FECH_CONFIRM"],
-    "DEDUCCIONES":  ["FECH_DEDUC"],
-    "RETENCIONES":  ["FECH_RETEN"],
+    "DEDUCCIONES":    ["FECH_DEDUC"],
+    "RETENCIONES":    ["FECH_RETEN"],
+    "ADJUDICACIONES": ["FECH_ADJUD"],
 }
 
 # Tablas que se exportan completas (no tienen columna DATE útil propia)
 FULL_LOAD_TABLES: set[str] = {
     "OC_ITEMS",
     "PED_ITEMS",
+    "SOLIC_GASTOS_ITEMS",
+    "ADJUDICACIONES_ITEMS",
+    "TIPOS_COMPROB",
+    "ORDEN_PAGO_DEDUC",
 }
 
 # Tablas filtradas por EJERCICIO (no tienen DATE pero sí columna EJERCICIO)
@@ -84,6 +89,11 @@ ALL_TABLES: list[str] = [
     "REG_COMP",
     "DEDUCCIONES",
     "RETENCIONES",
+    "ADJUDICACIONES",
+    "ORDEN_PAGO_DEDUC",
+    "SOLIC_GASTOS_ITEMS",
+    "ADJUDICACIONES_ITEMS",
+    "TIPOS_COMPROB",
 ]
 
 # ─── Conexión ─────────────────────────────────────────────────────────────────
