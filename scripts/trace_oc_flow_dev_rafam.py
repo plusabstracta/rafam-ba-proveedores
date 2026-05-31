@@ -198,7 +198,7 @@ def _audit_rows(conn: Connection) -> list[dict]:
                 END) AS orden_pago_count,
                 COUNT(DISTINCT CASE
                     WHEN OP_NRO_OP IS NOT NULL
-                     AND TRIM(COALESCE(ESTADO_OP, '')) IN ('C', 'N')
+                     AND TRIM(COALESCE(ESTADO_OP, '')) = 'C'
                      AND TRIM(COALESCE(OP_CONFIRMADO, '')) = 'S'
                      AND NULLIF(TRIM(COALESCE(CAST(OP_FECH_CONFIRM AS TEXT), '')), '') IS NOT NULL
                     THEN CAST(OP_EJERCICIO AS TEXT) || '|' || CAST(OP_NRO_OP AS TEXT)
@@ -210,7 +210,7 @@ def _audit_rows(conn: Connection) -> list[dict]:
                 END) AS op_amount_valid_count,
                 COUNT(DISTINCT CASE
                     WHEN OP_NRO_OP IS NOT NULL
-                     AND TRIM(COALESCE(ESTADO_OP, '')) IN ('C', 'N')
+                     AND TRIM(COALESCE(ESTADO_OP, '')) = 'C'
                      AND TRIM(COALESCE(OP_CONFIRMADO, '')) = 'S'
                      AND NULLIF(TRIM(COALESCE(CAST(OP_FECH_CONFIRM AS TEXT), '')), '') IS NOT NULL
                      AND CAST(COALESCE(NULLIF(OP_IMPORTE_TOTAL, ''), '0') AS REAL) > 0

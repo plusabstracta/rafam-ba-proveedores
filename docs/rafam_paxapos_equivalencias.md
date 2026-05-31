@@ -124,13 +124,13 @@ En la ejecución actual no hay una pasada standalone `cta_comprob`. El script `o
 
 ### 2.5 `ORDEN_PAGO` → `account_egresos`
 
-> **Filtro de migración:** se migran OPs con `ESTADO_OP IN ('C', 'N')`, `CONFIRMADO = 'S'`, `FECH_CONFIRM` presente, importe positivo y OC/gasto resoluble por la cadena canónica `ORDEN_PAGO_IMPUT -> REG_COMP -> ORDEN_COMPRA`. Las OPs anuladas (`A`), no confirmadas, sin fecha, sin importe válido o sin OC linkeada se omiten.
+> **Filtro de migración:** sólo se migran OPs con `ESTADO_OP = 'C'` (cancelada/pagada) **y** `CONFIRMADO = 'S'`. Las OPs en estado `N` sin confirmar o anuladas (`A`) se omiten.
 
 | RAFAM | Paxapos | Notas |
 |---|---|---|
 | `EJERCICIO` + `NRO_OP` | `external_ref` | |
 | `COD_PROV` | `proveedor_id` | |
-| `FECH_CONFIRM` | `fecha` | Sólo cuando `ESTADO_OP IN ('C', 'N')`, `CONFIRMADO='S'` y la OP tiene OC/gasto canónico. |
+| `FECH_CONFIRM` | `fecha` | Sólo cuando `ESTADO_OP='C'` y `CONFIRMADO='S'`. |
 | `IMPORTE_TOTAL` | `importe_total` | Total bruto de la OP. El payload conserva también `Egreso.total` por compatibilidad con el importador actual. |
 | `IMPORTE_LIQUIDO` | `importe_neto` | Total líquido/neto transferido según RAFAM. El payload conserva también `Egreso.neto_transferido` por compatibilidad con el importador actual. |
 | `TIPO_CANCE` (CA/CM/NO) | `tipo_de_pago_id` | Vía `RAFAM_TIPO_CANCE_TO_PAXAPOS_PAGO_NAME` → lookup por `name` en `tipo_de_pagos`. Default `"Transferencia bancaria"`. |
@@ -156,7 +156,7 @@ En la ejecución actual no hay una pasada standalone `retenciones`. El script `o
 
 - **Idempotencia obligatoria:** todo registro migrado debe llevar `external_ref = {source: "rafam", entity: <tabla>, ...claves naturales}` para que reimportar no genere duplicados.
 - **`compras_pedidos.tipo` siempre `'orden_compra'`** en esta migración. No se sincronizan otros tipos.
-- **Filtro de OPs:** se migran las que tienen `ESTADO_OP IN ('C', 'N')` + `CONFIRMADO='S'` + `FECH_CONFIRM` + importe positivo + OC/gasto canónico. Las anuladas (`A`), no confirmadas o sin OC linkeada se omiten. Esto se verifica en `exporter.py` y `source_repository.py`.
+- **Filtro de OPs:** sólo se migran las que tienen `ESTADO_OP='C'` + `CONFIRMADO='S'`. Las pendientes (`N`) o anuladas (`A`) se omiten. Esto se verifica en `exporter.py` (línea ~1603) y `source_repository.py` (línea ~568).
 - **`pedido_id` en `account_gastos`** debe resolverse desde la cadena `CTA_COMPROB → REG_COMP → ORDEN_COMPRA`. Si no hay OC migrada/linkeada, la OP y su `gastos[]` se omiten para evitar pagos o gastos sueltos.
 - **`RAFAM_EJERCICIO_MIN` en OCs:** el filtro aplica a `orden_compra`/`oc_items`. La excepción para incluir OCs anteriores se limita a OPs confirmadas dentro del alcance actual (`EJERCICIO >= mínimo` o `FECH_CONFIRM` desde el 1/1 del mínimo); OPs históricas no deben arrastrar OCs viejas.
 - **`unidad_de_medida_id` default = 1 (Unidad)**. Antes había un bug que ponía 5 (Paquete); está corregido en `gateway_mapper.py`.

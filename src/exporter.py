@@ -945,23 +945,8 @@ class MigratorExporter(BaseExporter):
                     # Anulada sin haber sido R → solo registrar localmente
                     ocs_to_skip_register.append(key)
             else:
-                # Estado N u otro → fallback: si tiene comprobante o OP
-                # asociada en RAFAM, enviar a Paxapos (la OC ya tiene
-                # actividad downstream real).
-                has_cc = bool(str(raw.get("OC_CC_NRO") or "").strip())
-                has_op = bool(link_previo and link_previo.get("has_op"))
-                if has_cc or has_op:
-                    logger.info(
-                        "Migrator [oc_items] OC %s-%s-%s estado %s pero tiene %s,"
-                        " enviando a Paxapos como fallback",
-                        key[0], key[1], key[2], estado_actual,
-                        "comprobante+OP" if (has_cc and has_op)
-                        else ("comprobante" if has_cc else "OP"),
-                    )
-                    ocs_to_create.append(oc_data)
-                else:
-                    # Sin actividad downstream → solo registrar localmente
-                    ocs_to_skip_register.append(key)
+                # Estado N u otro → solo registrar localmente
+                ocs_to_skip_register.append(key)
 
         # ── 3. Registrar en link TODAS las OCs (con o sin envío) ──────────
         # Las que se saltan o registran solo localmente (R, A sin N previo)
@@ -1219,21 +1204,8 @@ class MigratorExporter(BaseExporter):
                 else:
                     ocs_to_skip_register.append(key)
             else:
-                # Estado N u otro → fallback: si tiene comprobante o OP
-                # asociada en RAFAM, enviar a Paxapos.
-                has_cc = bool(str(raw.get("OC_CC_NRO") or "").strip())
-                has_op = bool(link_previo and link_previo.get("has_op"))
-                if has_cc or has_op:
-                    logger.info(
-                        "Migrator [orden_compra] OC %s-%s-%s estado %s pero tiene %s,"
-                        " enviando a Paxapos como fallback",
-                        key[0], key[1], key[2], estado_actual,
-                        "comprobante+OP" if (has_cc and has_op)
-                        else ("comprobante" if has_cc else "OP"),
-                    )
-                    ocs_to_create.append(oc_data)
-                else:
-                    ocs_to_skip_register.append(key)
+                # Estado N u otro → solo registrar localmente
+                ocs_to_skip_register.append(key)
 
         # ── 3. Registrar en link TODAS las OCs que no se envían ───────────
         for key in ocs_to_skip_register + ocs_same_state + ocs_to_skip_has_op:
@@ -1763,7 +1735,7 @@ class MigratorExporter(BaseExporter):
                         oc_sks.append(oc_sk)
 
             estado = str(raw.get("ESTADO_OP", "")).strip().upper()
-            if estado not in {"C", "N"}:
+            if estado != "C":
                 skipped_estado[estado or "(vacio)"] = skipped_estado.get(estado or "(vacio)", 0) + 1
                 continue
             confirmado = str(raw.get("CONFIRMADO", "")).strip().upper()
@@ -1807,7 +1779,7 @@ class MigratorExporter(BaseExporter):
             importe = raw.get("IMPORTE_TOTAL")
             # Validar IMPORTE_TOTAL antes de crear el Egreso. Si es NULL,
             # no parseable o <=0 NO se exporta: en RAFAM esto suele ser una
-            # OP de ajuste contable o anulacion (CONFIRMADO=S, estado enviable
+            # OP de ajuste contable o anulacion (CONFIRMADO=S, ESTADO_OP=C
             # con importe 0). Si las dejaramos pasar, se crean Egresos en
             # cero vinculados al mismo Gasto, mostrando "varios pagos" para
             # un mismo comprobante (1 con importe, otros en 0).

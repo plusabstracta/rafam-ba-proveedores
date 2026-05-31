@@ -147,7 +147,7 @@ def test_audit_rows_classifies_oc_without_canonical_op():
         5: "op_no_confirmada",
         6: "op_importe_invalido",
         7: "con_op_canonica",
-        8: "con_op_canonica",
+        8: "op_no_confirmada",
     }
 
 
@@ -164,4 +164,4 @@ def test_filter_rows_lists_only_oc_without_canonical_op_by_default():
         limit=None,
     )
 
-    assert [row["NRO_OC"] for row in filtered] == [1, 2, 3, 4, 5, 6]
+    assert [row["NRO_OC"] for row in filtered] == [1, 2, 3, 4, 5, 6, 8]

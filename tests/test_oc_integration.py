@@ -98,32 +98,15 @@ class TestOcIntegration:
         sent, all_ocs = oc_payloads
         assert len(sent) > 0, "Debería generar al menos un payload"
 
-    def test_total_ocs_enviables_por_estado_o_fallback(self, oc_payloads, dev_engine):
-        """Se envían OCs R y OCs N con comprobante asociado como fallback."""
+    def test_total_ocs_con_estado_r(self, oc_payloads, dev_engine):
+        """Solo OCs con estado R se envían (no A ni N)."""
         _, all_ocs = oc_payloads
         with dev_engine.connect() as conn:
-            allowed_count = conn.execute(
-                text("""
-                    SELECT COUNT(DISTINCT oc.EJERCICIO || '-' || oc.UNI_COMPRA || '-' || oc.NRO_OC)
-                    FROM ORDEN_COMPRA oc
-                    WHERE oc.ESTADO_OC = 'R'
-                       OR (
-                            oc.ESTADO_OC = 'N'
-                        AND EXISTS (
-                            SELECT 1
-                            FROM REG_COMP rc
-                            JOIN CTA_COMPROB cc
-                              ON cc.EJERCICIO = rc.EJERCICIO
-                             AND cc.NRO_REG_COMP = rc.NRO_REG_COMP
-                            WHERE rc.EJERCICIO = oc.EJERCICIO
-                              AND rc.UNI_COMPRA = oc.UNI_COMPRA
-                              AND rc.NRO_OC = oc.NRO_OC
-                        )
-                    )
-                """)
+            r_count = conn.execute(
+                text("SELECT COUNT(DISTINCT EJERCICIO || '-' || UNI_COMPRA || '-' || NRO_OC) FROM ORDEN_COMPRA WHERE ESTADO_OC = 'R'")
             ).scalar()
-        # Las OCs enviadas deberían ser ≤ enviables (puede ser menor si alguna no tiene items válidos)
-        assert len(all_ocs) <= allowed_count
+        # Las OCs enviadas deberían ser ≤ R_count (puede ser menor si alguna no tiene items válidos)
+        assert len(all_ocs) <= r_count
         assert len(all_ocs) > 0
 
     def test_cada_oc_tiene_proveedor_id(self, oc_payloads):

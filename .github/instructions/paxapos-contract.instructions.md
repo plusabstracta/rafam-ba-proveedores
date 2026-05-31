@@ -625,7 +625,7 @@ El mapping debe coincidir con los IDs reales de `centros_costo` del tenant desti
 
 `importe_total` e `importe_neto` son los nombres Paxapos para los dos importes de la OP. `Egreso.total` y `Egreso.neto_transferido` se conservan en el payload por compatibilidad con el importador actual.
 
-> Solo enviar OPs con `ESTADO_OP IN ('C', 'N')`, `CONFIRMADO='S'`, `FECH_CONFIRM` presente, importe positivo, `gasto_nro_comprobante` y `pedido_id` resuelto. En Paxapos se crean con `fecha=FECH_CONFIRM` y `estado=3`. OPs anuladas, no confirmadas, sin comprobante o sin OC migrada se omiten completamente del envío.
+> Solo enviar OPs con `ESTADO_OP='C'`, `CONFIRMADO='S'`, `FECH_CONFIRM` presente, `gasto_nro_comprobante` y `pedido_id` resuelto. En Paxapos se crean con `fecha=FECH_CONFIRM` y `estado=3`. OPs anuladas, pendientes, no confirmadas, sin comprobante o sin OC migrada se omiten completamente del envío.
 
 ---
 

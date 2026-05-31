@@ -458,7 +458,7 @@ class TestMigratorExporterExtraPaths:
             _orden_compra_row(NRO_OC="100", ITEM_OC="2", OC_ESTADO_OC="R"),
             _orden_compra_row(NRO_OC="200", OC_ESTADO_OC="A"),
             _orden_compra_row(NRO_OC="300", OC_ESTADO_OC="R"),
-            _orden_compra_row(NRO_OC="400", OC_ESTADO_OC="N", OC_CC_NRO=None),
+            _orden_compra_row(NRO_OC="400", OC_ESTADO_OC="N"),
             _orden_compra_row(NRO_OC="500", COD_PROV="404", OC_ESTADO_OC="R"),
         ]
         exporter._write_batch_orden_compra(ORDEN_COMPRA_COLUMNS, rows)
