@@ -577,8 +577,16 @@ class MigratorExporter(BaseExporter):
             "tipos_factura",
             "tipos_de_pago",
             "tipos_retencion",
+            "mercaderias",
         ])
         self._unidades = self._lookup_list(self._lookup_payload, "unidades_de_medida")
+        self._mercaderias = self._lookup_list(self._lookup_payload, "mercaderias")
+        self._mercaderias_by_nombre_compra = self._build_clean_mercaderia_index(
+            self._mercaderias,
+            "nombre_compra",
+        )
+        self._mercaderias_by_name = self._build_clean_mercaderia_index(self._mercaderias, "name")
+        self._default_mercaderia_id = self._to_int(os.getenv("PAXAPOS_RAFAM_DEFAULT_MERCADERIA_ID"))
         self._tipos_factura = self._lookup_list(self._lookup_payload, "tipos_factura")
         self._tipos_factura_by_codename = self._build_single_index(self._tipos_factura, "codename")
         self._tipos_factura_by_name = self._build_single_index(self._tipos_factura, "name")
@@ -2135,28 +2143,32 @@ class MigratorExporter(BaseExporter):
         return None
 
     def _map_ped_item(self, raw: dict) -> dict | None:
-        mercaderia_external_ref = self._mercaderia_external_ref_ped_item(raw)
-        if mercaderia_external_ref is None:
-            return None
+        descripcion = raw.get("DESCRIP_BIE")
+        mercaderia_id = self._resolve_mercaderia_id(
+            raw,
+            description_field="DESCRIP_BIE",
+            ref_builder=self._mercaderia_external_ref_ped_item,
+        )
 
         cantidad = raw.get("CANTIDAD")
         if cantidad is None:
             return None
 
+        if mercaderia_id is None and not str(descripcion or "").strip():
+            return None
+
         item = {
-            "mercaderia_external_ref": mercaderia_external_ref,
             "cantidad": float(cantidad),
             "unidad_de_medida_id": self._resolve_unidad_medida_id(raw),
         }
+        if mercaderia_id is not None:
+            item["mercaderia_id"] = mercaderia_id
+        else:
+            item["name"] = str(descripcion).strip()[:255]
 
         # precio_unitario: Paxapos lo multiplica por cantidad y guarda el total en PedidoMercaderia.precio.
         if raw.get("COSTO_UNI") is not None:
             item["precio_unitario"] = round(float(raw.get("COSTO_UNI")), 2)
-
-        descripcion = raw.get("DESCRIP_BIE")
-        if descripcion:
-            item["descripcion"] = str(descripcion)[:255]
-            item["observacion"] = str(descripcion)[:255]
 
         # centro_costo_id via link_store (JURISDICCION de PED_ITEMS → centro_costo Paxapos)
         centro_costo_id = self._resolve_centro_costo_id(raw.get("JURISDICCION"))
@@ -2198,19 +2210,28 @@ class MigratorExporter(BaseExporter):
         return ref
 
     def _map_oc_item(self, raw: dict) -> dict | None:
-        mercaderia_external_ref = self._mercaderia_external_ref_oc_item(raw)
-        if mercaderia_external_ref is None:
-            return None
+        descripcion = raw.get("DESCRIPCION")
+        mercaderia_id = self._resolve_mercaderia_id(
+            raw,
+            description_field="DESCRIPCION",
+            ref_builder=self._mercaderia_external_ref_oc_item,
+        )
 
         cantidad = raw.get("CANTIDAD")
         if cantidad is None:
             return None
 
+        if mercaderia_id is None and not str(descripcion or "").strip():
+            return None
+
         item = {
-            "mercaderia_external_ref": mercaderia_external_ref,
             "cantidad": float(cantidad),
             "unidad_de_medida_id": self._resolve_unidad_medida_id(raw),
         }
+        if mercaderia_id is not None:
+            item["mercaderia_id"] = mercaderia_id
+        else:
+            item["name"] = str(descripcion).strip()[:255]
 
         # precio_unitario: Paxapos lo multiplica por cantidad y guarda el total en PedidoMercaderia.precio.
         if raw.get("IMP_UNITARIO") is not None:
@@ -2218,13 +2239,6 @@ class MigratorExporter(BaseExporter):
 
         if raw.get("CANT_RECIB") is not None:
             item["recibida_cantidad"] = float(raw.get("CANT_RECIB"))
-
-        # Enviar como `name` (no `descripcion`) para que Paxapos nombre la mercadería
-        # auto-creada correctamente.  `descripcion` no se envía porque se duplica
-        # en la UI del item; `name` solo alimenta _buildDeterministicMercaderiaName().
-        descripcion = raw.get("DESCRIPCION")
-        if descripcion:
-            item["name"] = str(descripcion).strip()[:255]
 
         # centro_costo_id via link_store (JURISDICCION de SOLIC_GASTOS JOIN → centro_costo Paxapos)
         centro_costo_id = self._resolve_centro_costo_id(raw.get("SG_JURISDICCION"))
@@ -2589,6 +2603,47 @@ class MigratorExporter(BaseExporter):
         from .gateway_mapper import _UM_DEFAULT
         return _UM_DEFAULT
 
+    def _resolve_mercaderia_id(self, raw: dict, *, description_field: str, ref_builder) -> int | None:
+        description = raw.get(description_field)
+        ref = ref_builder(raw)
+        for source_key in self._mercaderia_source_keys(raw, description, ref):
+            remote = self._link_store.get_remote_id("mercaderia", source_key)
+            remote_id = self._to_int(remote)
+            if remote_id is not None:
+                return remote_id
+
+        normalized = self._normalize_text(description)
+        if normalized:
+            for index in (self._mercaderias_by_nombre_compra, self._mercaderias_by_name):
+                row = index.get(normalized)
+                remote_id = self._to_int(row.get("id")) if row else None
+                if remote_id is not None:
+                    return remote_id
+
+        return self._default_mercaderia_id
+
+    def _mercaderia_source_keys(self, raw: dict, description, ref: dict | None) -> list[str]:
+        keys: list[str] = []
+        if ref:
+            keys.append(json.dumps(ref, sort_keys=True))
+
+        description_key = self._normalize_text(description)
+        if description_key:
+            keys.append(f"name:{description_key}")
+
+        classification_key = self._mercaderia_classification_source_key(raw)
+        if classification_key:
+            keys.append(classification_key)
+
+        return keys
+
+    def _mercaderia_classification_source_key(self, raw: dict) -> str | None:
+        fields = ["CLASE", "TIPO", "INCISO", "PAR_PRIN", "PAR_PARC"]
+        values = [self._to_int(raw.get(field)) for field in fields]
+        if any(value is None for value in values):
+            return None
+        return "clasificacion:" + ":".join(str(value) for value in values)
+
 
 
     def _mercaderia_external_ref_oc_item(self, raw: dict) -> dict | None:
@@ -2764,16 +2819,24 @@ class MigratorExporter(BaseExporter):
             return
 
         failed = []
+        fully_failed = []
         for section, section_stats in stats.items():
             if not isinstance(section_stats, dict):
                 continue
             error_count = section_stats.get("error", 0)
+            ok_count = section_stats.get("ok", 0)
             try:
                 error_count = int(error_count)
             except (TypeError, ValueError):
                 error_count = 0
+            try:
+                ok_count = int(ok_count)
+            except (TypeError, ValueError):
+                ok_count = 0
             if error_count > 0:
                 failed.append(f"{section}={error_count}")
+                if ok_count == 0:
+                    fully_failed.append(f"{section}={error_count}")
 
         if failed:
             log_fn = logger.error if strict else logger.warning
@@ -2783,6 +2846,12 @@ class MigratorExporter(BaseExporter):
                 ", ".join(failed),
             )
             has_errors = True
+
+        if fully_failed:
+            details = ", ".join(fully_failed)
+            raise RuntimeError(
+                f"Migrator devolvio errores para todas las filas de una seccion: {details}"
+            )
 
         if has_errors and strict:
             details = ", ".join(failed) if failed else "ver errors en respuesta"
@@ -3052,6 +3121,29 @@ class MigratorExporter(BaseExporter):
         text = "".join(ch for ch in text if not unicodedata.combining(ch))
         compact = "".join(ch if ch.isalnum() else " " for ch in text)
         return " ".join(compact.split())
+
+    @staticmethod
+    def _is_generated_rafam_mercaderia(row: dict) -> bool:
+        barcode = str(row.get("barcode") or row.get("codigo_barra") or "").strip().lower()
+        if barcode.startswith("rafam:"):
+            return True
+        for field in ("nombre_compra", "name", "descripcion", "producto_nombre"):
+            value = row.get(field)
+            if value and "[rafam-" in str(value).lower():
+                return True
+        return False
+
+    @staticmethod
+    def _build_clean_mercaderia_index(rows: list[dict], field: str) -> dict[str, dict]:
+        idx: dict[str, dict] = {}
+        for row in rows:
+            if MigratorExporter._is_generated_rafam_mercaderia(row):
+                continue
+            key = MigratorExporter._normalize_text(row.get(field))
+            if not key:
+                continue
+            idx[key] = row
+        return idx
 
     @staticmethod
     def _build_single_index(rows: list[dict], field: str) -> dict[str, dict]:

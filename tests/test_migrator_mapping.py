@@ -34,6 +34,7 @@ def exporter():
                 {"id": "104", "name": "Retención de IIBB"},
                 {"id": "105", "name": "Retención SUSS"},
             ],
+            "mercaderias": [{"id": "88", "nombre_compra": "Papel A4"}],
         }
         with patch.dict("os.environ", {
             "PAXAPOS_URL": "https://example.com",
@@ -659,10 +660,14 @@ class TestMapRetencion:
 
 class TestMigratorErrors:
 
-    def test_stats_con_error_no_falla_por_defecto(self):
-        """Comportamiento default: log warning, NO raise (no corta la corrida)."""
-        # No debe lanzar excepcion
-        MigratorExporter._raise_on_migrator_errors({"stats": {"proveedores": {"error": 1}}})
+    def test_stats_con_error_parcial_no_falla_por_defecto(self):
+        """Comportamiento default: warning si hay filas OK en la misma seccion."""
+        MigratorExporter._raise_on_migrator_errors({"stats": {"proveedores": {"ok": 1, "error": 1}}})
+
+    def test_stats_con_error_total_falla_por_defecto(self):
+        """Si una seccion tiene 0 OK y errores, el batch no debe avanzar checkpoint."""
+        with pytest.raises(RuntimeError, match="todas las filas"):
+            MigratorExporter._raise_on_migrator_errors({"stats": {"ordenes_compra": {"ok": 0, "error": 100}}})
 
     def test_errors_array_no_falla_por_defecto(self):
         """Comportamiento default: log warning, NO raise."""
@@ -751,6 +756,7 @@ class TestWriteBatchOcItems:
                 "unidades_de_medida": [{"id": "1", "name": "Unidad"}],
                 "tipos_factura": [],
                 "tipos_de_pago": [],
+                "mercaderias": [{"id": "88", "nombre_compra": "Papel A4"}],
             }
             with patch.dict("os.environ", {
                 "PAXAPOS_URL": "https://example.com",
@@ -885,7 +891,7 @@ class TestWriteBatchOcItems:
         # Asegurar que NO aparece "Migrado RAFAM OC ..."
         assert "Migrado" not in str(pedido)
 
-    # ── Items: envían name, no descripcion ──
+    # ── Items: crean por name limpio; nunca por mercaderia_external_ref ──
 
     def test_item_no_envia_descripcion(self):
         exp = self._make_exporter_with_prov()
@@ -902,7 +908,7 @@ class TestWriteBatchOcItems:
         assert "descripcion" not in item
         assert "observacion" not in item
 
-    def test_item_envia_name_para_mercaderia(self):
+    def test_item_crea_por_name_sin_external_ref(self):
         exp = self._make_exporter_with_prov()
         rows = [_oc_row(descripcion="Papel A4 resma 500 hojas")]
 
@@ -915,6 +921,34 @@ class TestWriteBatchOcItems:
 
         item = sent[0]["ordenes_compra"][0]["items"][0]
         assert item["name"] == "Papel A4 resma 500 hojas"
+        assert "mercaderia_id" not in item
+        assert "mercaderia_external_ref" not in item
+
+    def test_mercaderia_rafam_autocreada_no_se_reusa_sin_default(self):
+        with patch("src.exporter.fetch_migrator_lookups") as mock_lookups:
+            mock_lookups.return_value = {
+                "unidades_de_medida": [{"id": "1", "name": "Unidad"}],
+                "tipos_factura": [],
+                "tipos_de_pago": [],
+                "mercaderias": [
+                    {"id": "99", "nombre_compra": "Papel A4 [RAFAM-316ca8e3e0]", "barcode": "RAFAM:abc"},
+                ],
+            }
+            with patch.dict("os.environ", {
+                "PAXAPOS_URL": "https://example.com",
+                "PAXAPOS_TENANT": "test",
+                "PAXAPOS_API_KEY": "key",
+                "PAXAPOS_RAFAM_DEFAULT_UNIDAD_ID": "1",
+                "PAXAPOS_RAFAM_DEFAULT_TIPO_PAGO_ID": "4",
+                "LOCAL_STATE_DB_PATH": ":memory:",
+            }, clear=True):
+                exp = MigratorExporter(dry_run=True)
+
+        item = exp._map_oc_item(dict(zip(OC_COLUMNS, _oc_row(descripcion="Papel A4"))))
+        assert item is not None
+        assert item["name"] == "Papel A4"
+        assert "mercaderia_id" not in item
+        assert "mercaderia_external_ref" not in item
 
     def test_item_tiene_campos_basicos(self):
         exp = self._make_exporter_with_prov()
@@ -931,8 +965,8 @@ class TestWriteBatchOcItems:
         assert item["cantidad"] == 10.0
         assert item["precio_unitario"] == 50.5
         assert item["recibida_cantidad"] == 3.0
-        assert "mercaderia_external_ref" in item
-        assert item["mercaderia_external_ref"]["entity"] == "oc_items"
+        assert item["mercaderia_id"] == 88
+        assert "mercaderia_external_ref" not in item
         assert item["unidad_de_medida_id"] == 5  # fallback Unidad (id 5, link_store vacio)
 
     # ── Varias OCs en un batch ──

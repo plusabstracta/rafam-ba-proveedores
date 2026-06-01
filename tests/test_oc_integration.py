@@ -39,6 +39,7 @@ def exporter_with_links(dev_engine):
             "unidades_de_medida": [{"id": "1", "name": "Unidad"}],
             "tipos_factura": [{"id": "2", "name": "Factura A", "codename": "factura_a"}],
             "tipos_de_pago": [{"id": "4", "name": "Transferencia"}],
+            "mercaderias": [],
         }
         with patch.dict("os.environ", {
             "PAXAPOS_URL": "https://test.example.com",
@@ -140,19 +141,17 @@ class TestOcIntegration:
                 assert "descripcion" not in item, f"Item con descripcion en {oc['external_id']}"
                 assert "observacion" not in item, f"Item con observacion en {oc['external_id']}"
 
-    def test_items_envian_name(self, oc_payloads):
-        """Los items envían `name` para que Paxapos nombre la mercadería."""
+    def test_items_envian_name_sin_external_ref(self, oc_payloads):
+        """Los items no disparan auto-creación de mercaderías con sufijo RAFAM."""
         _, all_ocs = oc_payloads
-        items_con_name = 0
         total_items = 0
         for oc in all_ocs:
             for item in oc.get("items", []):
                 total_items += 1
-                if "name" in item:
-                    items_con_name += 1
-                    assert len(item["name"]) > 0
-        # Prácticamente todos los items RAFAM tienen DESCRIPCION
-        assert items_con_name > total_items * 0.95
+                assert "name" in item
+                assert "[RAFAM-" not in item["name"]
+                assert "mercaderia_external_ref" not in item
+        assert total_items > 0
 
     def test_centro_costo_id_presente(self, oc_payloads, dev_engine):
         """Las OCs con jurisdicción deben tener centro_costo_id."""
@@ -182,11 +181,11 @@ class TestOcIntegration:
         for oc in all_ocs:
             assert len(oc["items"]) > 0, f"OC {oc['external_id']} sin items"
             for item in oc["items"]:
-                assert "mercaderia_external_ref" in item
+                assert "name" in item
                 assert "cantidad" in item
                 assert "unidad_de_medida_id" in item
-                assert item["mercaderia_external_ref"]["entity"] == "oc_items"
-                assert item["mercaderia_external_ref"]["source"] == "rafam"
+                assert "mercaderia_id" not in item
+                assert "mercaderia_external_ref" not in item
 
     def test_external_id_completo(self, oc_payloads):
         _, all_ocs = oc_payloads
@@ -204,5 +203,6 @@ class TestOcIntegration:
             assert p["dry_run"] is True
             assert p["options"]["upsert"] is True
             assert p["options"]["send_oc_mail"] is False
+            assert p["options"]["auto_create_mercaderia"] is True
             assert "ordenes_compra" in p
             assert isinstance(p["ordenes_compra"], list)

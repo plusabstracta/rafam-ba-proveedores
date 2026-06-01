@@ -84,6 +84,7 @@ def _migrator(monkeypatch, tmp_path, *, dry_run=True, lookups=None):
                 {"id": "102", "codename": "iva", "name": "Retencion IVA"},
                 {"id": "103", "name": "Ingresos Brutos"},
             ],
+            "mercaderias": [{"id": "88", "nombre_compra": "Papel A4"}],
         }
     }
     with patch("src.exporter.fetch_migrator_lookups", return_value=lookup_payload):
@@ -404,12 +405,14 @@ class TestMigratorExporterExtraPaths:
         assert pedido["centro_costo_id"] == 1
         assert len(pedido["items"]) == 2
         assert pedido["items"][0]["unidad_de_medida_id"] == 9
-        assert pedido["items"][0]["mercaderia_external_ref"]["par_parc"] == 5
+        assert pedido["items"][0]["name"] == "Resma A4"
+        assert "mercaderia_id" not in pedido["items"][0]
+        assert "mercaderia_external_ref" not in pedido["items"][0]
 
     def test_write_batch_ped_items_raises_without_resolvable_items(self, monkeypatch, tmp_path):
         exporter = _migrator(monkeypatch, tmp_path, dry_run=False)
         with pytest.raises(RuntimeError, match="sin items resolubles"):
-            exporter._write_batch_ped_items(PED_COLUMNS, [_ped_row(ORDEN="")])
+            exporter._write_batch_ped_items(PED_COLUMNS, [_ped_row(ORDEN="", DESCRIP_BIE="")])
 
     def test_write_batch_orden_compra_create_anular_skip_and_register(self, monkeypatch, tmp_path):
         exporter = _migrator(monkeypatch, tmp_path, dry_run=False)

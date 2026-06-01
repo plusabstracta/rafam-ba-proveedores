@@ -98,11 +98,12 @@ Además, hay **tablas de lookup** que se leen para resolver datos (no se migran 
 |---|---|---|
 | `EJERCICIO` + `UNI_COMPRA` + `NRO_OC` + `ITEM_OC` | `external_ref` | |
 | `EJERCICIO` + `UNI_COMPRA` + `NRO_OC` | (FK) → OC | Vincula al pedido padre. |
-| `DESCRIPCION` | `mercaderia.name` | Si no existe, se crea. |
-| `UNI_MED` | `mercaderia.unidad_de_medida_id` | Vía `_UM` (UNIDAD=1, KILOGRAMO=2, LITRO=3, METRO=4, PAQUETE=5, HORAS=6, DIA=7). Default `1` (Unidad). |
+| `DESCRIPCION` | `mercaderia_id` o `name` | Si matchea una mercadería existente limpia del lookup (`nombre_compra`/`name`) se envía `mercaderia_id`; si no matchea, se envía `name` limpio para evitar `mercaderia_external_ref`, pero esa creación requiere soporte del migrator Paxapos. |
+| `UNI_MED` | `unidad_de_medida_id` | Vía vínculo local de unidad; si no existe, fallback interno del tenant. |
 | `CANT` | `cantidad` | |
 | `PRECIO_UNIT` | `precio_unitario` | |
-| `CLASE` + `TIPO` + `INCISO` + `PAR_PRIN` + `PAR_PARC` | `mercaderia.codigo_clasificacion` | Si dos ítems comparten la misma clasificación, comparten la misma `mercaderia` en Paxapos. |
+
+El script nunca envía `mercaderia_external_ref` para items RAFAM. La creación por `name` limpio evita nombres `... [RAFAM-hash]`, pero el endpoint desplegado actual todavía exige `mercaderia_id` o `mercaderia_external_ref`; sin backend compatible o `PAXAPOS_RAFAM_DEFAULT_MERCADERIA_ID`, el batch debe fallar sin avanzar checkpoint.
 
 ### 2.4 `CTA_COMPROB` → `account_gastos`
 
@@ -169,7 +170,7 @@ En la ejecución actual no hay una pasada standalone `retenciones`. El script `o
 El orden lógico de dependencias sigue siendo de 6 tablas, pero el migrator lo ejecuta en 3 pasadas oficiales:
 
 1. `proveedores`: crea/actualiza `account_proveedores` desde `PROVEEDORES`.
-2. `oc_items`: agrupa `ORDEN_COMPRA` + `OC_ITEMS` y envía `ordenes_compra[]` con `items[]` inline. Esto crea la cabecera de OC y sus mercaderías en una sola pasada.
+2. `oc_items`: agrupa `ORDEN_COMPRA` + `OC_ITEMS` y envía `ordenes_compra[]` con `items[]` inline. La cabecera de OC se crea/actualiza y los items apuntan a mercaderías existentes por `mercaderia_id` o, si el backend lo soporta, crean Mercadería/Producto por `name`, sin `mercaderia_external_ref`.
 3. `orden_pago`: procesa `ORDEN_PAGO` y, en la misma pasada, resuelve `CTA_COMPROB` para crear/vincular gastos y `RETENCIONES` + `DEDUCCIONES` para crear `account_retenciones`.
 
 Así, las 6 tablas principales quedan cubiertas, pero no todas tienen un script independiente.
