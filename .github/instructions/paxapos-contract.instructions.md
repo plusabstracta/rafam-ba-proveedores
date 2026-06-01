@@ -237,9 +237,9 @@ La tabla `compras_pedidos` se usa con `tipo='orden_compra'`. Otros valores de `t
 
 **Validaciones server-side**: Sin validaciones en el modelo ($validate = array()). El controller desplegado valida items no vacío, `cantidad`, y `mercaderia_id` existente o `mercaderia_external_ref`; `name` por sí solo no es contrato aceptado por el endpoint actual.
 
-**Mercadería auto-creación**: con `mercaderia_external_ref` y `auto_create_mercaderia=true` (default), Paxapos crea automáticamente Producto + Mercadería con `barcode = 'RAFAM:{sha1(ref)}'`. El nombre se genera como `"{descripcion} [RAFAM-{hash10}]"`.
+**Mercadería auto-creación legacy**: con `mercaderia_external_ref` y `auto_create_mercaderia=true` (default), el importador final de OC puede crear Producto + Mercadería. El script RAFAM no usa esa vía en `ordenes_compra[].items[]` porque generaba nombres visibles con hash; primero resuelve por `resolver_mercaderia.json`.
 
-**Regla del script RAFAM actual**: no enviar `mercaderia_external_ref` dentro de items de OC/pedido. El exportador primero resuelve la mercadería por link local, lookup limpio o `resolver_mercaderia.json` usando una referencia basada en descripción normalizada; guarda `name:{descripcion_normalizada}` -> `mercaderia_id` en `entity_link_store`; y el payload final del importador envía siempre `mercaderia_id`.
+**Regla del script RAFAM actual**: no enviar `mercaderia_external_ref` dentro de items de OC/pedido ni al resolver previo. Ese campo activa la creación determinística legacy (`create_deterministic`) y Paxapos agrega `[RAFAM-{hash}]` al nombre visible. El exportador primero resuelve la mercadería por link local, lookup limpio o `resolver_mercaderia.json` usando `item.name`, `item.descripcion`, `item.nombre_compra` y `item.producto_nombre` con la descripción RAFAM limpia. El hash/identidad única pertenece al `barcode` que devuelve Paxapos (por ejemplo `RAFAM-NAME:{hash}`), nunca al nombre visible. El script guarda `name:{descripcion_normalizada}` -> `mercaderia_id` en `entity_link_store`; y el payload final del importador envía siempre `mercaderia_id`.
 
 **Mapeo de estados RAFAM→Paxapos**:
 - `N` (normal) → `estado_aprobacion=3` (no requiere) o `2` (aprobado)
@@ -689,7 +689,7 @@ El script RAFAM no debe confiar en `pedido_internal_id` como fallback para crear
 
 ### 14.9 Resolver mercaderías antes de enviar items
 
-Paxapos soporta `mercaderia_external_ref` y puede agrupar/auto-crear mercaderías, pero el import final de OC/PED debe llegar con `mercaderia_id`. El script usa `resolver_mercaderia.json` antes del POST de importación, con una referencia basada en la descripción normalizada del item, y persiste el resultado en `link_mercaderia`. Si un cambio futuro modifica el criterio de deduplicación, debe migrar los links locales o guardar aliases para no duplicar Producto + Mercadería.
+Paxapos soporta `mercaderia_external_ref` y puede agrupar/auto-crear mercaderías, pero el import final de OC/PED debe llegar con `mercaderia_id`. El script usa `resolver_mercaderia.json` antes del POST de importación por nombre limpio: no manda `mercaderia_external_ref`, porque esa ruta agrega hash al nombre visible. El resolver debe recibir `item.name` desde la descripción RAFAM y devolver un `barcode` único. Una mercadería con `barcode=RAFAM...` y nombre limpio es válida; una con nombre visible tipo `[RAFAM-...]`, `{RAFAM:...}` o `Mercaderia desarrollo #...` es stale/generada y no debe reutilizarse. Si un cambio futuro modifica el criterio de deduplicación, debe migrar los links locales o guardar aliases para no duplicar Producto + Mercadería.
 
 ### 14.10 `monto_presupuestado` se auto-calcula si no se envía
 

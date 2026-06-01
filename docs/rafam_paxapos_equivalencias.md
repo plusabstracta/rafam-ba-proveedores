@@ -98,12 +98,12 @@ Además, hay **tablas de lookup** que se leen para resolver datos (no se migran 
 |---|---|---|
 | `EJERCICIO` + `UNI_COMPRA` + `NRO_OC` + `ITEM_OC` | `external_ref` | |
 | `EJERCICIO` + `UNI_COMPRA` + `NRO_OC` | (FK) → OC | Vincula al pedido padre. |
-| `DESCRIPCION` | `mercaderia_id` | El script normaliza la descripción y resuelve la mercadería por link local, lookup limpio o `resolver_mercaderia.json`; luego envía siempre `mercaderia_id` al importador. |
+| `DESCRIPCION` | `mercaderia_id` | El script normaliza la descripción y resuelve la mercadería por link local, lookup limpio o `resolver_mercaderia.json`; el resolver recibe `item.name` con la descripción RAFAM limpia, sin `mercaderia_external_ref`, para que Paxapos cree por nombre y deje la identidad única en `barcode`. Luego envía siempre `mercaderia_id` al importador. |
 | `UNI_MED` | `unidad_de_medida_id` | Vía vínculo local de unidad; si no existe, fallback interno del tenant. |
 | `CANT` | `cantidad` | |
 | `PRECIO_UNIT` | `precio_unitario` | |
 
-El script no envía `mercaderia_external_ref` dentro de `ordenes_compra[].items[]`: lo usa antes, contra `resolver_mercaderia.json`, para obtener el `mercaderia_id` y persistir el vínculo `name:{descripcion_normalizada}` -> `mercaderia_id` en SQLite. Así las corridas siguientes reutilizan el mismo ID de Paxapos y no generan duplicados de mercaderías.
+El script no envía `mercaderia_external_ref` ni dentro de `ordenes_compra[].items[]` ni al resolver previo: ese campo activa la creación determinística legacy de Paxapos y agrega sufijos `[RAFAM-...]` al nombre visible. Para obtener el `mercaderia_id`, el script llama `resolver_mercaderia.json` con `item.name`/`item.descripcion`/`item.nombre_compra` desde `OC_ITEMS.DESCRIPCION` limpia y persiste el vínculo `name:{descripcion_normalizada}` -> `mercaderia_id` en SQLite. El nombre visible de la mercadería debe quedar igual a `OC_ITEMS.DESCRIPCION` limpia, sin sufijos `[RAFAM-...]` ni `{RAFAM:...}`; la identidad única queda en el `barcode` que devuelve Paxapos (por ejemplo `RAFAM-NAME:{hash}`). Así las corridas siguientes reutilizan el mismo ID de Paxapos y no generan duplicados de mercaderías.
 
 ### 2.4 `CTA_COMPROB` → `account_gastos`
 

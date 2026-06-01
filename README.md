@@ -268,7 +268,7 @@ Notas importantes:
 - El tenant tambien viaja en header `X-Tenant-Id`.
 - Para scripts productivos se recomienda `PAXAPOS_API_KEY`.
 - `PAXAPOS_VERIFY_SSL=false` solo debe usarse en desarrollo.
-- Las mercaderías de items OC/PED se resuelven antes de importar usando `PAXAPOS_RAFAM_RESOLVER_MERCADERIA_PATH`; el script guarda el vínculo `name:{descripcion_normalizada}` -> `mercaderia_id` en SQLite para no volver a crear ni duplicar mercaderías.
+- Las mercaderías de items OC/PED se resuelven antes de importar usando `PAXAPOS_RAFAM_RESOLVER_MERCADERIA_PATH`; el script manda `item.name` con la descripción RAFAM limpia, no manda `mercaderia_external_ref` al resolver, deja la identidad única en el `barcode` devuelto por Paxapos, y guarda el vínculo `name:{descripcion_normalizada}` -> `mercaderia_id` en SQLite para no volver a crear ni duplicar mercaderías.
 - `RAFAM_EJERCICIO_MIN` no filtra proveedores ni la query de OPs; aplica a OCs (`orden_compra`/`oc_items`). Si una OP confirmada dentro del alcance actual (`EJERCICIO >= mínimo` o `FECH_CONFIRM` desde el 1/1 del mínimo) requiere una OC anterior, esa OC se incluye igual para no crear pagos o gastos sueltos. Las OPs históricas fuera de ese alcance no arrastran OCs viejas.
 
 ### 2. Validacion previa obligatoria

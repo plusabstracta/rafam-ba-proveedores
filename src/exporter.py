@@ -2651,7 +2651,6 @@ class MigratorExporter(BaseExporter):
 
         resolved = self._resolve_mercaderia_via_api(
             description=str(description).strip(),
-            normalized_description=normalized,
             unidad_de_medida_id=unidad_de_medida_id,
             proveedor_id=proveedor_id,
         )
@@ -2678,31 +2677,25 @@ class MigratorExporter(BaseExporter):
     def _mercaderia_description_source_key(normalized_description: str) -> str:
         return f"name:{normalized_description}"
 
-    @staticmethod
-    def _mercaderia_description_external_ref(normalized_description: str) -> dict:
-        return {
-            "source": "rafam",
-            "entity": "mercaderia",
-            "desc": normalized_description,
-        }
-
     def _resolve_mercaderia_via_api(
         self,
         *,
         description: str,
-        normalized_description: str,
         unidad_de_medida_id: int | None,
         proveedor_id: int | None,
     ) -> dict:
+        name = str(description or "").strip()[:255]
         item: dict = {
-            "descripcion": description[:255],
+            "name": name,
+            "descripcion": name,
+            "nombre_compra": name,
+            "producto_nombre": name,
             "unidad_de_medida_id": unidad_de_medida_id or self._resolve_unidad_medida_id({}),
         }
         if proveedor_id is not None:
             item["proveedor_id"] = proveedor_id
 
         payload = {
-            "mercaderia_external_ref": self._mercaderia_description_external_ref(normalized_description),
             "item": item,
             "pedido": {"proveedor_id": proveedor_id} if proveedor_id is not None else {},
             "options": {"create_if_missing": True},
@@ -2714,6 +2707,13 @@ class MigratorExporter(BaseExporter):
         if not resolver.get("success"):
             message = resolver.get("message") or "No se pudo resolver mercaderia"
             raise RuntimeError(str(message))
+        if self._is_generated_rafam_mercaderia(resolver):
+            visible_name = resolver.get("nombre_compra") or resolver.get("name") or resolver.get("descripcion")
+            raise RuntimeError(
+                f"resolver_mercaderia devolvio nombre generado para {description!r}: {visible_name!r}"
+            )
+        if not resolver.get("nombre_compra"):
+            resolver["nombre_compra"] = resolver.get("name") or name
         return resolver
 
     def _save_mercaderia_link(
@@ -3235,12 +3235,11 @@ class MigratorExporter(BaseExporter):
 
     @staticmethod
     def _is_generated_rafam_mercaderia(row: dict) -> bool:
-        barcode = str(row.get("barcode") or row.get("codigo_barra") or "").strip().lower()
-        if barcode.startswith("rafam:"):
-            return True
         for field in ("nombre_compra", "name", "descripcion", "producto_nombre"):
             value = row.get(field)
-            if value and "[rafam-" in str(value).lower():
+            text = str(value or "").strip().lower()
+            normalized = MigratorExporter._normalize_text(value)
+            if text and ("[rafam-" in text or "rafam:" in text or "mercaderia desarrollo" in normalized):
                 return True
         return False
 

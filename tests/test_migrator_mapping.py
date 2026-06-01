@@ -923,8 +923,9 @@ class TestWriteBatchOcItems:
                     "resolver": {
                         "success": True,
                         "mercaderia_id": 188,
-                        "barcode": "RAFAM:abc",
-                        "nombre_compra": "Papel A4 resma 500 hojas [RAFAM-abc]",
+                        "mode": "create_from_name",
+                        "barcode": "RAFAM-NAME:abc",
+                        "nombre_compra": "Papel A4 resma 500 hojas",
                     }
                 }
             sent.append(payload)
@@ -937,14 +938,16 @@ class TestWriteBatchOcItems:
         assert item["mercaderia_id"] == 188
         assert "name" not in item
         assert "mercaderia_external_ref" not in item
-        assert resolver_calls[0]["mercaderia_external_ref"] == {
-            "source": "rafam",
-            "entity": "mercaderia",
-            "desc": "papel a4 resma 500 hojas",
-        }
+        assert "mercaderia_external_ref" not in resolver_calls[0]
+        assert resolver_calls[0]["item"]["name"] == "Papel A4 resma 500 hojas"
+        assert resolver_calls[0]["item"]["descripcion"] == "Papel A4 resma 500 hojas"
+        assert resolver_calls[0]["item"]["nombre_compra"] == "Papel A4 resma 500 hojas"
+        assert resolver_calls[0]["item"]["producto_nombre"] == "Papel A4 resma 500 hojas"
+        assert "barcode" not in resolver_calls[0]["item"]
         link = exp._link_store.get_link("mercaderia", "name:papel a4 resma 500 hojas")
         assert link["remote_id"] == "188"
-        assert link["barcode"] == "RAFAM:abc"
+        assert link["barcode"] == "RAFAM-NAME:abc"
+        assert link["nombre_compra"] == "Papel A4 resma 500 hojas"
 
         exp._mercaderia_resolved.clear()
 
@@ -976,20 +979,64 @@ class TestWriteBatchOcItems:
             }, clear=True):
                 exp = MigratorExporter(dry_run=False)
 
-        exp._post_json = lambda url, payload: {
-            "resolver": {
-                "success": True,
-                "mercaderia_id": 123,
-                "barcode": "RAFAM:def",
-                "nombre_compra": "Papel A4 [RAFAM-def]",
+        resolver_calls = []
+
+        def fake_post(url, payload):
+            resolver_calls.append(payload)
+            return {
+                "resolver": {
+                    "success": True,
+                    "mercaderia_id": 123,
+                    "mode": "create_from_name",
+                    "barcode": "RAFAM-NAME:def",
+                    "nombre_compra": "Papel A4",
+                }
             }
-        }
+
+        exp._post_json = fake_post
 
         item = exp._map_oc_item(dict(zip(OC_COLUMNS, _oc_row(descripcion="Papel A4"))))
         assert item is not None
         assert item["mercaderia_id"] == 123
         assert "name" not in item
         assert "mercaderia_external_ref" not in item
+        assert "mercaderia_external_ref" not in resolver_calls[0]
+        assert resolver_calls[0]["item"]["name"] == "Papel A4"
+        assert "barcode" not in resolver_calls[0]["item"]
+
+    def test_mercaderia_con_barcode_rafam_y_nombre_limpio_se_reutiliza(self):
+        exp = self._make_exporter_with_prov(
+            dry_run=False,
+            mercaderias=[{"id": "99", "nombre_compra": "Papel A4", "barcode": "RAFAM:abc"}],
+        )
+
+        def fail_if_called(url, payload):
+            raise RuntimeError("no debe llamar resolver")
+
+        exp._post_json = fail_if_called
+
+        item = exp._map_oc_item(dict(zip(OC_COLUMNS, _oc_row(descripcion="Papel A4"))))
+
+        assert item is not None
+        assert item["mercaderia_id"] == 99
+        link = exp._link_store.get_link("mercaderia", "name:papel a4")
+        assert link["barcode"] == "RAFAM:abc"
+        assert link["nombre_compra"] == "Papel A4"
+
+    def test_resolver_rechaza_nombre_generado_con_hash_rafam(self):
+        exp = self._make_exporter_with_prov(dry_run=False, mercaderias=[])
+        exp._post_json = lambda url, payload: {
+            "resolver": {
+                "success": True,
+                "mercaderia_id": 123,
+                "mode": "create_deterministic",
+                "barcode": "RAFAM:def",
+                "nombre_compra": "Papel A4 [RAFAM-def]",
+            }
+        }
+
+        with pytest.raises(RuntimeError, match="nombre generado"):
+            exp._map_oc_item(dict(zip(OC_COLUMNS, _oc_row(descripcion="Papel A4"))))
 
     def test_item_tiene_campos_basicos(self):
         exp = self._make_exporter_with_prov()
