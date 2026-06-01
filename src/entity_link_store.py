@@ -13,6 +13,7 @@ DEFAULT_LINK_SCHEMAS: dict[str, list[str]] = {
     "tipo_factura": ["name", "codigo"],
     "tipo_pago": ["name", "codigo"],
     "tipo_retencion": ["name", "codigo"],
+    "mercaderia": ["barcode", "nombre_compra"],
     "pedido": [],
     "orden_compra": ["fech_confirm", "estado_oc", "cod_prov", "importe_tot", "gasto_refs", "gasto_linked_refs", "paxapos_gasto_ids", "has_op"],
     "gasto": ["estado_solic", "importe_tot", "cod_prov"],

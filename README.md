@@ -106,10 +106,10 @@ PAXAPOS_TIMEOUT_SECONDS=20
 PAXAPOS_RAFAM_IMPORT_PATH=rafam/migracion/importar.json
 PAXAPOS_RAFAM_SPEC_PATH=rafam/migracion/spec.json
 PAXAPOS_RAFAM_LOOKUPS_PATH=rafam/migracion/lookups.json
+PAXAPOS_RAFAM_RESOLVER_MERCADERIA_PATH=rafam/migracion/resolver_mercaderia.json
 PAXAPOS_RAFAM_DEFAULT_UNIDAD_ID=1
 PAXAPOS_RAFAM_DEFAULT_TIPO_FACTURA_ID=
 PAXAPOS_RAFAM_DEFAULT_TIPO_PAGO_ID=1
-PAXAPOS_RAFAM_DEFAULT_MERCADERIA_ID=
 RAFAM_SYNC_BATCH_DELAY_SECONDS=0
 RAFAM_EJERCICIO_MIN=2026
 ```
@@ -250,12 +250,12 @@ PAXAPOS_TIMEOUT_SECONDS=30
 PAXAPOS_RAFAM_IMPORT_PATH=rafam/migracion/importar.json
 PAXAPOS_RAFAM_SPEC_PATH=rafam/migracion/spec.json
 PAXAPOS_RAFAM_LOOKUPS_PATH=rafam/migracion/lookups.json
+PAXAPOS_RAFAM_RESOLVER_MERCADERIA_PATH=rafam/migracion/resolver_mercaderia.json
 
 # Confirmar IDs con make migrator-lookups antes de importar.
 PAXAPOS_RAFAM_DEFAULT_UNIDAD_ID=1
 PAXAPOS_RAFAM_DEFAULT_TIPO_FACTURA_ID=
 PAXAPOS_RAFAM_DEFAULT_TIPO_PAGO_ID=1
-PAXAPOS_RAFAM_DEFAULT_MERCADERIA_ID=
 
 RAFAM_SYNC_BATCH_DELAY_SECONDS=2
 RAFAM_EJERCICIO_MIN=2026
@@ -268,7 +268,7 @@ Notas importantes:
 - El tenant tambien viaja en header `X-Tenant-Id`.
 - Para scripts productivos se recomienda `PAXAPOS_API_KEY`.
 - `PAXAPOS_VERIFY_SSL=false` solo debe usarse en desarrollo.
-- `PAXAPOS_RAFAM_DEFAULT_MERCADERIA_ID` es opcional y debe apuntar a una mercadería existente del tenant si se quiere forzar un fallback. Si queda vacío, los items sin match se envían con `name` limpio para evitar `mercaderia_external_ref`, pero esa creación requiere un migrator Paxapos compatible; con el endpoint actual el batch puede fallar y no debe avanzar checkpoint.
+- Las mercaderías de items OC/PED se resuelven antes de importar usando `PAXAPOS_RAFAM_RESOLVER_MERCADERIA_PATH`; el script guarda el vínculo `name:{descripcion_normalizada}` -> `mercaderia_id` en SQLite para no volver a crear ni duplicar mercaderías.
 - `RAFAM_EJERCICIO_MIN` no filtra proveedores ni la query de OPs; aplica a OCs (`orden_compra`/`oc_items`). Si una OP confirmada dentro del alcance actual (`EJERCICIO >= mínimo` o `FECH_CONFIRM` desde el 1/1 del mínimo) requiere una OC anterior, esa OC se incluye igual para no crear pagos o gastos sueltos. Las OPs históricas fuera de ese alcance no arrastran OCs viejas.
 
 ### 2. Validacion previa obligatoria

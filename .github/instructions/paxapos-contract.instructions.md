@@ -239,7 +239,7 @@ La tabla `compras_pedidos` se usa con `tipo='orden_compra'`. Otros valores de `t
 
 **Mercadería auto-creación**: con `mercaderia_external_ref` y `auto_create_mercaderia=true` (default), Paxapos crea automáticamente Producto + Mercadería con `barcode = 'RAFAM:{sha1(ref)}'`. El nombre se genera como `"{descripcion} [RAFAM-{hash10}]"`.
 
-**Regla del script RAFAM actual**: no enviar `mercaderia_external_ref` en items de OC/pedido. El exportador debe enviar `mercaderia_id` si resuelve una mercadería existente limpia del lookup o `PAXAPOS_RAFAM_DEFAULT_MERCADERIA_ID`; si no resuelve, puede enviar `name` limpio solo contra un backend actualizado que acepte creación por nombre. Con el contrato desplegado actual, esos batches deben fallar sin avanzar checkpoint; no reactivar external ref sin decisión explícita.
+**Regla del script RAFAM actual**: no enviar `mercaderia_external_ref` dentro de items de OC/pedido. El exportador primero resuelve la mercadería por link local, lookup limpio o `resolver_mercaderia.json` usando una referencia basada en descripción normalizada; guarda `name:{descripcion_normalizada}` -> `mercaderia_id` en `entity_link_store`; y el payload final del importador envía siempre `mercaderia_id`.
 
 **Mapeo de estados RAFAM→Paxapos**:
 - `N` (normal) → `estado_aprobacion=3` (no requiere) o `2` (aprobado)
@@ -641,10 +641,10 @@ El mapping debe coincidir con los IDs reales de `centros_costo` del tenant desti
 | `PAXAPOS_RAFAM_IMPORT_PATH` | Path relativo del importador RAFAM dentro de Paxapos | `rafam/migracion/importar.json` |
 | `PAXAPOS_RAFAM_SPEC_PATH` | Path relativo de spec RAFAM dentro de Paxapos | `rafam/migracion/spec.json` |
 | `PAXAPOS_RAFAM_LOOKUPS_PATH` | Path relativo de lookups RAFAM dentro de Paxapos | `rafam/migracion/lookups.json` |
+| `PAXAPOS_RAFAM_RESOLVER_MERCADERIA_PATH` | Path relativo del resolver determinístico de mercaderías RAFAM dentro de Paxapos | `rafam/migracion/resolver_mercaderia.json` |
 | `PAXAPOS_RAFAM_DEFAULT_UNIDAD_ID` | ID unidad de medida Paxapos default | Verificar contra `lookups`; ejemplo `.env`: `1` |
 | `PAXAPOS_RAFAM_DEFAULT_TIPO_FACTURA_ID` | ID tipo factura Paxapos default | (vacío) |
 | `PAXAPOS_RAFAM_DEFAULT_TIPO_PAGO_ID` | ID tipo de pago Paxapos default | `1` |
-| `PAXAPOS_RAFAM_DEFAULT_MERCADERIA_ID` | ID de mercadería Paxapos existente para fallback opcional. Vacío = intentar `name` limpio sin `mercaderia_external_ref`, lo que requiere backend compatible; el endpoint actual puede rechazarlo. | (vacío) |
 | `RAFAM_SYNC_BATCH_DELAY_SECONDS` | Delay local entre batches | `2` |
 | `PAXAPOS_VERIFY_SSL` | Verificación SSL | `false` en dev |
 | `PAXAPOS_TIMEOUT_SECONDS` | Timeout HTTP | `20` |
@@ -687,9 +687,9 @@ Resuelve por `proveedor_id + punto_de_venta + factura_nro`. Si no encuentra el `
 
 El script RAFAM no debe confiar en `pedido_internal_id` como fallback para crear pagos. Si el `link_store` local no puede resolver la OC a `pedido_id`, la OP y su `gastos[]` se omiten. Si la OC es anterior a `RAFAM_EJERCICIO_MIN`, la query de `oc_items` debe traer esa OC por dependencia `ORDEN_PAGO_IMPUT -> REG_COMP` antes de procesar la OP, pero sólo para OPs confirmadas dentro del alcance actual (`EJERCICIO >= mínimo` o `FECH_CONFIRM` desde el 1/1 del mínimo). OPs históricas fuera de ese alcance no deben arrastrar OCs viejas.
 
-### 14.9 No reactivar `mercaderia_external_ref` para RAFAM sin decisión explícita
+### 14.9 Resolver mercaderías antes de enviar items
 
-Paxapos soporta `mercaderia_external_ref` y puede agrupar/auto-crear mercaderías, pero en este script queda deshabilitado para evitar nombres `... [RAFAM-hash]`. La vía deseada para RAFAM es `mercaderia_id` por match/default o creación por `name` limpio, pero esta última requiere cambio compatible en el controller migrator. Si un cambio futuro necesita reactivar external ref, debe documentar el criterio de deduplicación, actualizar tests y asumir explícitamente la creación de Producto + Mercadería con esa clave.
+Paxapos soporta `mercaderia_external_ref` y puede agrupar/auto-crear mercaderías, pero el import final de OC/PED debe llegar con `mercaderia_id`. El script usa `resolver_mercaderia.json` antes del POST de importación, con una referencia basada en la descripción normalizada del item, y persiste el resultado en `link_mercaderia`. Si un cambio futuro modifica el criterio de deduplicación, debe migrar los links locales o guardar aliases para no duplicar Producto + Mercadería.
 
 ### 14.10 `monto_presupuestado` se auto-calcula si no se envía
 

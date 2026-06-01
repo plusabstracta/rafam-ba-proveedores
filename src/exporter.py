@@ -570,6 +570,11 @@ class MigratorExporter(BaseExporter):
         self._verify_ssl = _env_bool("PAXAPOS_VERIFY_SSL", default="true")
         self._import_endpoint = _migrator_endpoint("PAXAPOS_RAFAM_IMPORT_PATH", "rafam/migracion/importar.json")
         self._import_url = _build_migrator_url(self._base_url, self._tenant, self._import_endpoint)
+        self._resolver_endpoint = _migrator_endpoint(
+            "PAXAPOS_RAFAM_RESOLVER_MERCADERIA_PATH",
+            "rafam/migracion/resolver_mercaderia.json",
+        )
+        self._resolver_url = _build_migrator_url(self._base_url, self._tenant, self._resolver_endpoint)
         self._dry_run = dry_run
         self._link_store = EntityLinkStore()
         self._lookup_payload = fetch_migrator_lookups([
@@ -586,7 +591,7 @@ class MigratorExporter(BaseExporter):
             "nombre_compra",
         )
         self._mercaderias_by_name = self._build_clean_mercaderia_index(self._mercaderias, "name")
-        self._default_mercaderia_id = self._to_int(os.getenv("PAXAPOS_RAFAM_DEFAULT_MERCADERIA_ID"))
+        self._mercaderia_resolved: dict[str, int] = {}
         self._tipos_factura = self._lookup_list(self._lookup_payload, "tipos_factura")
         self._tipos_factura_by_codename = self._build_single_index(self._tipos_factura, "codename")
         self._tipos_factura_by_name = self._build_single_index(self._tipos_factura, "name")
@@ -2144,27 +2149,27 @@ class MigratorExporter(BaseExporter):
 
     def _map_ped_item(self, raw: dict) -> dict | None:
         descripcion = raw.get("DESCRIP_BIE")
-        mercaderia_id = self._resolve_mercaderia_id(
-            raw,
-            description_field="DESCRIP_BIE",
-            ref_builder=self._mercaderia_external_ref_ped_item,
-        )
-
         cantidad = raw.get("CANTIDAD")
         if cantidad is None:
             return None
 
-        if mercaderia_id is None and not str(descripcion or "").strip():
+        if not str(descripcion or "").strip():
+            return None
+
+        unidad_de_medida_id = self._resolve_unidad_medida_id(raw)
+        mercaderia_id = self._resolve_mercaderia_id(
+            raw,
+            description_field="DESCRIP_BIE",
+            unidad_de_medida_id=unidad_de_medida_id,
+        )
+        if mercaderia_id is None:
             return None
 
         item = {
             "cantidad": float(cantidad),
-            "unidad_de_medida_id": self._resolve_unidad_medida_id(raw),
+            "unidad_de_medida_id": unidad_de_medida_id,
+            "mercaderia_id": mercaderia_id,
         }
-        if mercaderia_id is not None:
-            item["mercaderia_id"] = mercaderia_id
-        else:
-            item["name"] = str(descripcion).strip()[:255]
 
         # precio_unitario: Paxapos lo multiplica por cantidad y guarda el total en PedidoMercaderia.precio.
         if raw.get("COSTO_UNI") is not None:
@@ -2211,27 +2216,29 @@ class MigratorExporter(BaseExporter):
 
     def _map_oc_item(self, raw: dict) -> dict | None:
         descripcion = raw.get("DESCRIPCION")
-        mercaderia_id = self._resolve_mercaderia_id(
-            raw,
-            description_field="DESCRIPCION",
-            ref_builder=self._mercaderia_external_ref_oc_item,
-        )
-
         cantidad = raw.get("CANTIDAD")
         if cantidad is None:
             return None
 
-        if mercaderia_id is None and not str(descripcion or "").strip():
+        if not str(descripcion or "").strip():
+            return None
+
+        unidad_de_medida_id = self._resolve_unidad_medida_id(raw)
+        proveedor_id = self._resolve_proveedor_id(raw)
+        mercaderia_id = self._resolve_mercaderia_id(
+            raw,
+            description_field="DESCRIPCION",
+            unidad_de_medida_id=unidad_de_medida_id,
+            proveedor_id=proveedor_id,
+        )
+        if mercaderia_id is None:
             return None
 
         item = {
             "cantidad": float(cantidad),
-            "unidad_de_medida_id": self._resolve_unidad_medida_id(raw),
+            "unidad_de_medida_id": unidad_de_medida_id,
+            "mercaderia_id": mercaderia_id,
         }
-        if mercaderia_id is not None:
-            item["mercaderia_id"] = mercaderia_id
-        else:
-            item["name"] = str(descripcion).strip()[:255]
 
         # precio_unitario: Paxapos lo multiplica por cantidad y guarda el total en PedidoMercaderia.precio.
         if raw.get("IMP_UNITARIO") is not None:
@@ -2603,24 +2610,128 @@ class MigratorExporter(BaseExporter):
         from .gateway_mapper import _UM_DEFAULT
         return _UM_DEFAULT
 
-    def _resolve_mercaderia_id(self, raw: dict, *, description_field: str, ref_builder) -> int | None:
+    def _resolve_mercaderia_id(
+        self,
+        raw: dict,
+        *,
+        description_field: str,
+        unidad_de_medida_id: int | None = None,
+        proveedor_id: int | None = None,
+    ) -> int | None:
         description = raw.get(description_field)
-        ref = ref_builder(raw)
-        for source_key in self._mercaderia_source_keys(raw, description, ref):
-            remote = self._link_store.get_remote_id("mercaderia", source_key)
-            remote_id = self._to_int(remote)
+        normalized = self._normalize_text(description)
+        if not normalized:
+            return None
+
+        source_key = self._mercaderia_description_source_key(normalized)
+        cached = self._mercaderia_resolved.get(source_key)
+        if cached is not None:
+            return cached
+
+        remote = self._link_store.get_remote_id("mercaderia", source_key)
+        remote_id = self._to_int(remote)
+        if remote_id is not None:
+            self._mercaderia_resolved[source_key] = remote_id
+            return remote_id
+
+        for index in (self._mercaderias_by_nombre_compra, self._mercaderias_by_name):
+            row = index.get(normalized)
+            remote_id = self._to_int(row.get("id")) if row else None
             if remote_id is not None:
+                self._save_mercaderia_link(
+                    source_key,
+                    remote_id,
+                    barcode=row.get("barcode"),
+                    nombre_compra=row.get("nombre_compra") or row.get("name"),
+                )
                 return remote_id
 
-        normalized = self._normalize_text(description)
-        if normalized:
-            for index in (self._mercaderias_by_nombre_compra, self._mercaderias_by_name):
-                row = index.get(normalized)
-                remote_id = self._to_int(row.get("id")) if row else None
-                if remote_id is not None:
-                    return remote_id
+        if self._dry_run:
+            return None
 
-        return self._default_mercaderia_id
+        resolved = self._resolve_mercaderia_via_api(
+            description=str(description).strip(),
+            normalized_description=normalized,
+            unidad_de_medida_id=unidad_de_medida_id,
+            proveedor_id=proveedor_id,
+        )
+        remote_id = self._to_int(resolved.get("mercaderia_id"))
+        if remote_id is None:
+            raise RuntimeError(f"resolver_mercaderia no devolvio mercaderia_id para {description!r}")
+
+        self._save_mercaderia_link(
+            source_key,
+            remote_id,
+            barcode=resolved.get("barcode"),
+            nombre_compra=resolved.get("nombre_compra"),
+        )
+        return remote_id
+
+    def _resolve_proveedor_id(self, raw: dict) -> int | None:
+        cod_prov = raw.get("COD_PROV")
+        if cod_prov is None:
+            return None
+        remote = self._link_store.get_remote_id("proveedores", str(cod_prov))
+        return self._to_int(remote)
+
+    @staticmethod
+    def _mercaderia_description_source_key(normalized_description: str) -> str:
+        return f"name:{normalized_description}"
+
+    @staticmethod
+    def _mercaderia_description_external_ref(normalized_description: str) -> dict:
+        return {
+            "source": "rafam",
+            "entity": "mercaderia",
+            "desc": normalized_description,
+        }
+
+    def _resolve_mercaderia_via_api(
+        self,
+        *,
+        description: str,
+        normalized_description: str,
+        unidad_de_medida_id: int | None,
+        proveedor_id: int | None,
+    ) -> dict:
+        item: dict = {
+            "descripcion": description[:255],
+            "unidad_de_medida_id": unidad_de_medida_id or self._resolve_unidad_medida_id({}),
+        }
+        if proveedor_id is not None:
+            item["proveedor_id"] = proveedor_id
+
+        payload = {
+            "mercaderia_external_ref": self._mercaderia_description_external_ref(normalized_description),
+            "item": item,
+            "pedido": {"proveedor_id": proveedor_id} if proveedor_id is not None else {},
+            "options": {"create_if_missing": True},
+        }
+        parsed = self._post_json(self._resolver_url, payload)
+        resolver = parsed.get("resolver") if isinstance(parsed, dict) else None
+        if not isinstance(resolver, dict):
+            raise RuntimeError(f"Respuesta invalida de resolver_mercaderia para {description!r}")
+        if not resolver.get("success"):
+            message = resolver.get("message") or "No se pudo resolver mercaderia"
+            raise RuntimeError(str(message))
+        return resolver
+
+    def _save_mercaderia_link(
+        self,
+        source_key: str,
+        remote_id: int,
+        *,
+        barcode=None,
+        nombre_compra=None,
+    ) -> None:
+        self._link_store.save_link(
+            entity="mercaderia",
+            source_key=source_key,
+            remote_id=str(remote_id),
+            barcode=str(barcode) if barcode else None,
+            nombre_compra=str(nombre_compra)[:255] if nombre_compra else None,
+        )
+        self._mercaderia_resolved[source_key] = remote_id
 
     def _mercaderia_source_keys(self, raw: dict, description, ref: dict | None) -> list[str]:
         keys: list[str] = []

@@ -388,6 +388,8 @@ class TestMigratorExporterExtraPaths:
     def test_write_batch_ped_items_builds_grouped_payload(self, monkeypatch, tmp_path):
         exporter = _migrator(monkeypatch, tmp_path)
         exporter._link_store.save_link("unidad_medida", "UN", "9")
+        exporter._link_store.save_link("mercaderia", "name:resma a4", "188")
+        exporter._link_store.save_link("mercaderia", "name:lapicera", "189")
         sent = []
         exporter._post_json = lambda _url, payload: sent.append(payload) or {
             "stats": {"pedidos": {"ok": 1, "error": 0}}
@@ -405,8 +407,8 @@ class TestMigratorExporterExtraPaths:
         assert pedido["centro_costo_id"] == 1
         assert len(pedido["items"]) == 2
         assert pedido["items"][0]["unidad_de_medida_id"] == 9
-        assert pedido["items"][0]["name"] == "Resma A4"
-        assert "mercaderia_id" not in pedido["items"][0]
+        assert pedido["items"][0]["mercaderia_id"] == 188
+        assert "name" not in pedido["items"][0]
         assert "mercaderia_external_ref" not in pedido["items"][0]
 
     def test_write_batch_ped_items_raises_without_resolvable_items(self, monkeypatch, tmp_path):
@@ -417,6 +419,7 @@ class TestMigratorExporterExtraPaths:
     def test_write_batch_orden_compra_create_anular_skip_and_register(self, monkeypatch, tmp_path):
         exporter = _migrator(monkeypatch, tmp_path, dry_run=False)
         exporter._link_store.save_link("proveedores", "99", "777")
+        exporter._link_store.save_link("mercaderia", "name:toner negro", "188")
 
         anular_key = json.dumps({"ejercicio": 2026, "nro_oc": 200, "uni_compra": 1}, sort_keys=True)
         exporter._link_store.save_link(

@@ -59,6 +59,18 @@ def exporter_with_links(dev_engine):
                 source_key=str(cod),
                 remote_id=str(10000 + int(cod)),
             )
+        # En dry-run no llamamos al resolver remoto; simulamos mercaderías ya linkeadas
+        # por la identidad RAFAM basada en la descripción normalizada.
+        descriptions = conn.execute(text("SELECT DISTINCT DESCRIPCION FROM OC_ITEMS WHERE DESCRIPCION IS NOT NULL")).fetchall()
+        for idx, (description,) in enumerate(descriptions, start=1):
+            normalized = exp._normalize_text(description)
+            if not normalized:
+                continue
+            exp._link_store.save_link(
+                entity="mercaderia",
+                source_key=exp._mercaderia_description_source_key(normalized),
+                remote_id=str(200000 + idx),
+            )
     return exp
 
 
@@ -141,15 +153,15 @@ class TestOcIntegration:
                 assert "descripcion" not in item, f"Item con descripcion en {oc['external_id']}"
                 assert "observacion" not in item, f"Item con observacion en {oc['external_id']}"
 
-    def test_items_envian_name_sin_external_ref(self, oc_payloads):
-        """Los items no disparan auto-creación de mercaderías con sufijo RAFAM."""
+    def test_items_envian_mercaderia_id_sin_external_ref(self, oc_payloads):
+        """Los items llegan al importador con mercaderia_id resuelto localmente."""
         _, all_ocs = oc_payloads
         total_items = 0
         for oc in all_ocs:
             for item in oc.get("items", []):
                 total_items += 1
-                assert "name" in item
-                assert "[RAFAM-" not in item["name"]
+                assert isinstance(item.get("mercaderia_id"), int)
+                assert "name" not in item
                 assert "mercaderia_external_ref" not in item
         assert total_items > 0
 
@@ -181,10 +193,10 @@ class TestOcIntegration:
         for oc in all_ocs:
             assert len(oc["items"]) > 0, f"OC {oc['external_id']} sin items"
             for item in oc["items"]:
-                assert "name" in item
+                assert "mercaderia_id" in item
                 assert "cantidad" in item
                 assert "unidad_de_medida_id" in item
-                assert "mercaderia_id" not in item
+                assert "name" not in item
                 assert "mercaderia_external_ref" not in item
 
     def test_external_id_completo(self, oc_payloads):
