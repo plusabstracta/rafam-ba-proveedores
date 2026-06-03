@@ -199,11 +199,10 @@ class TestOcIntegration:
         for oc in all_ocs:
             assert len(oc["items"]) > 0, f"OC {oc['external_id']} sin items"
             for item in oc["items"]:
-                assert "mercaderia_external_ref" in item
+                assert "name" in item
+                assert "mercaderia_external_ref" not in item
                 assert "cantidad" in item
                 assert "unidad_de_medida_id" in item
-                assert item["mercaderia_external_ref"]["entity"] == "oc_items"
-                assert item["mercaderia_external_ref"]["source"] == "rafam"
 
     def test_external_id_completo(self, oc_payloads):
         _, all_ocs = oc_payloads

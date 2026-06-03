@@ -262,23 +262,23 @@ class TestWriteBatchOrdenPago:
             row(1004, 1, 100, estado="A"),  # anulada -> omitida por estado
             row(1005, 1, 100, estado="C", confirmado="N"),  # no confirmada -> omitida
             row(1006, 1, 100, estado="C", fech_confirm=""),  # sin FECH_CONFIRM -> omitida
-            row(1007, 1, 100, estado="N", cc_nro="0001-00000107"),  # normal confirmada -> enviada
+            row(1007, 1, 100, estado="N", cc_nro="0001-00000107"),  # normal confirmada -> omitida por estado
         ]
 
         sent_payloads = []
 
         def fake_post(url, payload):
             sent_payloads.append(payload)
-            return {"stats": {"ordenes_pago": {"ok": 3, "error": 0}}}
+            return {"stats": {"ordenes_pago": {"ok": 2, "error": 0}}}
 
         exp._post_json = fake_post
         exp.write_batch("orden_pago", columns, rows)
 
         assert len(sent_payloads) == 1
         ops = sent_payloads[0]["ordenes_pago"]
-        assert len(ops) == 3
+        assert len(ops) == 2
         ids = {op["external_id"]["nro_op"] for op in ops}
-        assert ids == {1001, 1002, 1007}
+        assert ids == {1001, 1002}
         # verificar que gasto_nro_comprobante se asignó desde OPI_NRO_COMPROB
         assert ops[0]["gasto_nro_comprobante"] == "0001-00000100"
         assert ops[1]["gasto_nro_comprobante"] == "0001-00000200"
@@ -931,8 +931,8 @@ class TestWriteBatchOcItems:
         assert item["cantidad"] == 10.0
         assert item["precio_unitario"] == 50.5
         assert item["recibida_cantidad"] == 3.0
-        assert "mercaderia_external_ref" in item
-        assert item["mercaderia_external_ref"]["entity"] == "oc_items"
+        assert "name" in item
+        assert "mercaderia_external_ref" not in item
         assert item["unidad_de_medida_id"] == 5  # fallback Unidad (id 5, link_store vacio)
 
     # ── Varias OCs en un batch ──

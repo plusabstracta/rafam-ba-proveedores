@@ -1763,7 +1763,7 @@ class MigratorExporter(BaseExporter):
                         oc_sks.append(oc_sk)
 
             estado = str(raw.get("ESTADO_OP", "")).strip().upper()
-            if estado not in {"C", "N"}:
+            if estado != "C":
                 skipped_estado[estado or "(vacio)"] = skipped_estado.get(estado or "(vacio)", 0) + 1
                 continue
             confirmado = str(raw.get("CONFIRMADO", "")).strip().upper()
@@ -2235,7 +2235,6 @@ class MigratorExporter(BaseExporter):
             return None
 
         item = {
-            "mercaderia_external_ref": mercaderia_external_ref,
             "cantidad": float(cantidad),
             "unidad_de_medida_id": self._resolve_unidad_medida_id(raw),
         }
