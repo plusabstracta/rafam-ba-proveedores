@@ -13,16 +13,19 @@ LIMIT ?=
 EXPORT ?= csv
 
 .PHONY: help setup install env load-dev update-mapping explore-schema extract-cat-uni-med rafam-context status run-all test coverage reset-all \
-	run-proveedores run-pedidos run-ped_items run-solic_gastos \
+	run-proveedores run-solic_gastos \
 	run-orden_compra run-oc_items run-orden_pago \
 	run-proveedores-migrator run-proveedores-migrator-dry \
 	run-oc_items-migrator run-oc_items-migrator-dry \
 	run-orden_pago-migrator run-orden_pago-migrator-dry \
 	migrate-proveedores migrate-proveedores-dry \
 	migrate-oc migrate-oc-dry \
-	migrate-op migrate-op-dry migrate-all migrate-all-dry \
+	migrate-facturas migrate-facturas-dry \
+	migrate-op migrate-op-dry \
+	migrate-retenciones migrate-retenciones-dry \
+	migrate-all migrate-all-dry \
 	migrator-spec migrator-lookups \
-	reset-proveedores reset-pedidos reset-ped_items reset-solic_gastos \
+	reset-proveedores reset-solic_gastos \
 	reset-orden_compra reset-oc_items reset-orden_pago
 
 help:
@@ -47,15 +50,14 @@ help:
 	@echo "  make migrator-spec      Consulta spec.json del migrator RAFAM"
 	@echo "  make migrator-lookups   Consulta lookups.json del migrator RAFAM"
 	@echo ""
-	@echo "  --- Migracion RAFAM -> Paxapos (3 scripts oficiales) ---"
-	@echo "  make migrate-proveedores       Migra PROVEEDORES"
-	@echo "  make migrate-proveedores-dry   Idem en dry-run"
-	@echo "  make migrate-oc                Migra ORDEN_COMPRA + OC_ITEMS (sin pagos)"
-	@echo "  make migrate-oc-dry            Idem en dry-run"
-	@echo "  make migrate-op                Migra ORDEN_PAGO + RETENCIONES (con comprobantes)"
-	@echo "  make migrate-op-dry            Idem en dry-run"
-	@echo "  make migrate-all               Pipeline completo: proveedores -> OC -> OP"
-	@echo "  make migrate-all-dry           Pipeline completo en dry-run"
+	@echo "  --- Migracion RAFAM -> Paxapos (5 migradores) ---"
+	@echo "  make migrate-proveedores       1. Migra PROVEEDORES"
+	@echo "  make migrate-oc                2. Migra ORDEN_COMPRA + OC_ITEMS"
+	@echo "  make migrate-facturas          3. Migra FACTURAS/GASTOS (SOLIC_GASTOS)"
+	@echo "  make migrate-op                4. Migra ORDENES DE PAGO (auto-crea gastos si faltan)"
+	@echo "  make migrate-retenciones       5. Migra RETENCIONES (ORDEN_PAGO_DEDUC)"
+	@echo "  make migrate-all               Pipeline completo (los 5 en orden)"
+	@echo "  make migrate-*-dry             Cualquiera de los anteriores en dry-run"
 	@echo "  make reset-proveedores  Resetea checkpoint de proveedores"
 	@echo "  make reset-all          Resetea todos los checkpoints"
 	@echo "  make test               Corre tests"
@@ -127,7 +129,7 @@ run-orden_pago-migrator:
 	$(PY) main.py run --entity orden_pago --batch-size $(BATCH) $(if $(LIMIT),--limit $(LIMIT),) --export migrator
 
 # ───────────────────────────────────────────────────────────────────────────
-# Migracion RAFAM -> Paxapos (los 3 scripts oficiales)
+# Migracion RAFAM -> Paxapos (5 migradores independientes)
 #
 # Cada target migra exactamente UN dominio del flujo RAFAM -> Paxapos via
 # POST /:tenant/rafam/migracion/importar.json (RafamMigracionesController).
@@ -150,25 +152,37 @@ migrate-oc:
 migrate-oc-dry:
 	$(PY) main.py run --entity oc_items --batch-size $(BATCH) $(if $(LIMIT),--limit $(LIMIT),) --export migrator --dry-run
 
-# 3. ORDENES DE PAGO (ORDEN_PAGO + RETENCIONES -> account_egresos + retenciones)
+# 3. FACTURAS / GASTOS (SOLIC_GASTOS + CTA_COMPROB -> account_gastos)
+#    Migra comprobantes de proveedores (facturas recibidas) como gastos en Paxapos.
+#    Requiere que los proveedores y OCs ya estén migrados (usa links para resolver FKs).
+migrate-facturas:
+	$(PY) main.py run --entity solic_gastos --batch-size $(BATCH) $(if $(LIMIT),--limit $(LIMIT),) --export migrator
+
+migrate-facturas-dry:
+	$(PY) main.py run --entity solic_gastos --batch-size $(BATCH) $(if $(LIMIT),--limit $(LIMIT),) --export migrator --dry-run
+
+# 4. ORDENES DE PAGO (ORDEN_PAGO -> account_egresos)
 #    Envia gasto_nro_comprobante (PDV-NRO_COMPROB) por OP. Si Paxapos no encuentra
-#    el gasto, lo crea desde los datos de CTA_COMPROB embebidos en gastos[].
+#    el gasto, lo auto-crea desde los datos de CTA_COMPROB embebidos en gastos[].
 migrate-op:
 	$(PY) main.py run --entity orden_pago --batch-size $(BATCH) $(if $(LIMIT),--limit $(LIMIT),) --export migrator
 
 migrate-op-dry:
 	$(PY) main.py run --entity orden_pago --batch-size $(BATCH) $(if $(LIMIT),--limit $(LIMIT),) --export migrator --dry-run
 
-# Pipeline completo: respeta orden de FKs (proveedores -> OC -> OP)
-migrate-all: migrate-proveedores migrate-oc migrate-op
+# 5. RETENCIONES (ORDEN_PAGO_DEDUC -> retenciones vinculadas a OPs)
+#    Escanea las mismas OPs confirmadas y trae deducciones de ORDEN_PAGO_DEDUC.
+#    Requiere que las OPs ya estén migradas (usa link de orden_pago para vincular).
+migrate-retenciones:
+	$(PY) main.py run --entity retenciones --batch-size $(BATCH) $(if $(LIMIT),--limit $(LIMIT),) --export migrator
 
-migrate-all-dry: migrate-proveedores-dry migrate-oc-dry migrate-op-dry
+migrate-retenciones-dry:
+	$(PY) main.py run --entity retenciones --batch-size $(BATCH) $(if $(LIMIT),--limit $(LIMIT),) --export migrator --dry-run
 
-run-pedidos:
-	$(PY) main.py run --entity pedidos --batch-size $(BATCH) $(if $(LIMIT),--limit $(LIMIT),) --export $(EXPORT)
+# Pipeline completo: respeta orden de FKs (proveedores -> OC -> facturas -> OP -> retenciones)
+migrate-all: migrate-proveedores migrate-oc migrate-facturas migrate-op migrate-retenciones
 
-run-ped_items:
-	$(PY) main.py run --entity ped_items --batch-size $(BATCH) $(if $(LIMIT),--limit $(LIMIT),) --export $(EXPORT)
+migrate-all-dry: migrate-proveedores-dry migrate-oc-dry migrate-facturas-dry migrate-op-dry migrate-retenciones-dry
 
 run-solic_gastos:
 	$(PY) main.py run --entity solic_gastos --batch-size $(BATCH) $(if $(LIMIT),--limit $(LIMIT),) --export $(EXPORT)
@@ -187,12 +201,6 @@ reset-all:
 
 reset-proveedores:
 	$(PY) main.py reset --entity proveedores
-
-reset-pedidos:
-	$(PY) main.py reset --entity pedidos
-
-reset-ped_items:
-	$(PY) main.py reset --entity ped_items
 
 reset-solic_gastos:
 	$(PY) main.py reset --entity solic_gastos

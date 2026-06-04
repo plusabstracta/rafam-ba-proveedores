@@ -264,45 +264,6 @@ class TestGatewayExporter:
             exporter.write_batch("orden_pago", columns, [row])
 
 
-PED_COLUMNS = [
-    "EJERCICIO",
-    "NUM_PED",
-    "ORDEN",
-    "CLASE",
-    "TIPO",
-    "INCISO",
-    "PAR_PRIN",
-    "PAR_PARC",
-    "CANTIDAD",
-    "COSTO_UNI",
-    "DESCRIP_BIE",
-    "UNI_MED",
-    "JURISDICCION",
-    "PED_COSTO_TOT",
-]
-
-
-def _ped_row(**overrides):
-    data = {
-        "EJERCICIO": "2026",
-        "NUM_PED": "10",
-        "ORDEN": "1",
-        "CLASE": "1",
-        "TIPO": "2",
-        "INCISO": "3",
-        "PAR_PRIN": "4",
-        "PAR_PARC": "5",
-        "CANTIDAD": "2",
-        "COSTO_UNI": "15.50",
-        "DESCRIP_BIE": "Resma A4",
-        "UNI_MED": "UN",
-        "JURISDICCION": "1110104000",
-        "PED_COSTO_TOT": "31",
-    }
-    data.update(overrides)
-    return tuple(data.get(col, "") for col in PED_COLUMNS)
-
-
 ORDEN_COMPRA_COLUMNS = [
     "EJERCICIO",
     "UNI_COMPRA",
@@ -355,8 +316,10 @@ def _orden_compra_row(**overrides):
 class TestMigratorExporterExtraPaths:
     def test_write_batch_dispatch_disabled_and_unknown(self, monkeypatch, tmp_path):
         exporter = _migrator(monkeypatch, tmp_path)
-        for entity in ("ped_items", "orden_compra", "solic_gastos", "pedidos"):
-            exporter.write_batch(entity, [], [])
+        # orden_compra is disabled (migrated via oc_items instead)
+        exporter.write_batch("orden_compra", [], [])
+        # solic_gastos with empty rows is a no-op (lote vacío)
+        exporter.write_batch("solic_gastos", [], [])
         with pytest.raises(ValueError):
             exporter.write_batch("otra", [], [])
 
@@ -383,33 +346,6 @@ class TestMigratorExporterExtraPaths:
         assert link["remote_id"] == "700"
         assert link["cuit"] == "20123456783"
         assert link["cod_estado"] == "A"
-
-    def test_write_batch_ped_items_builds_grouped_payload(self, monkeypatch, tmp_path):
-        exporter = _migrator(monkeypatch, tmp_path)
-        exporter._link_store.save_link("unidad_medida", "UN", "9")
-        sent = []
-        exporter._post_json = lambda _url, payload: sent.append(payload) or {
-            "stats": {"pedidos": {"ok": 1, "error": 0}}
-        }
-
-        exporter._write_batch_ped_items(
-            PED_COLUMNS,
-            [_ped_row(ORDEN="1"), _ped_row(ORDEN="2", DESCRIP_BIE="Lapicera")],
-        )
-
-        assert len(sent) == 1
-        pedido = sent[0]["pedidos"][0]
-        assert pedido["external_id"] == {"ejercicio": 2026, "num_ped": 10}
-        assert pedido["Pedido"]["monto_presupuestado"] == 31.0
-        assert pedido["centro_costo_id"] == 1
-        assert len(pedido["items"]) == 2
-        assert pedido["items"][0]["unidad_de_medida_id"] == 9
-        assert pedido["items"][0]["mercaderia_external_ref"]["par_parc"] == 5
-
-    def test_write_batch_ped_items_raises_without_resolvable_items(self, monkeypatch, tmp_path):
-        exporter = _migrator(monkeypatch, tmp_path, dry_run=False)
-        with pytest.raises(RuntimeError, match="sin items resolubles"):
-            exporter._write_batch_ped_items(PED_COLUMNS, [_ped_row(ORDEN="")])
 
     def test_write_batch_orden_compra_create_anular_skip_and_register(self, monkeypatch, tmp_path):
         exporter = _migrator(monkeypatch, tmp_path, dry_run=False)
@@ -597,20 +533,6 @@ class TestMigratorExporterExtraPaths:
 
     def test_persist_links_sections_and_error_cases(self, monkeypatch, tmp_path):
         exporter = _migrator(monkeypatch, tmp_path, dry_run=False)
-        exporter._persist_links(
-            "ped_items",
-            {
-                "results": {
-                    "pedidos": [
-                        {"success": True, "external_id": {"ejercicio": 2026, "num_ped": 10}, "id": 1},
-                        {"success": True, "external_id": {"ejercicio": 2026}, "id": 2},
-                        {"success": False, "external_id": {"ejercicio": 2026, "num_ped": 11}, "id": 3},
-                    ]
-                }
-            },
-            {},
-        )
-        assert exporter._link_store.get_remote_id("pedido", json.dumps({"ejercicio": 2026, "num_ped": 10}, sort_keys=True)) == "1"
 
         op_source = json.dumps({"ejercicio": 2026, "nro_op": 9}, sort_keys=True)
         exporter._persist_links(

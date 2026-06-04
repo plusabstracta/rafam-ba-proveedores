@@ -31,6 +31,7 @@ from urllib import error, request
 
 from .entity_link_store import EntityLinkStore
 from .gateway_mapper import map_proveedor_migrator_row, map_proveedor_row, resolve_centro_costo_id
+from .retry_store import REASON_BACKEND_REJECTED, REASON_DEPENDENCY_MISSING
 
 logger = logging.getLogger(__name__)
 
@@ -592,6 +593,10 @@ class MigratorExporter(BaseExporter):
         self._tipos_retencion_by_name = self._build_single_index(self._tipos_retencion, "name")
         self._missing_mercaderia_matches: dict[str, int] = {}
         self._source_repo = None
+        self._retry_store = None
+        # Ultima respuesta parseada del receptor; la usa _record_batch_outcomes
+        # para actualizar la cola de reintentos sin tocar cada _write_batch_*.
+        self._last_parsed = None
         self._retencion_skipped_no_catalog: int = 0
         self._retencion_skipped_no_match: dict[str, int] = {}
 
@@ -602,6 +607,84 @@ class MigratorExporter(BaseExporter):
 
     def attach_source(self, source_repo) -> None:
         self._source_repo = source_repo
+
+    def attach_retry_store(self, retry_store) -> None:
+        """Inyecta la cola de reintentos (F1).
+
+        Con la cola conectada, los errores por fila del receptor (207) se
+        encolan para reintentar en la proxima corrida y las filas que finalmente
+        se migran OK se resuelven (eliminan de la cola). El manejo es fila-a-fila:
+        un batch no se cancela por una fila mala.
+        """
+        self._retry_store = retry_store
+
+    # Seccion de la respuesta `results`/`errors` por nombre de entidad de config.
+    _RESULT_SECTION_BY_ENTITY = {
+        "proveedores": "proveedores",
+        "oc_items": "ordenes_compra",
+        "orden_compra": "ordenes_compra",
+        "solic_gastos": "gastos",
+        "orden_pago": "ordenes_pago",
+        "retenciones": "retenciones",
+    }
+
+    @staticmethod
+    def _outcome_key(section: str, external_id) -> str | None:
+        """Construye la clave estable de la cola desde el external_id de la respuesta.
+
+        Replica las convenciones de source_key usadas en _persist_links_* para
+        que resolve()/enqueue() apunten a la misma fila que el link store.
+        """
+        if external_id is None:
+            return None
+        if not isinstance(external_id, dict):
+            return str(external_id)
+        if section == "proveedores":
+            value = external_id.get("cod_prov")
+            return str(value) if value is not None else None
+        if section == "ordenes_compra":
+            fields = ["ejercicio", "uni_compra", "nro_oc"]
+        elif section in ("ordenes_pago", "retenciones"):
+            fields = ["ejercicio", "nro_op"]
+        else:
+            return json.dumps(external_id, sort_keys=True)
+        key_dict = {k: external_id[k] for k in fields if k in external_id}
+        if len(key_dict) != len(fields):
+            return None
+        return json.dumps(key_dict, sort_keys=True)
+
+    def _record_batch_outcomes(self, entity: str, parsed) -> None:
+        """Actualiza la cola de reintentos con el resultado por fila del batch.
+
+        - Filas con success=true → resolve() (salen de la cola si estaban).
+        - Filas en errors[] de esta seccion → enqueue() como backend_rejected.
+        No corre en dry_run ni sin retry_store.
+        """
+        if self._retry_store is None or self._dry_run or not isinstance(parsed, dict):
+            return
+        section = self._RESULT_SECTION_BY_ENTITY.get(entity)
+        if section is None:
+            return
+
+        results = parsed.get("results", {})
+        if isinstance(results, dict):
+            for result in results.get(section, []) or []:
+                if not isinstance(result, dict) or not result.get("success"):
+                    continue
+                key = self._outcome_key(section, result.get("external_id"))
+                if key is not None:
+                    self._retry_store.resolve(entity, key)
+
+        errors = parsed.get("errors")
+        if isinstance(errors, list):
+            for err in errors:
+                if not isinstance(err, dict) or err.get("section") != section:
+                    continue
+                key = self._outcome_key(section, err.get("external_id"))
+                if key is None:
+                    continue
+                message = err.get("message") or "fila rechazada por el receptor"
+                self._retry_store.enqueue(entity, key, REASON_BACKEND_REJECTED, str(message)[:500])
 
     def _payload_options(self) -> dict:
         # auto_create_gasto queda siempre activo: las OP vinculan/crean gastos
@@ -619,15 +702,20 @@ class MigratorExporter(BaseExporter):
         }
 
     def write_batch(self, entity: str, columns: list[str], rows: list[tuple]) -> None:
-        if entity == "proveedores":
-            return self._write_batch_proveedores(columns, rows)
+        # Reset de la ultima respuesta: si el path retorna temprano (entidad
+        # deshabilitada o batch vacio) no queremos registrar outcomes de un
+        # batch previo.
+        self._last_parsed = None
 
-        if entity == "ped_items":
-            logger.warning("Migrator [ped_items]: entidad deshabilitada — los pedidos se migran como OCs via 'oc_items'.")
+        if entity == "proveedores":
+            self._write_batch_proveedores(columns, rows)
+            self._record_batch_outcomes(entity, self._last_parsed)
             return
 
         if entity == "oc_items":
-            return self._write_batch_oc_items(columns, rows)
+            self._write_batch_oc_items(columns, rows)
+            self._record_batch_outcomes(entity, self._last_parsed)
+            return
 
         if entity == "orden_compra":
             logger.warning(
@@ -637,25 +725,22 @@ class MigratorExporter(BaseExporter):
             return
 
         if entity == "solic_gastos":
-            logger.warning(
-                "Migrator [solic_gastos]: entidad deshabilitada en migrator — los gastos NO se migran desde RAFAM. "
-                "En Paxapos los crean los usuarios al subir la factura del proveedor; el endpoint de OP los auto-crea "
-                "si todavia no existen al momento de pagar (via gasto_nro_comprobante PDV-NRO_COMPROB)."
-            )
+            self._write_batch_solic_gastos(columns, rows)
+            self._record_batch_outcomes(entity, self._last_parsed)
             return
 
         if entity == "orden_pago":
-            return self._write_batch_orden_pago(columns, rows)
+            self._write_batch_orden_pago(columns, rows)
+            self._record_batch_outcomes(entity, self._last_parsed)
+            return
 
-        if entity == "pedidos":
-            logger.warning(
-                "Migrator [%s]: entidad recibida sin items. Para migrar solicitudes usa 'ped_items' (genera pedidos con items).",
-                entity,
-            )
+        if entity == "retenciones":
+            self._write_batch_retenciones(columns, rows)
+            self._record_batch_outcomes(entity, self._last_parsed)
             return
 
         raise ValueError(
-            "Modo migrator soporta solo 3 entidades oficiales: proveedores, oc_items, orden_pago. "
+            "Modo migrator soporta solo 4 entidades oficiales: proveedores, oc_items, orden_pago, retenciones. "
             f"Recibido: {entity!r}"
         )
 
@@ -703,92 +788,6 @@ class MigratorExporter(BaseExporter):
             error_count,
             self._dry_run,
         )
-
-    def _write_batch_ped_items(self, columns: list[str], rows: list[tuple]) -> None:
-        grouped: dict[tuple[int, int], dict] = {}
-        unresolved_items = 0
-
-        for row in rows:
-            raw = dict(zip(columns, row))
-
-            ejercicio = self._to_int(raw.get("EJERCICIO"))
-            num_ped = self._to_int(raw.get("NUM_PED"))
-            if ejercicio is None or num_ped is None:
-                continue
-
-            key = (ejercicio, num_ped)
-            if key not in grouped:
-                pedido_header: dict = {
-                    "internal_id": f"rafam-ped-{ejercicio}-{num_ped}",
-                    "tipo": "solicitud",
-                    "observacion": f"Migrado RAFAM PED {ejercicio}-{num_ped}",
-                }
-                costo_tot = raw.get("PED_COSTO_TOT")
-                if costo_tot is not None:
-                    try:
-                        pedido_header["monto_presupuestado"] = float(costo_tot)
-                    except (TypeError, ValueError):
-                        pass
-                grouped[key] = {
-                    "external_id": {"ejercicio": ejercicio, "num_ped": num_ped},
-                    "Pedido": pedido_header,
-                    "items": [],
-                }
-                centro_costo_id = self._resolve_centro_costo_id(raw.get("JURISDICCION"))
-                if centro_costo_id is not None:
-                    grouped[key]["centro_costo_id"] = centro_costo_id
-
-            item = self._map_ped_item(raw)
-            if item is None:
-                unresolved_items += 1
-                self._track_unresolved_item(raw.get("DESCRIP_BIE"), raw.get("COD_PROV"))
-                continue
-            grouped[key]["items"].append(item)
-
-        pedidos = [p for p in grouped.values() if p["items"]]
-        if not pedidos:
-            msg = f"Migrator [ped_items]: lote sin items resolubles (omitidos={unresolved_items})"
-            if self._dry_run:
-                logger.warning(msg)
-                return
-            raise RuntimeError(msg)
-
-        payload = {
-            "dry_run": self._dry_run,
-            "options": self._payload_options(),
-            "proveedores": [],
-            "pedidos": pedidos,
-            "ordenes_compra": [],
-            "gastos": [],
-            "ordenes_pago": [],
-        }
-
-        url = self._import_url
-        logger.debug(
-            "Migrator request [ped_items] POST %s dry_run=%s pedidos=%d items_omitidos=%d",
-            url,
-            self._dry_run,
-            len(pedidos),
-            unresolved_items,
-        )
-        parsed = self._post_json(url, payload)
-
-        stats = parsed.get("stats", {}) if isinstance(parsed, dict) else {}
-        section_stats = stats.get("pedidos", {}) if isinstance(stats, dict) else {}
-        ok_count = section_stats.get("ok", 0)
-        error_count = section_stats.get("error", 0)
-
-        self._persist_links("ped_items", parsed, {})
-        self._raise_on_migrator_errors(parsed)
-        logger.info(
-            "Migrator OK [ped_items->pedidos]: %d ok, %d error, pedidos=%d, items_omitidos=%d, dry_run=%s",
-            ok_count,
-            error_count,
-            len(pedidos),
-            unresolved_items,
-            self._dry_run,
-        )
-        self._log_unresolved_summary("ped_items")
 
     def _write_batch_oc_items(self, columns: list[str], rows: list[tuple]) -> None:
         # ── 1. Agrupar filas por OC (cabecera + items) ────────────────────
@@ -1654,11 +1653,128 @@ class MigratorExporter(BaseExporter):
         dedup_key = (remote_prov_id, punto_de_venta, factura_nro, tipo_factura_id)
         return {"external_id": external_id, "Gasto": gasto_data}, dedup_key
 
+    def _write_batch_retenciones(self, columns: list[str], rows: list[tuple]) -> None:
+        """Pasada independiente de retenciones (F3).
+
+        Recorre las OP confirmadas del batch, trae sus deducciones desde
+        ORDEN_PAGO_DEDUC (clave 1:1 (EJERCICIO, NRO_OP)) y emite la seccion
+        top-level `retenciones`. Solo emite para OP ya migradas (link presente);
+        las que aun no tienen Egreso en Paxapos se encolan como dependency_missing
+        para reintentar en la proxima corrida.
+        """
+        if self._source_repo is None:
+            logger.error(
+                "Migrator [retenciones]: source_repo no adjunto; no se pueden traer deducciones."
+            )
+            return
+
+        # 1. Claves OP unicas del batch (EJERCICIO, NRO_OP).
+        op_keys: list[tuple[int, int]] = []
+        seen: set[tuple[int, int]] = set()
+        for row in rows:
+            raw = dict(zip(columns, row))
+            ejercicio = self._to_int(raw.get("EJERCICIO"))
+            nro_op = self._to_int(raw.get("NRO_OP"))
+            if ejercicio is None or nro_op is None:
+                continue
+            key = (ejercicio, nro_op)
+            if key not in seen:
+                seen.add(key)
+                op_keys.append(key)
+
+        if not op_keys:
+            logger.info("Migrator [retenciones]: batch sin OPs validas")
+            return
+
+        # 2. Traer deducciones por OP (misma fuente 1:1 que el embedding actual).
+        deducciones_by_op = self._source_repo.fetch_deducciones_for_ops(op_keys)
+        if deducciones_by_op is None:
+            logger.error(
+                "Migrator [retenciones]: ORDEN_PAGO_DEDUC no disponible; batch omitido."
+            )
+            return
+
+        # 3. Construir payload solo para OPs migradas; encolar las pendientes.
+        retenciones_payload = []
+        skipped_no_link = 0
+        skipped_no_deduc = 0
+        for ejercicio, nro_op in op_keys:
+            deducciones = deducciones_by_op.get((ejercicio, nro_op), [])
+            if not deducciones:
+                skipped_no_deduc += 1
+                continue
+
+            op_sk = json.dumps({"ejercicio": ejercicio, "nro_op": nro_op}, sort_keys=True)
+            op_link = self._link_store.get_link("orden_pago", op_sk)
+            if not op_link or not op_link.get("remote_id"):
+                # La OP todavia no fue migrada: encolar para reintentar.
+                skipped_no_link += 1
+                if self._retry_store is not None and not self._dry_run:
+                    self._retry_store.enqueue(
+                        "retenciones",
+                        op_sk,
+                        REASON_DEPENDENCY_MISSING,
+                        f"OP {ejercicio}-{nro_op} aun no migrada en Paxapos",
+                    )
+                continue
+
+            mapped = []
+            for ded in deducciones:
+                ret = self._map_deduccion_dict(ded, ejercicio, nro_op)
+                if ret is not None:
+                    mapped.append(ret)
+            if not mapped:
+                continue
+
+            retenciones_payload.append({
+                "external_id": {"ejercicio": ejercicio, "nro_op": nro_op},
+                "orden_pago_external_id": {"ejercicio": ejercicio, "nro_op": nro_op},
+                "retenciones": mapped,
+            })
+
+        if skipped_no_link or skipped_no_deduc:
+            logger.info(
+                "Migrator [retenciones]: %d OP sin link (encoladas), %d sin deducciones",
+                skipped_no_link, skipped_no_deduc,
+            )
+
+        if not retenciones_payload:
+            logger.info("Migrator [retenciones]: nada para enviar en este batch")
+            return
+
+        payload = {
+            "dry_run": self._dry_run,
+            "options": self._payload_options(),
+            "proveedores": [],
+            "pedidos": [],
+            "ordenes_compra": [],
+            "gastos": [],
+            "ordenes_pago": [],
+            "retenciones": retenciones_payload,
+        }
+
+        url = self._import_url
+        logger.debug(
+            "Migrator request [retenciones] POST %s dry_run=%s ops=%d",
+            url, self._dry_run, len(retenciones_payload),
+        )
+        parsed = self._post_json(url, payload)
+
+        stats = parsed.get("stats", {}) if isinstance(parsed, dict) else {}
+        section_stats = stats.get("retenciones", {}) if isinstance(stats, dict) else {}
+        self._raise_on_migrator_errors(parsed)
+        logger.info(
+            "Migrator OK [retenciones]: %d ok, %d error, dry_run=%s",
+            section_stats.get("ok", 0),
+            section_stats.get("error", 0),
+            self._dry_run,
+        )
+
     def _write_batch_orden_pago(self, columns: list[str], rows: list[tuple]) -> None:
         # Agrupa por (EJERCICIO, NRO_OP) y acumula las refs de gastos del REG_COMP
         # exacto de ORDEN_PAGO_IMPUT cuando existe.
         # NOTA: las retenciones NO vienen en este batch — se traen por separado
-        # via source_repo.fetch_retenciones_for_ops() para evitar producto cartesiano
+        # via source_repo.fetch_deducciones_for_ops() para evitar producto cartesiano
         # con los comprobantes pagados. Ver source_repository._build_orden_pago_statement.
         grouped: dict[tuple[int, int], dict] = {}
         grouped_gasto_refs: dict[tuple[int, int], list[str]] = {}
@@ -2162,69 +2278,6 @@ class MigratorExporter(BaseExporter):
             return map_proveedor_migrator_row(raw)
         return None
 
-    def _map_ped_item(self, raw: dict) -> dict | None:
-        mercaderia_external_ref = self._mercaderia_external_ref_ped_item(raw)
-        if mercaderia_external_ref is None:
-            return None
-
-        cantidad = raw.get("CANTIDAD")
-        if cantidad is None:
-            return None
-
-        item = {
-            "mercaderia_external_ref": mercaderia_external_ref,
-            "cantidad": float(cantidad),
-            "unidad_de_medida_id": self._resolve_unidad_medida_id(raw),
-        }
-
-        # precio_unitario: Paxapos lo multiplica por cantidad y guarda el total en PedidoMercaderia.precio.
-        if raw.get("COSTO_UNI") is not None:
-            item["precio_unitario"] = round(float(raw.get("COSTO_UNI")), 2)
-
-        descripcion = raw.get("DESCRIP_BIE")
-        if descripcion:
-            item["descripcion"] = str(descripcion)[:255]
-            item["observacion"] = str(descripcion)[:255]
-
-        # centro_costo_id via link_store (JURISDICCION de PED_ITEMS → centro_costo Paxapos)
-        centro_costo_id = self._resolve_centro_costo_id(raw.get("JURISDICCION"))
-        if centro_costo_id is not None:
-            item["centro_costo_id"] = centro_costo_id
-
-        return item
-
-    def _mercaderia_external_ref_ped_item(self, raw: dict) -> dict | None:
-        ejercicio = self._to_int(raw.get("EJERCICIO"))
-        num_ped = self._to_int(raw.get("NUM_PED"))
-        orden = self._to_int(raw.get("ORDEN"))
-        clase = self._to_int(raw.get("CLASE"))
-        tipo = self._to_int(raw.get("TIPO"))
-        inciso = self._to_int(raw.get("INCISO"))
-        par_prin = self._to_int(raw.get("PAR_PRIN"))
-        par_parc = self._to_int(raw.get("PAR_PARC"))
-
-        if ejercicio is None or num_ped is None or orden is None:
-            return None
-
-        ref = {
-            "source": "rafam",
-            "entity": "ped_items",
-            "ejercicio": ejercicio,
-            "num_ped": num_ped,
-            "orden": orden,
-        }
-        if clase is not None:
-            ref["clase"] = clase
-        if tipo is not None:
-            ref["tipo"] = tipo
-        if inciso is not None:
-            ref["inciso"] = inciso
-        if par_prin is not None:
-            ref["par_prin"] = par_prin
-        if par_parc is not None:
-            ref["par_parc"] = par_parc
-        return ref
-
     def _map_oc_item(self, raw: dict) -> dict | None:
         mercaderia_external_ref = self._mercaderia_external_ref_oc_item(raw)
         if mercaderia_external_ref is None:
@@ -2575,13 +2628,6 @@ class MigratorExporter(BaseExporter):
             return set()
         return {part.strip() for part in str(value).split(",") if part.strip()}
 
-    def _get_gasto_remote_id(self, rafam_ref: str) -> str | None:
-        for source_key in self._gasto_source_keys_from_ref(rafam_ref):
-            remote = self._link_store.get_remote_id("gasto", source_key)
-            if remote:
-                return remote
-        return None
-
     @staticmethod
     def _format_date_only(value) -> str:
         """Extrae solo YYYY-MM-DD de un string fecha (puede incluir hora)."""
@@ -2725,6 +2771,9 @@ class MigratorExporter(BaseExporter):
                     raise RuntimeError(f"Respuesta no JSON (Content-Type={content_type})")
 
                 parsed = json.loads(body) if body else {}
+                # Guardar para que write_batch actualice la cola de reintentos
+                # (resolve exitos / enqueue rechazos) sin tocar cada _write_batch_*.
+                self._last_parsed = parsed
                 if isinstance(parsed, dict) and parsed.get("errors"):
                     logger.debug("Migrator response errors=%s", parsed.get("errors"))
                 if dump_path:
@@ -2825,8 +2874,6 @@ class MigratorExporter(BaseExporter):
 
         if entity == "proveedores":
             self._persist_links_proveedores(results, raw_by_source_key)
-        elif entity == "ped_items":
-            self._persist_links_section(results, "pedidos", "pedido", ["ejercicio", "num_ped"])
         elif entity == "oc_items":
             self._persist_links_orden_compra(results, raw_by_source_key)
         elif entity == "orden_compra":
@@ -2995,51 +3042,6 @@ class MigratorExporter(BaseExporter):
                 confirmado=confirmado,
                 fech_confirm=fech_confirm,
                 importe_total=importe_total,
-            )
-
-    def _persist_links_section(
-        self,
-        results: dict,
-        section_key: str,
-        entity_type: str,
-        pk_fields: list[str] | None,
-    ) -> None:
-        """Persiste entity_links para una sección genérica de la respuesta.
-
-        Si pk_fields es None, usa external_id serializado completo como source_key.
-        Si pk_fields está definido, construye source_key solo con esos campos (orden fijo).
-        """
-        section = results.get(section_key, [])
-        if not isinstance(section, list):
-            return
-
-        for result in section:
-            if not isinstance(result, dict) or not result.get("success"):
-                continue
-            external_id = result.get("external_id") or {}
-            if not isinstance(external_id, dict):
-                continue
-            remote_id = result.get("id")
-            if remote_id is None:
-                continue
-
-            if pk_fields:
-                key_dict = {k: external_id[k] for k in pk_fields if k in external_id}
-                if len(key_dict) != len(pk_fields):
-                    logger.warning(
-                        "Migrator [%s]: external_id incompleto para source_key: %s",
-                        entity_type,
-                        external_id,
-                    )
-                    continue
-                source_key = json.dumps(key_dict, sort_keys=True)
-            else:
-                source_key = json.dumps(external_id, sort_keys=True)
-
-            self._link_store.save_link(
-                entity=entity_type,
-                source_key=source_key,
-                remote_id=str(remote_id),
             )
 
     @staticmethod

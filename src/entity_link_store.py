@@ -13,7 +13,6 @@ DEFAULT_LINK_SCHEMAS: dict[str, list[str]] = {
     "tipo_factura": ["name", "codigo"],
     "tipo_pago": ["name", "codigo"],
     "tipo_retencion": ["name", "codigo"],
-    "pedido": [],
     "orden_compra": ["fech_confirm", "estado_oc", "cod_prov", "importe_tot", "gasto_refs", "gasto_linked_refs", "paxapos_gasto_ids", "has_op"],
     "gasto": ["estado_solic", "importe_tot", "cod_prov"],
     "orden_pago": ["estado_op", "confirmado", "fech_confirm", "importe_total"],
@@ -157,6 +156,12 @@ class EntityLinkStore:
         if not row:
             return None
         return dict(row)
+
+    def count(self, entity: str) -> int:
+        """Cantidad de links migrados para una entidad (para reconciliacion F4)."""
+        table = self._ensure_table(entity)
+        row = self._conn.execute(f"SELECT COUNT(*) AS n FROM [{table}]").fetchone()
+        return int(row["n"]) if row else 0
 
     def mark_oc_has_op(self, source_key: str) -> None:
         """Flag an OC as having an associated OP (orden de pago)."""

@@ -29,6 +29,7 @@ from src.config import ENTITY_CONFIGS
 from src.db import create_source_engine
 from src.entity_link_store import EntityLinkStore
 from src.exporter import BaseExporter, _env_bool, build_exporter, fetch_migrator_lookups, fetch_migrator_spec
+from src.retry_store import RetryStore
 from src.source_repository import SourceRepository
 from src.sync_engine import SyncEngine
 
@@ -38,17 +39,15 @@ logger = logging.getLogger(__name__)
 
 
 _GROUPED_BATCH_FIELDS = {
-    "ped_items": ["EJERCICIO", "NUM_PED"],
     "oc_items": ["EJERCICIO", "UNI_COMPRA", "NRO_OC"],
     "orden_compra": ["EJERCICIO", "UNI_COMPRA", "NRO_OC"],
     "orden_pago": ["EJERCICIO", "NRO_OP"],
+    "retenciones": ["EJERCICIO", "NRO_OP"],
 }
 
 # Maps entity config names to the link store entity they write to.
 _ENTITY_LINK_NAMES: dict[str, str] = {
     "proveedores": "proveedores",
-    "pedidos": "pedido",
-    "ped_items": "pedido",
     "orden_compra": "orden_compra",
     "oc_items": "orden_compra",
     "solic_gastos": "gasto",
@@ -377,17 +376,29 @@ def _cmd_run_locked(args) -> None:
 
     exporter = build_exporter(args.export, force_update=args.force_update, dry_run=args.dry_run)
     engine   = _build_engine()
+    # Cola de reintentos (F1): captura filas rechazadas por el receptor para
+    # reintentarlas en la proxima corrida. Manejo fila-a-fila — el batch no se
+    # cancela por una fila mala; el watermark avanza con seguridad porque lo
+    # pendiente queda registrado aca.
+    retry_store = RetryStore()
+    if hasattr(exporter, "attach_retry_store"):
+        exporter.attach_retry_store(retry_store)
+        pending = retry_store.counts_by_entity()
+        if pending:
+            logger.info("Cola de reintentos al inicio: %s", json.dumps(pending, ensure_ascii=False))
     targets  = [args.entity] if args.entity else list(ENTITY_CONFIGS.keys())
 
     # En modo migrator, sin --entity explicito, restringir a las 3 entidades oficiales
-    # (proveedores, oc_items, orden_pago) en orden de FKs. Las demás no se migran:
+    # (proveedores, oc_items, orden_pago, retenciones) en orden de FKs. Las demas no se migran:
     #   - orden_compra (header) → reemplazado por oc_items (incluye items embebidos)
-    #   - solic_gastos          → los gastos los crean humanos en Paxapos / auto-crea el endpoint de OP
+    #   - solic_gastos          → los gastos los crean humanos en Paxapos; RAFAM solo manda el pago
     #   - pedidos / ped_items   → deshabilitados, los pedidos llegan como OCs via oc_items
+    # retenciones corre al final: depende de que la OP (Egreso) ya exista para
+    # resolver el destino; si no, se encola y se reintenta en la proxima corrida.
     if not args.entity and args.export == "migrator":
-        official = ["proveedores", "oc_items", "orden_pago"]
+        official = ["proveedores", "oc_items", "orden_pago", "retenciones"]
         targets = [e for e in official if e in ENTITY_CONFIGS]
-        logger.info("Modo migrator: ejecutando solo las 3 entidades oficiales en orden → %s", targets)
+        logger.info("Modo migrator: ejecutando entidades oficiales en orden FK → %s", targets)
 
     failed_entities: list[str] = []
     try:
@@ -408,6 +419,12 @@ def _cmd_run_locked(args) -> None:
         sys.exit(1)
     finally:
         exporter.close()
+        try:
+            final_pending = retry_store.counts_by_entity()
+            if final_pending:
+                logger.info("Cola de reintentos al finalizar: %s", json.dumps(final_pending, ensure_ascii=False))
+        finally:
+            retry_store.close()
         logger.info("Proceso finalizado.")
 
     if failed_entities:
@@ -444,6 +461,45 @@ def cmd_lookups(args) -> None:
         sys.exit(1)
 
     print(json.dumps(lookups, ensure_ascii=False, indent=2))
+
+
+def cmd_reconcile(args) -> None:
+    """Reconciliacion read-only RAFAM vs estado migrado local (F4).
+
+    Compara conteos de origen contra links migrados y la cola de reintentos.
+    NO escribe nada. Sale con codigo 2 si detecta drift (para alertas de cron).
+    """
+    from src.config import _EJERCICIO_MIN
+    from src.reconcile import format_report, has_drift, reconcile
+
+    link_store = EntityLinkStore()
+    retry_store = RetryStore()
+    try:
+        source_engine = create_source_engine()
+        with source_engine.connect() as conn:
+            source_repo = SourceRepository(conn)
+            rows = reconcile(
+                source_repo,
+                link_store,
+                retry_store,
+                ejercicio_min=_EJERCICIO_MIN,
+            )
+    except (SQLAlchemyError, ValueError) as exc:
+        logger.error("Error en reconciliacion: %s", exc)
+        sys.exit(1)
+    finally:
+        link_store.close()
+        retry_store.close()
+
+    print()
+    print(format_report(rows))
+    print()
+
+    if has_drift(rows):
+        drifted = [r.label for r in rows if r.drift != 0]
+        logger.warning("Drift detectado en: %s", ", ".join(drifted))
+        sys.exit(2)
+    logger.info("Reconciliacion OK: sin drift.")
 
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
@@ -540,6 +596,11 @@ def main() -> None:
         ),
     )
 
+    sub.add_parser(
+        "reconcile",
+        help="Reconciliacion read-only RAFAM vs migrado (drift). Exit 2 si hay drift.",
+    )
+
     reset_p = sub.add_parser("reset", help="Resetea checkpoints para forzar full load")
     reset_p.add_argument("--entity", metavar="NOMBRE", help="Entidad a resetear")
     reset_p.add_argument("--all", action="store_true", help="Resetear todas las entidades")
@@ -570,7 +631,7 @@ def main() -> None:
 
     args = parser.parse_args()
     _setup_file_logging(args)
-    {"status": cmd_status, "reset": cmd_reset, "run": cmd_run, "spec": cmd_spec, "lookups": cmd_lookups}[args.command](args)
+    {"status": cmd_status, "reset": cmd_reset, "run": cmd_run, "spec": cmd_spec, "lookups": cmd_lookups, "reconcile": cmd_reconcile}[args.command](args)
 
 
 if __name__ == "__main__":

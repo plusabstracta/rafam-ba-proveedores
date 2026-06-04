@@ -1,8 +1,7 @@
 """
 Tests de mapeo para MigratorExporter — sin llamadas HTTP reales.
 
-Validan que _map_solic_gasto, _map_ped_item, _map_oc_item y
-_write_batch_orden_pago construyen los payloads correctos.
+Validan que _map_oc_item y _write_batch_orden_pago construyen los payloads correctos.
 """
 import json
 from unittest.mock import patch
