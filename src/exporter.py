@@ -948,6 +948,30 @@ class MigratorExporter(BaseExporter):
         dedup_key = (remote_prov_id, punto_de_venta, factura_nro, tipo_factura_id)
         return {"external_id": external_id, "Gasto": gasto_data}, dedup_key
 
+    def _flush_retencion_skip_counters(self, entity_label: str) -> None:
+        """Reporta y resetea los contadores de retenciones descartadas.
+
+        Compartido por las pasadas orden_pago (retenciones embebidas) y
+        retenciones (F3 standalone). Si tipos_retencion lookup esta vacio o
+        ninguna descripcion matchea, las deducciones se descartan; sin este
+        reporte el operador solo ve "nada para enviar" sin la causa.
+        """
+        if self._retencion_skipped_no_catalog:
+            logger.warning(
+                "Migrator [%s]: %d retenciones omitidas porque tipos_retencion lookup esta vacio. "
+                "Cargar account_tipo_impuestos en el tenant Paxapos.",
+                entity_label,
+                self._retencion_skipped_no_catalog,
+            )
+            self._retencion_skipped_no_catalog = 0
+        if self._retencion_skipped_no_match:
+            logger.warning(
+                "Migrator [%s]: retenciones omitidas sin match en lookup: %s",
+                entity_label,
+                self._retencion_skipped_no_match,
+            )
+            self._retencion_skipped_no_match = {}
+
     def _write_batch_retenciones(self, columns: list[str], rows: list[tuple]) -> None:
         """Pasada independiente de retenciones (F3).
 
@@ -1032,6 +1056,8 @@ class MigratorExporter(BaseExporter):
                 "Migrator [retenciones]: %d OP sin link (encoladas), %d sin deducciones",
                 skipped_no_link, skipped_no_deduc,
             )
+
+        self._flush_retencion_skip_counters("retenciones")
 
         if not retenciones_payload:
             logger.info("Migrator [retenciones]: nada para enviar en este batch")
@@ -1461,19 +1487,7 @@ class MigratorExporter(BaseExporter):
             )
         if skipped_existing_keys:
             logger.info("Migrator [orden_pago]: %d OPs omitidas por link local existente", len(skipped_existing_keys))
-        if self._retencion_skipped_no_catalog:
-            logger.warning(
-                "Migrator [orden_pago]: %d retenciones omitidas porque tipos_retencion lookup esta vacio. "
-                "Cargar account_tipo_impuestos en el tenant Paxapos.",
-                self._retencion_skipped_no_catalog,
-            )
-            self._retencion_skipped_no_catalog = 0
-        if self._retencion_skipped_no_match:
-            logger.warning(
-                "Migrator [orden_pago]: retenciones omitidas sin match en lookup: %s",
-                self._retencion_skipped_no_match,
-            )
-            self._retencion_skipped_no_match = {}
+        self._flush_retencion_skip_counters("orden_pago")
 
         if not ordenes_pago:
             logger.info("Migrator [orden_pago]: lote vacío luego del mapeo")
