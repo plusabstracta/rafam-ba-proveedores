@@ -33,7 +33,6 @@ except ValueError:
     _EJERCICIO_MIN = None
 _EJERCICIO_MIN = _EJERCICIO_MIN or None
 _EJERCICIO_MIN_ENTITIES = {
-    "orden_compra",
     "oc_items",
     "orden_pago",
     "retenciones",
@@ -48,16 +47,6 @@ ENTITY_CONFIGS: dict[str, EntityConfig] = {
         name="proveedores",
         table_name="PROVEEDORES",
         ts_field="FECHA_ULT_COMP",
-    ),
-    "orden_compra": EntityConfig(
-        name="orden_compra",
-        table_name="ORDEN_COMPRA",
-        ts_field="FECH_OC",
-        # Re-process OCs with estado N from recent days to detect N→A transitions.
-        pending_state_field="ESTADO_OC",
-        pending_state_value="N",
-        pending_reprocess_days=30,
-        ejercicio_min=_ejercicio_min_for("orden_compra"),
     ),
     "oc_items": EntityConfig(
         name="oc_items",

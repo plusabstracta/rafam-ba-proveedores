@@ -193,44 +193,38 @@ def engine_with_data():
 
 class TestEjercicioMinFilter:
 
-    def test_orden_compra_excluye_2025(self, engine_with_data):
+    def test_oc_items_excluye_2025(self, engine_with_data):
         cfg = EntityConfig(
-            name="orden_compra",
-            table_name="ORDEN_COMPRA",
-            ts_field="FECH_OC",
-            pending_state_field="ESTADO_OC",
-            pending_state_value="N",
-            pending_reprocess_days=30,
+            name="oc_items",
+            table_name="OC_ITEMS",
+            full_load=True,
             ejercicio_min=2026,
         )
-        cp = Checkpoint(entity="orden_compra")
+        cp = Checkpoint(entity="oc_items")
 
         with engine_with_data.connect() as conn:
             repo = SourceRepository(conn)
-            with patch.dict("src.config.ENTITY_CONFIGS", {"orden_compra": cfg}):
-                stmt = repo.build_statement("orden_compra", cp)
+            with patch.dict("src.config.ENTITY_CONFIGS", {"oc_items": cfg}):
+                stmt = repo.build_statement("oc_items", cp)
                 rows = conn.execute(stmt).fetchall()
 
         ejercicios = {r[0] for r in rows}  # EJERCICIO es la primera columna de OC_ITEMS
         assert 2025 not in ejercicios, "OCs de 2025 no deben aparecer con ejercicio_min=2026"
         assert 2026 in ejercicios, "OCs de 2026 deben aparecer"
 
-    def test_orden_compra_sin_filtro_incluye_2025(self, engine_with_data):
+    def test_oc_items_sin_filtro_incluye_2025(self, engine_with_data):
         cfg = EntityConfig(
-            name="orden_compra",
-            table_name="ORDEN_COMPRA",
-            ts_field="FECH_OC",
-            pending_state_field="ESTADO_OC",
-            pending_state_value="N",
-            pending_reprocess_days=30,
+            name="oc_items",
+            table_name="OC_ITEMS",
+            full_load=True,
         )
-        cp = Checkpoint(entity="orden_compra")
+        cp = Checkpoint(entity="oc_items")
 
         with engine_with_data.connect() as conn:
             repo = SourceRepository(conn)
             # Monkey-patch config to remove ejercicio_min
-            with patch.dict("src.config.ENTITY_CONFIGS", {"orden_compra": cfg}):
-                stmt = repo.build_statement("orden_compra", cp)
+            with patch.dict("src.config.ENTITY_CONFIGS", {"oc_items": cfg}):
+                stmt = repo.build_statement("oc_items", cp)
                 rows = conn.execute(stmt).fetchall()
 
         ejercicios = {r[0] for r in rows}
@@ -381,20 +375,17 @@ class TestEjercicioMinFilter:
     def test_4_ocs_2026_procesadas(self, engine_with_data):
         """Con ejercicio_min=2026, exactamente 4 OCs distintas deben retornar."""
         cfg = EntityConfig(
-            name="orden_compra",
-            table_name="ORDEN_COMPRA",
-            ts_field="FECH_OC",
-            pending_state_field="ESTADO_OC",
-            pending_state_value="N",
-            pending_reprocess_days=30,
+            name="oc_items",
+            table_name="OC_ITEMS",
+            full_load=True,
             ejercicio_min=2026,
         )
-        cp = Checkpoint(entity="orden_compra")
+        cp = Checkpoint(entity="oc_items")
 
         with engine_with_data.connect() as conn:
             repo = SourceRepository(conn)
-            with patch.dict("src.config.ENTITY_CONFIGS", {"orden_compra": cfg}):
-                stmt = repo.build_statement("orden_compra", cp)
+            with patch.dict("src.config.ENTITY_CONFIGS", {"oc_items": cfg}):
+                stmt = repo.build_statement("oc_items", cp)
                 rows = conn.execute(stmt).fetchall()
 
         # Agrupar por (EJERCICIO, UNI_COMPRA, NRO_OC) — las 3 primeras columnas de OC_ITEMS
@@ -623,12 +614,9 @@ class TestOcToOpFlow:
     def test_cc_nro_coincide_entre_oc_y_op(self, engine_with_data):
         """El CC_NRO que trae la OC debe ser el mismo que trae la OP vinculada."""
         oc_cfg = EntityConfig(
-            name="orden_compra",
-            table_name="ORDEN_COMPRA",
-            ts_field="FECH_OC",
-            pending_state_field="ESTADO_OC",
-            pending_state_value="N",
-            pending_reprocess_days=30,
+            name="oc_items",
+            table_name="OC_ITEMS",
+            full_load=True,
             ejercicio_min=2026,
         )
         op_cfg = EntityConfig(
@@ -645,8 +633,8 @@ class TestOcToOpFlow:
             repo = SourceRepository(conn)
 
             # Obtener CC_NROs de las OCs
-            with patch.dict("src.config.ENTITY_CONFIGS", {"orden_compra": oc_cfg}):
-                oc_stmt = repo.build_statement("orden_compra", Checkpoint(entity="orden_compra"))
+            with patch.dict("src.config.ENTITY_CONFIGS", {"oc_items": oc_cfg}):
+                oc_stmt = repo.build_statement("oc_items", Checkpoint(entity="oc_items"))
                 oc_result = conn.execute(oc_stmt)
                 oc_cols = list(oc_result.keys())
                 oc_rows = oc_result.fetchall()

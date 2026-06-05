@@ -3,61 +3,62 @@
 > **Este documento es la única fuente de verdad** sobre qué tablas de RAFAM se migran a Paxapos y cómo se mapean.
 > Cualquier otra documentación que contradiga este archivo está desactualizada y debe corregirse.
 
-El proyecto `rafam-ba-proveedores` migra **6 tablas principales** desde Oracle RAFAM (schema `OWNER_RAFAM`) hacia el schema tenant de Paxapos (CakePHP 2) vía el endpoint `POST /{tenant}/rafam/migracion/importar.json`.
+El proyecto `rafam-ba-proveedores` migra datos desde Oracle RAFAM (schema `OWNER_RAFAM`) hacia el schema tenant de Paxapos (CakePHP 2) vía el endpoint `POST /{tenant}/rafam/migracion/importar.json`.
 
-La ejecución operativa del migrator se organiza en **3 pasadas/scripts**, no en 6 procesos independientes. Algunas tablas se migran como datos embebidos dentro de una pasada mayor:
+La migración se organiza en **5 entidades independientes**. Cada entidad es **1 comando = 1 checkpoint propio**: se ejecuta por separado y avanza su cursor de forma autónoma.
 
-1. `proveedores` migra `PROVEEDORES` → `account_proveedores`.
-2. `oc_items` migra `ORDEN_COMPRA` + `OC_ITEMS` → `compras_pedidos` + `compras_pedido_mercaderias`.
-3. `orden_pago` migra `ORDEN_PAGO` y, en la misma pasada, usa `CTA_COMPROB`, `CTA_HOJA_DE_RUTA`, `RETENCIONES` y `DEDUCCIONES` para crear/vincular `account_gastos`, `account_egresos_gastos` y `account_retenciones`.
+| Entidad (`--entity`) | Comando Makefile | Checkpoint | Tablas RAFAM | Destino Paxapos |
+|---|---|---|---|---|
+| `proveedores` | `make migrate-proveedores` | `proveedores` | `PROVEEDORES` | `account_proveedores` |
+| `oc_items` | `make migrate-oc` | `oc_items` | `ORDEN_COMPRA` + `OC_ITEMS` | `compras_pedidos` + `compras_pedido_mercaderias` |
+| `solic_gastos` | `make migrate-facturas` | `solic_gastos` | `SOLIC_GASTOS` + `CTA_COMPROB` | `account_gastos` |
+| `orden_pago` | `make migrate-op` | `orden_pago` | `ORDEN_PAGO` | `account_egresos` |
+| `retenciones` | `make migrate-retenciones` | `retenciones` | `ORDEN_PAGO_DEDUC` | `account_retenciones` |
 
-Además, hay **tablas de lookup** que se leen para resolver datos (no se migran como entidad propia).
+> `make migrate-all` ejecuta las 5 en orden de dependencia (FK). Cada comando admite la variante `-dry` (`make migrate-oc-dry`, …) o el flag `--dry-run`: envía `"dry_run": true` y Paxapos **valida sin persistir** (modo preview profesional para revisar payload y conteos antes de escribir).
+
+Una entidad puede combinar varias tablas RAFAM (p. ej. `oc_items` envía cabecera + ítems juntos; `orden_pago` resuelve y embebe gastos y retenciones). Además, hay **tablas de lookup / puente** que se leen para resolver datos (no se migran como entidad propia).
 
 ---
 
 ## 1. Resumen tabla por tabla
 
-| # | RAFAM (Oracle) | Paxapos (MySQL tenant) | Modo operativo |
+| # | RAFAM (Oracle) | Paxapos (MySQL tenant) | Entidad migrator |
 |---|---|---|---|
-| 1 | `PROVEEDORES` | `account_proveedores` | pasada 1: `proveedores` |
-| 2 | `ORDEN_COMPRA` | `compras_pedidos` (con `tipo='orden_compra'`) | pasada 2: embebida en `oc_items` |
-| 3 | `OC_ITEMS` | `compras_pedido_mercaderias` | pasada 2: `oc_items` |
-| 4 | `CTA_COMPROB` | `account_gastos` | pasada 3: embebida/auto-creada por `orden_pago` |
-| 5 | `ORDEN_PAGO` | `account_egresos` | pasada 3: `orden_pago` |
-| 6 | `RETENCIONES` | `account_retenciones` | pasada 3: embebida en `orden_pago` |
+| 1 | `PROVEEDORES` | `account_proveedores` | `proveedores` |
+| 2 | `ORDEN_COMPRA` | `compras_pedidos` (con `tipo='orden_compra'`) | `oc_items` (cabecera + ítems en un payload) |
+| 3 | `OC_ITEMS` | `compras_pedido_mercaderias` | `oc_items` |
+| 4 | `SOLIC_GASTOS` + `CTA_COMPROB` | `account_gastos` | `solic_gastos` |
+| 5 | `ORDEN_PAGO` | `account_egresos` | `orden_pago` |
+| 6 | `ORDEN_PAGO_DEDUC` | `account_retenciones` | `retenciones` |
 
-**Tablas RAFAM usadas como lookup (NO se migran):**
+**Tablas RAFAM usadas como lookup / puente (NO se migran como entidad):**
 
 | RAFAM | Uso |
 |---|---|
-| `CTA_HOJA_DE_RUTA` | Vista que vincula `CTA_COMPROB` ↔ `ORDEN_COMPRA` ↔ `ORDEN_PAGO`. Trae `PE_EJERCICIO`, `PE_JURISDICCION`, `OC_NRO`, `OC_COD_PROV`, `OP_NRO`, `OP_ESTADO`, `OP_NRO_CANCE`. Se usa al migrar `account_egresos` para armar HABTM `account_egresos_gastos` y para filtrar por estado pagado (`OP_ESTADO='C'`). |
-| `DEDUCCIONES` | Catálogo de tipos de retención. `RETENCIONES.COD_RET` ↔ `DEDUCCIONES.CODIGO` (vínculo naranja). Se lee `DEDUCCIONES.DESCRIPCION` para resolver `account_retenciones.tipo_impuesto_id` por heurística. |
-| `REG_COMP` | Puente para vincular `CTA_COMPROB` con `ORDEN_COMPRA` (resuelve `account_gastos.pedido_id`). Comparte `EJERCICIO + NRO_OC + COD_PROV + JURISDICCION`. |
+| `ORDEN_PAGO_IMPUT` | **Puente primario** OP ↔ `CTA_COMPROB`. Modela la imputación física de cada OP a uno o más comprobantes (PK incluye `NRO_REG_COMP + TIPO_COMPROB + NRO_COMPROB + COD_PROV`). Reemplaza la lectura de la VIEW `CTA_HOJA_DE_RUTA`. Se usa al migrar `orden_pago` para armar el HABTM `account_egresos_gastos`. |
+| `REG_COMP` | Puente `CTA_COMPROB` ↔ `ORDEN_COMPRA` (resuelve `account_gastos.pedido_id`). Comparte `EJERCICIO + NRO_OC + COD_PROV + JURISDICCION`. |
+| `CTA_COMPROB` | Factura fiscal real del proveedor (número AFIP). No es entidad propia: `solic_gastos` la lee (vía `REG_COMP`) para crear `account_gastos`, y `orden_pago` la usa para enriquecer los gastos imputados. |
+| `DEDUCCIONES` | Catálogo de tipos de retención. `ORDEN_PAGO_DEDUC.CODIGO_DEDUC` ↔ `DEDUCCIONES.CODIGO`. Se lee `DEDUCCIONES.DESCRIPCION` para resolver `account_retenciones.tipo_impuesto_id` por heurística. |
 | `JURISDICCION` | Catálogo (`JURISDICCION`, `DENOMINACION`, `SELECCIONABLE`). Se lee la denominación para nombrar centros de costo si no están en `_JURISDICCION_CENTRO_COSTO_MAP`. |
 
-**Diagrama de vínculos (colores del análisis funcional):**
+> **Ya NO se usan:** la VIEW `CTA_HOJA_DE_RUTA` (reemplazada por las tablas reales `ORDEN_PAGO_IMPUT` + `REG_COMP`) ni la tabla `RETENCIONES` (reemplazada por `ORDEN_PAGO_DEDUC`, cuya clave `(EJERCICIO, NRO_OP)` es 1:1 con la OP; la clave `(EJERCICIO, NRO_CANCE)` de `RETENCIONES` es N:1 y asignaba las retenciones a la OP equivocada).
 
-```
-                  ┌──────────────────────┐
-                  │  CTA_HOJA_DE_RUTA    │  (pivot — vista)
-                  │  PE_EJERCICIO        │
-                  │  PE_JURISDICCION ◄──── JURISDICCION (rosa)
-                  │  OC_NRO ───────────────► OC_ITEMS / RG_COMP (amarillo)
-                  │  OC_COD_PROV ──────────► PROVEEDORES (violeta)
-                  │  OP_NRO ───────────────► ORDEN_PAGO (verde)
-                  │  OP_ESTADO  = 'C'  ◄──── ORDEN_PAGO.ESTADO_OP (rojo)
-                  │  OP_NRO_CANCE ─────────► ORDEN_PAGO.NRO_CANCE
-                  └──────────────────────┘            │
-                                                       │ (celeste)
-                                                       ▼
-                                          ┌──────────────────────┐
-                                          │  RETENCIONES         │
-                                          │  EJERCICIO+NRO_CANCE │
-                                          │  COD_RET ──┐         │
-                                          └────────────┼─────────┘
-                                                       │ (naranja)
-                                                       ▼
-                                              DEDUCCIONES.CODIGO
+**Diagrama de vínculos (cadena canónica real):**
+
+```mermaid
+graph LR
+    PROV[PROVEEDORES] -->|proveedores| AP[account_proveedores]
+    OC[ORDEN_COMPRA] -->|oc_items| CP[compras_pedidos]
+    OCI[OC_ITEMS] -->|oc_items| CPM[compras_pedido_mercaderias]
+    SG[SOLIC_GASTOS] -->|solic_gastos| AG[account_gastos]
+    REG[REG_COMP] -. puente CC-OC .-> AG
+    CC[CTA_COMPROB] -. factura fiscal .-> AG
+    OP[ORDEN_PAGO] -->|orden_pago| AE[account_egresos]
+    OPI[ORDEN_PAGO_IMPUT] -. puente OP-CC .-> AE
+    OPD[ORDEN_PAGO_DEDUC] -->|retenciones| AR[account_retenciones]
+    OP -. ejercicio+nro_op 1:1 .-> OPD
+    DED[DEDUCCIONES] -. catalogo tipo_impuesto .-> AR
 ```
 
 
@@ -104,11 +105,11 @@ Además, hay **tablas de lookup** que se leen para resolver datos (no se migran 
 | `PRECIO_UNIT` | `precio_unitario` | |
 | `CLASE` + `TIPO` + `INCISO` + `PAR_PRIN` + `PAR_PARC` | `mercaderia.codigo_clasificacion` | Si dos ítems comparten la misma clasificación, comparten la misma `mercaderia` en Paxapos. |
 
-### 2.4 `CTA_COMPROB` → `account_gastos`
+### 2.4 `SOLIC_GASTOS` + `CTA_COMPROB` → `account_gastos` (entidad `solic_gastos`)
 
-Facturas reales del proveedor (con número fiscal AFIP).
+Facturas reales del proveedor (con número fiscal AFIP). **Pasada standalone `solic_gastos`** (`make migrate-facturas`): recorre `SOLIC_GASTOS` y, vía `REG_COMP`, trae el comprobante fiscal de `CTA_COMPROB` para crear/actualizar el `Gasto`, resolviendo `pedido_id` contra las OCs ya migradas.
 
-En la ejecución actual no hay una pasada standalone `cta_comprob`. El script `orden_pago` lee los datos de comprobante y el endpoint de Paxapos busca o auto-crea el `Gasto` al importar la OP, usando `gasto_nro_comprobante`.
+> **Reglas de omisión:** una SG se omite si `CTA_COMPROB_COUNT != 1` (no resuelve a un único comprobante fiscal) o si el comprobante no tiene `NRO_COMPROB`. Así se evitan gastos ambiguos o sin número fiscal.
 
 | RAFAM | Paxapos | Notas |
 |---|---|---|
@@ -132,23 +133,29 @@ En la ejecución actual no hay una pasada standalone `cta_comprob`. El script `o
 | `COD_PROV` | `proveedor_id` | |
 | `FECH_CONFIRM` | `fecha` | Sólo cuando `ESTADO_OP IN ('C', 'N')`, `CONFIRMADO='S'` y la OP tiene OC/gasto canónico. |
 | `IMPORTE_TOTAL` | `importe_total` | Total bruto de la OP. El payload conserva también `Egreso.total` por compatibilidad con el importador actual. |
-| `IMPORTE_LIQUIDO` | `importe_neto` | Total líquido/neto transferido según RAFAM. El payload conserva también `Egreso.neto_transferido` por compatibilidad con el importador actual. |
+| `IMPORTE_LIQUIDO` | `importe_neto` | Neto líquido informativo según RAFAM. **`neto_transferido` NO se envía:** Paxapos lo calcula como `total − retenciones` en `_replaceRetencionesForEgreso`. |
 | `TIPO_CANCE` (CA/CM/NO) | `tipo_de_pago_id` | Vía `RAFAM_TIPO_CANCE_TO_PAXAPOS_PAGO_NAME` → lookup por `name` en `tipo_de_pagos`. Default `"Transferencia bancaria"`. |
 | `JURISDICCION` | `centro_costo_id` | |
-| `NRO_CANCE` | (clave para retenciones) | Se guarda para luego buscar `RETENCIONES` por `EJERCICIO + NRO_CANCE`. No se persiste como columna en Paxapos. |
-| (vía `CTA_HOJA_DE_RUTA`) | HABTM `account_egresos_gastos` | Vincula el egreso con uno o varios gastos (`CTA_COMPROB`) usando `OP_NRO + OC_NRO`. |
+| (vía `ORDEN_PAGO_DEDUC`) | `retenciones[]` (embebidas) | `orden_pago` embebe las retenciones de la OP (deducciones 1:1 por `EJERCICIO + NRO_OP`) dentro del payload del egreso. Si la suma supera el `total` de la OP se descartan y se loguea. Ver §2.6. |
+| (vía `ORDEN_PAGO_IMPUT` → `REG_COMP`) | HABTM `account_egresos_gastos` | Vincula el egreso con uno o varios gastos (`CTA_COMPROB`) por la imputación física de la OP. Las OPs sin `ORDEN_PAGO_IMPUT` se omiten. |
 
-### 2.6 `RETENCIONES` → `account_retenciones`
+### 2.6 `ORDEN_PAGO_DEDUC` → `account_retenciones` (entidad `retenciones`)
 
-En la ejecución actual no hay una pasada standalone `retenciones`. El script `orden_pago` consulta `RETENCIONES` + `DEDUCCIONES`, mapea las retenciones y las envía embebidas dentro del row de `ordenes_pago[]`.
+Las retenciones se traen de `ORDEN_PAGO_DEDUC` (clave **1:1** `EJERCICIO + NRO_OP`), **no** de la tabla `RETENCIONES` (cuya clave `EJERCICIO + NRO_CANCE` es N:1 con la OP y asignaba mal). `ORDEN_PAGO_DEDUC` corresponde a las Órdenes de Pago normales (`ORDEN_PAGO`); no confundir con `ORDEN_PAGOEA_DEDUC` (Egresos Adicionales, no migrados).
 
-| RAFAM | Paxapos | Notas |
+Hay **dos caminos idempotentes** que emiten la misma sección `retenciones`:
+- **`orden_pago`** las embebe inline en el payload del egreso (mismo `external_id`).
+- **`retenciones`** (pasada standalone, `make migrate-retenciones`) recorre `ORDEN_PAGO`, trae las deducciones y emite `retenciones[]` top-level **solo para OPs ya migradas** (con link). Las OPs sin Egreso aún en Paxapos se encolan como `dependency_missing` para reintentar.
+
+| RAFAM (`ORDEN_PAGO_DEDUC`) | Paxapos | Notas |
 |---|---|---|
-| `EJERCICIO` + `NRO_CANCE` + `COD_RET` | `external_ref` | (en RAFAM la columna es `COD_RET`; algunas vistas la exponen como `COD_DEDUC`). |
-| (vía `ORDEN_PAGO` match `EJERCICIO + NRO_CANCE`) | `egreso_id` | FK a `account_egresos.id`. Vínculo celeste del diagrama. |
-| `COD_RET` → `DEDUCCIONES.CODIGO` → `DEDUCCIONES.DESCRIPCION` | `tipo_impuesto_id` | Vínculo naranja. Heurística por substring en `DESCRIPCION`: `"IVA"`→102, `"GANANCIA"`→103, `"INGRESOS BRUTOS"` o `"IIBB"`→104, `"SUSS"`→105, `"MEDICOS"` o `"CAJA MED"`→110. |
-| `IMPORTE` | `importe` | |
-| `FECH_RET` | `fecha` | |
+| `EJERCICIO` + `NRO_OP` + `CODIGO_DEDUC` | `external_id` | Identificador idempotente de la retención. |
+| (link `orden_pago` por `EJERCICIO + NRO_OP`) | `egreso_id` | FK a `account_egresos.id`. Se resuelve por el link store; si la OP no está migrada, se encola. |
+| `CODIGO_DEDUC` + `DEDUCCIONES.DESCRIPCION` | `tipo_impuesto_id` | Heurística por substring/alias: `"IVA"`→102, `"GANANCIA"`→103, `"INGRESOS BRUTOS"`/`"IIBB"`→104, `"SUSS"`→105, `"MEDICOS"`/`"CAJA MED"`→110. Si no matchea catálogo, se omite y se loguea. |
+| `IMPORTE_RETEN` | `monto_retenido` | Se descarta si es 0 o no numérico. |
+| `ALICUOTA` | `alicuota` | Solo si está disponible y > 0. |
+| `COMPROB_DEDUC` | `numero_certificado` | Si falta, default `RAFAM-RET-{ejercicio}-{nro_op}-{codigo_deduc}`. |
+| `DEDUCCIONES.DESCRIPCION` | `observacion` | `"Deduccion RAFAM {descripcion} OP {ej}/{nro_op}"` cuando hay descripción. |
 
 ---
 
@@ -156,23 +163,25 @@ En la ejecución actual no hay una pasada standalone `retenciones`. El script `o
 
 - **Idempotencia obligatoria:** todo registro migrado debe llevar `external_ref = {source: "rafam", entity: <tabla>, ...claves naturales}` para que reimportar no genere duplicados.
 - **`compras_pedidos.tipo` siempre `'orden_compra'`** en esta migración. No se sincronizan otros tipos.
-- **Filtro de OPs:** se migran las que tienen `ESTADO_OP IN ('C', 'N')` + `CONFIRMADO='S'` + `FECH_CONFIRM` + importe positivo + OC/gasto canónico. Las anuladas (`A`), no confirmadas o sin OC linkeada se omiten. Esto se verifica en `exporter.py` y `source_repository.py`.
+- **Filtro de OPs:** se migran las que tienen `ESTADO_OP IN ('C')` + `CONFIRMADO='S'` + `FECH_CONFIRM` + importe positivo + OC/gasto canónico. Las anuladas (`A`), normales (N), no confirmadas o sin OC linkeada se omiten. Esto se verifica en `exporter.py` y `source_repository.py`.
 - **`pedido_id` en `account_gastos`** debe resolverse desde la cadena `CTA_COMPROB → REG_COMP → ORDEN_COMPRA`. Si no hay OC migrada/linkeada, la OP y su `gastos[]` se omiten para evitar pagos o gastos sueltos.
-- **`RAFAM_EJERCICIO_MIN` en OCs:** el filtro aplica a `orden_compra`/`oc_items`. La excepción para incluir OCs anteriores se limita a OPs confirmadas dentro del alcance actual (`EJERCICIO >= mínimo` o `FECH_CONFIRM` desde el 1/1 del mínimo); OPs históricas no deben arrastrar OCs viejas.
+- **`RAFAM_EJERCICIO_MIN`:** el filtro de ejercicio aplica a `oc_items`, `orden_pago` y `retenciones`. La excepción para incluir OCs anteriores se limita a OPs confirmadas dentro del alcance actual (`EJERCICIO >= mínimo` o `FECH_CONFIRM` desde el 1/1 del mínimo); OPs históricas no deben arrastrar OCs viejas.
 - **`unidad_de_medida_id` default = 1 (Unidad)**. Antes había un bug que ponía 5 (Paquete); está corregido en `gateway_mapper.py`.
 - **`PROVEEDORES.ING_BRUTOS` no se migra hoy** — pendiente. Si el negocio lo necesita, agregar mapeo en `gateway_mapper.py::map_proveedor()`.
 
 ---
 
-## 4. Orden lógico y pasadas operativas
+## 4. Orden lógico y comandos
 
-El orden lógico de dependencias sigue siendo de 6 tablas, pero el migrator lo ejecuta en 3 pasadas oficiales:
+Las 5 entidades son **independientes** (1 comando = 1 checkpoint), pero deben ejecutarse en **orden de dependencia (FK)** porque cada una resuelve enlaces creados por la anterior vía el link store local:
 
-1. `proveedores`: crea/actualiza `account_proveedores` desde `PROVEEDORES`.
-2. `oc_items`: agrupa `ORDEN_COMPRA` + `OC_ITEMS` y envía `ordenes_compra[]` con `items[]` inline. Esto crea la cabecera de OC y sus mercaderías en una sola pasada.
-3. `orden_pago`: procesa `ORDEN_PAGO` y, en la misma pasada, resuelve `CTA_COMPROB` para crear/vincular gastos y `RETENCIONES` + `DEDUCCIONES` para crear `account_retenciones`.
+1. `proveedores` (`make migrate-proveedores`): crea/actualiza `account_proveedores` desde `PROVEEDORES`.
+2. `oc_items` (`make migrate-oc`): agrupa `ORDEN_COMPRA` + `OC_ITEMS` y envía `ordenes_compra[]` con `items[]` inline (cabecera + mercaderías en una sola pasada).
+3. `solic_gastos` (`make migrate-facturas`): crea `account_gastos` desde `SOLIC_GASTOS` + `CTA_COMPROB` (vía `REG_COMP`), resolviendo `pedido_id` contra las OCs ya migradas.
+4. `orden_pago` (`make migrate-op`): crea `account_egresos` desde `ORDEN_PAGO`, vincula gastos (HABTM `account_egresos_gastos` vía `ORDEN_PAGO_IMPUT`) y embebe retenciones (`ORDEN_PAGO_DEDUC`).
+5. `retenciones` (`make migrate-retenciones`): reenvía idempotentemente `account_retenciones` desde `ORDEN_PAGO_DEDUC` para las OPs ya migradas.
 
-Así, las 6 tablas principales quedan cubiertas, pero no todas tienen un script independiente.
+`make migrate-all` encadena las 5 en este orden. Cada comando tiene su variante `-dry` (o `--dry-run`) que envía `"dry_run": true` para que Paxapos **valide sin persistir** — método de preview profesional para revisar el payload y los conteos antes de escribir. Los checkpoints se reinician con `make reset-<entidad>` (o `make reset-all`).
 
 ---
 
@@ -202,7 +211,7 @@ Así, las 6 tablas principales quedan cubiertas, pero no todas tienen un script 
 | 5 | T | No Categorizado |
 | 6 | M | Responsable Monotributo |
 
-### 5.3 `account_tipo_impuestos` (sólo retenciones — usadas por `RETENCIONES`)
+### 5.3 `account_tipo_impuestos` (sólo retenciones — entidad `retenciones`, fuente `ORDEN_PAGO_DEDUC`)
 
 | id | name | subsistema | tributo_afip_codigo |
 |---|---|---|---|
@@ -253,9 +262,13 @@ Hardcoded en `_JURISDICCION_CENTRO_COSTO_MAP` (`gateway_mapper.py`):
 
 ## 6. Tablas RAFAM que NO se usan
 
-Cualquier referencia en docs viejas a las siguientes tablas es **obsoleta** y debe ignorarse o eliminarse:
+Cualquier referencia en docs viejas a las siguientes tablas/estructuras es **obsoleta** y debe ignorarse:
 
-> _(Se omiten intencionalmente. El proyecto cubre exclusivamente las 6 tablas principales listadas en §1, distribuidas en 3 pasadas operativas, más los lookups documentados.)_
+- **`RETENCIONES`** — reemplazada por `ORDEN_PAGO_DEDUC` (clave 1:1 por `NRO_OP`). La clave `(EJERCICIO, NRO_CANCE)` de `RETENCIONES` es N:1 con la OP y asignaba retenciones a la orden equivocada.
+- **VIEW `CTA_HOJA_DE_RUTA`** — reemplazada por las tablas reales `ORDEN_PAGO_IMPUT` + `REG_COMP`.
+- **`ORDEN_PAGOEA` / `ORDEN_PAGOEA_DEDUC`** — Órdenes de Pago de Egresos Adicionales; fuera del alcance de este pipeline.
+
+> El proyecto cubre exclusivamente las tablas listadas en §1, organizadas en las **5 entidades** (`proveedores`, `oc_items`, `solic_gastos`, `orden_pago`, `retenciones`), más los lookups documentados.
 
 ---
 

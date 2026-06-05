@@ -462,7 +462,7 @@ class TestWriteBatchOrdenPago:
         assert op["pedido_id"] == 789
         assert op["importe_total"] == 12100.00
         assert op["importe_neto"] == 315814.05
-        assert op["Egreso"]["neto_transferido"] == 315814.05
+        assert "neto_transferido" not in op["Egreso"]
         # Gasto enviado con todos los datos fiscales reales
         assert len(payload["gastos"]) == 1
         gasto = payload["gastos"][0]["Gasto"]
@@ -741,7 +741,7 @@ def _oc_row(
 
 
 class TestWriteBatchOcItems:
-    """Tests para _write_batch_oc_items / _write_batch_orden_compra."""
+    """Tests para _write_batch_oc_items."""
 
     def _make_exporter_with_prov(self, cod_prov="99", remote_prov_id="777"):
         """Crea MigratorExporter con un proveedor pre-linkeado."""

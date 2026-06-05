@@ -40,7 +40,6 @@ logger = logging.getLogger(__name__)
 
 _GROUPED_BATCH_FIELDS = {
     "oc_items": ["EJERCICIO", "UNI_COMPRA", "NRO_OC"],
-    "orden_compra": ["EJERCICIO", "UNI_COMPRA", "NRO_OC"],
     "orden_pago": ["EJERCICIO", "NRO_OP"],
     "retenciones": ["EJERCICIO", "NRO_OP"],
 }
@@ -48,7 +47,6 @@ _GROUPED_BATCH_FIELDS = {
 # Maps entity config names to the link store entity they write to.
 _ENTITY_LINK_NAMES: dict[str, str] = {
     "proveedores": "proveedores",
-    "orden_compra": "orden_compra",
     "oc_items": "orden_compra",
     "solic_gastos": "gasto",
     "orden_pago": "orden_pago",
@@ -374,7 +372,7 @@ def _cmd_run_locked(args) -> None:
     else:
         logger.info("RAFAM_EJERCICIO_MIN no configurado — se procesarán TODOS los ejercicios")
 
-    exporter = build_exporter(args.export, force_update=args.force_update, dry_run=args.dry_run)
+    exporter = build_exporter(dry_run=args.dry_run)
     engine   = _build_engine()
     # Cola de reintentos (F1): captura filas rechazadas por el receptor para
     # reintentarlas en la proxima corrida. Manejo fila-a-fila — el batch no se
@@ -388,17 +386,16 @@ def _cmd_run_locked(args) -> None:
             logger.info("Cola de reintentos al inicio: %s", json.dumps(pending, ensure_ascii=False))
     targets  = [args.entity] if args.entity else list(ENTITY_CONFIGS.keys())
 
-    # En modo migrator, sin --entity explicito, restringir a las 3 entidades oficiales
-    # (proveedores, oc_items, orden_pago, retenciones) en orden de FKs. Las demas no se migran:
+    # Sin --entity explicito, ejecutar las 5 entidades oficiales en orden de FKs.
+    # Las demas no se migran:
     #   - orden_compra (header) → reemplazado por oc_items (incluye items embebidos)
-    #   - solic_gastos          → los gastos los crean humanos en Paxapos; RAFAM solo manda el pago
     #   - pedidos / ped_items   → deshabilitados, los pedidos llegan como OCs via oc_items
     # retenciones corre al final: depende de que la OP (Egreso) ya exista para
     # resolver el destino; si no, se encola y se reintenta en la proxima corrida.
-    if not args.entity and args.export == "migrator":
-        official = ["proveedores", "oc_items", "orden_pago", "retenciones"]
+    if not args.entity:
+        official = ["proveedores", "oc_items", "solic_gastos", "orden_pago", "retenciones"]
         targets = [e for e in official if e in ENTITY_CONFIGS]
-        logger.info("Modo migrator: ejecutando entidades oficiales en orden FK → %s", targets)
+        logger.info("Ejecutando entidades oficiales en orden FK → %s", targets)
 
     failed_entities: list[str] = []
     try:
@@ -610,23 +607,9 @@ def main() -> None:
     run_p.add_argument("--limit", type=int, metavar="N", help="Máximo de filas por entidad (útil para testear)")
     run_p.add_argument("--batch-size", type=int, default=500, metavar="N", help="Filas por lote (default: 500)")
     run_p.add_argument(
-        "--export",
-        choices=["csv", "noop", "gateway", "migrator"],
-        default="csv",
-        help="Destino de salida: csv (default) | noop (solo checkpoints) | gateway | migrator",
-    )
-    run_p.add_argument(
         "--dry-run",
         action="store_true",
-        help="Preview: no avanza checkpoints; en migrator envia payload con dry_run=true",
-    )
-    run_p.add_argument(
-        "--force-update",
-        action="store_true",
-        help=(
-            "Solo gateway: si existe vinculacion local RAFAM->Paxapos, "
-            "envia update en vez de saltear (default: create-only)"
-        ),
+        help="Preview: no avanza checkpoints; envia el payload con dry_run=true (el receptor no persiste)",
     )
 
     args = parser.parse_args()

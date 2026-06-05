@@ -81,8 +81,6 @@ class SourceRepository:
 
     def build_statement(self, entity: str, checkpoint: Checkpoint) -> Select:
         cfg = ENTITY_CONFIGS[entity]
-        if entity == "orden_compra":
-            return self._build_orden_compra_statement(cfg, checkpoint)
         if entity == "oc_items":
             return self._build_oc_items_statement(cfg, checkpoint)
         if entity == "solic_gastos":
@@ -271,96 +269,6 @@ class SourceRepository:
         table = self._reflect_table(cfg.table_name)
         stmt = select(table)
         return self._apply_incremental_filters(stmt, table, cfg, checkpoint)
-
-    def _build_orden_compra_statement(
-        self,
-        cfg: EntityConfig,
-        checkpoint: Checkpoint,
-    ) -> Select:
-        oc = self._reflect_table("ORDEN_COMPRA")
-        oc_items = self._reflect_table("OC_ITEMS")
-        solic_gastos = self._reflect_table("SOLIC_GASTOS")
-        reg_comp = self._reflect_optional_table("REG_COMP")
-        cta_comprob = self._reflect_optional_table("CTA_COMPROB")
-
-        # ORDEN_COMPRA → OC_ITEMS (items) → SOLIC_GASTOS (jurisdicción).
-        # El cursor incremental aplica sobre ORDEN_COMPRA (FECH_OC / ESTADO_OC),
-        # así solo se traen OCs recién modificadas CON sus items.
-        select_cols = [
-            oc_items,
-            oc.c.COD_PROV,
-            oc.c.FECH_OC.label("OC_FECH_OC"),
-            oc.c.OBSERVACIONES.label("OC_OBSERVACIONES"),
-            oc.c.ESTADO_OC.label("OC_ESTADO_OC"),
-            oc.c.FECH_CONFIRM.label("OC_FECH_CONFIRM"),
-            oc.c.IMPORTE_TOT.label("OC_IMPORTE_TOT"),
-            solic_gastos.c.JURISDICCION.label("SG_JURISDICCION"),
-        ]
-
-        from_clause = (
-            oc.join(
-                oc_items,
-                and_(
-                    oc.c.EJERCICIO == oc_items.c.EJERCICIO,
-                    oc.c.UNI_COMPRA == oc_items.c.UNI_COMPRA,
-                    oc.c.NRO_OC == oc_items.c.NRO_OC,
-                ),
-            ).outerjoin(
-                solic_gastos,
-                and_(
-                    oc_items.c.EJERCICIO == solic_gastos.c.EJERCICIO,
-                    oc_items.c.DELEG_SOLIC == solic_gastos.c.DELEG_SOLIC,
-                    oc_items.c.NRO_SOLIC == solic_gastos.c.NRO_SOLIC,
-                ),
-            )
-        )
-
-        # LEFT JOIN subquery OC → SG → REG_COMP → CTA_COMPROB para obtener
-        # nro de comprobante asociado a cada OC (sin pasar por la VIEW
-        # (sin pasar por la VIEW CTA_HOJA_DE_RUTA: usamos las tablas reales)
-        oc_cc = self._build_oc_to_cc_subquery(reg_comp, cta_comprob)
-        if oc_cc is not None:
-            from_clause = from_clause.outerjoin(
-                oc_cc,
-                and_(
-                    oc.c.EJERCICIO == oc_cc.c.OC_EJERCICIO,
-                    oc.c.UNI_COMPRA == oc_cc.c.OC_UNI_COMPRA,
-                    oc.c.NRO_OC == oc_cc.c.OC_NRO,
-                ),
-            )
-            select_cols.extend([
-                oc_cc.c.OC_CC_NRO,
-                oc_cc.c.OC_CC_TIPO_COMPROB,
-                oc_cc.c.OC_CC_COD_PROV,
-            ])
-
-        stmt = select(*select_cols).select_from(from_clause)
-        extra_filters = []
-        if not (cfg.full_load or checkpoint.is_fresh):
-            fech_anul_col = self._safe_column(oc, "FECH_ANUL")
-            estado_col = self._safe_column(oc, "ESTADO_OC")
-            if fech_anul_col is not None and estado_col is not None:
-                window_start = datetime.now(timezone.utc) - timedelta(days=cfg.pending_reprocess_days or 30)
-                extra_filters.append(and_(estado_col == "A", fech_anul_col > window_start))
-
-        stmt = self._apply_oc_dependency_filter(
-            stmt,
-            cfg,
-            {
-                "ejercicio": oc.c.EJERCICIO,
-                "uni_compra": oc.c.UNI_COMPRA,
-                "nro_oc": oc.c.NRO_OC,
-            },
-        )
-        stmt = self._apply_incremental_filters(
-            stmt,
-            oc,
-            cfg,
-            checkpoint,
-            extra_filters=extra_filters,
-            apply_ejercicio_min=False,
-        )
-        return stmt.order_by(oc.c.EJERCICIO, oc.c.UNI_COMPRA, oc.c.NRO_OC, oc_items.c.ITEM_OC)
 
     def _build_oc_items_statement(
         self,

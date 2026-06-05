@@ -8,11 +8,7 @@ from unittest.mock import patch
 import pytest
 
 from src.exporter import (
-    AlreadyExistsError,
-    CsvExporter,
-    GatewayExporter,
     MigratorExporter,
-    NoopExporter,
     _build_migrator_url,
     _env_bool,
     _fetch_migrator_json,
@@ -52,15 +48,6 @@ class _FakeHttpResponse:
         return self._body
 
 
-def _gateway(monkeypatch, tmp_path, *, force_update=False):
-    monkeypatch.setenv("PAXAPOS_URL", "https://example.test")
-    monkeypatch.setenv("PAXAPOS_TENANT", "tenant")
-    monkeypatch.setenv("PAXAPOS_JWT", "jwt")
-    monkeypatch.setenv("LOCAL_STATE_DB_PATH", str(tmp_path / "gateway_links.db"))
-    monkeypatch.setenv("PAXAPOS_VERIFY_SSL", "true")
-    return GatewayExporter(force_update=force_update)
-
-
 def _migrator(monkeypatch, tmp_path, *, dry_run=True, lookups=None):
     monkeypatch.setenv("PAXAPOS_URL", "https://example.test")
     monkeypatch.setenv("PAXAPOS_TENANT", "tenant")
@@ -90,236 +77,23 @@ def _migrator(monkeypatch, tmp_path, *, dry_run=True, lookups=None):
         return MigratorExporter(dry_run=dry_run)
 
 
-def test_csv_exporter_writes_and_closes(tmp_path):
-    exporter = CsvExporter(tmp_path)
-    exporter.write_batch("proveedores", ["id", "name"], [(1, "Uno"), (2, "Dos")])
-    exporter.write_batch("proveedores", ["id", "name"], [(3, "Tres")])
-    exporter.close()
-
-    [path] = tmp_path.glob("proveedores_*.csv")
-    assert path.read_text(encoding="utf-8").splitlines() == [
-        "id,name",
-        "1,Uno",
-        "2,Dos",
-        "3,Tres",
-    ]
-    assert exporter._files == {}
-    assert exporter._writers == {}
-
-
-def test_noop_and_factory_branches(monkeypatch, tmp_path):
-    NoopExporter().write_batch("x", ["a"], [(1,)])
-    assert isinstance(build_exporter("noop"), NoopExporter)
-
-    with patch("src.exporter.CsvExporter", return_value="csv"):
-        assert build_exporter("csv") == "csv"
-    with patch("src.exporter.GatewayExporter", return_value="gateway") as gateway:
-        assert build_exporter("gateway", force_update=True) == "gateway"
-        gateway.assert_called_once_with(force_update=True)
+def test_build_exporter_returns_migrator():
     with patch("src.exporter.MigratorExporter", return_value="migrator") as migrator:
-        assert build_exporter("migrator", dry_run=True) == "migrator"
+        assert build_exporter(dry_run=True) == "migrator"
         migrator.assert_called_once_with(dry_run=True)
-    with pytest.raises(ValueError):
-        build_exporter("desconocido")
-
-
-class TestGatewayExporter:
-    def test_helpers_and_extractors(self, monkeypatch, tmp_path):
-        exporter = _gateway(monkeypatch, tmp_path)
-
-        assert exporter._headers()["Authorization"] == "Bearer jwt"
-        assert exporter._build_update_url("proveedores", "9") == "https://example.test/account/proveedores/edit/9.json"
-        assert exporter._normalize_cuit("20-12345678-3") == "20123456783"
-        assert exporter._normalize_cuit("123") is None
-        assert exporter._source_key("proveedores", {"COD_PROV": 7}) == "7"
-        assert exporter._source_key("otra", {"COD_PROV": 7}) is None
-        assert "id=4" in exporter._summarize_gateway_payload({"Proveedor": {"id": 4, "cuit": "x"}})
-        assert "validationErrors" in exporter._summarize_gateway_payload({"validationErrors": {"x": []}})
-        assert exporter._summarize_gateway_payload(["x"]) == "payload no-objeto"
-        assert exporter._is_duplicate_cuit_error(
-            {"validationErrors": {"cuit": ["El CUIT ya existe"]}}
-        )
-        assert not exporter._is_duplicate_cuit_error({"validationErrors": {"name": ["bad"]}})
-
-        assert exporter._extract_provider_id_from_index_payload(
-            [{"id": 10, "value": "Proveedor (20-12345678-3)"}],
-            "20123456783",
-        ) == "10"
-        assert exporter._extract_provider_id_from_index_payload({"bad": []}, "20123456783") is None
-        assert exporter._extract_provider_id_from_search_payload(
-            {"proveedores": [{"id": 11, "cuit": "20-12345678-3"}]},
-            "20123456783",
-        ) == "11"
-        assert exporter._extract_provider_id_from_search_payload({"proveedores": "bad"}, "x") is None
-
-    def test_post_json_success_and_gateway_response_errors(self, monkeypatch, tmp_path):
-        exporter = _gateway(monkeypatch, tmp_path)
-        url = "https://example.test/account/proveedores.json"
-        response = _FakeHttpResponse(
-            json.dumps({"Proveedor": {"id": 8}}).encode(),
-            url=url,
-        )
-        with patch("src.exporter._http_request_with_retries", return_value=response):
-            assert exporter._post_json(url, {"Proveedor": {"name": "Acme"}}) == {"Proveedor": {"id": 8}}
-
-        duplicate = _FakeHttpResponse(
-            json.dumps({"validationErrors": {"cuit": ["CUIT ya existe"]}}).encode(),
-            url=url,
-        )
-        with patch("src.exporter._http_request_with_retries", return_value=duplicate):
-            with pytest.raises(AlreadyExistsError):
-                exporter._post_json(url, {"Proveedor": {"name": "Acme"}})
-
-        validation = _FakeHttpResponse(
-            json.dumps({"validationErrors": {"name": ["required"]}}).encode(),
-            url=url,
-        )
-        with patch("src.exporter._http_request_with_retries", return_value=validation):
-            with pytest.raises(RuntimeError, match="validacion"):
-                exporter._post_json(url, {"Proveedor": {"name": ""}})
-
-    def test_post_json_rejects_redirect_html_http_and_url_errors(self, monkeypatch, tmp_path):
-        exporter = _gateway(monkeypatch, tmp_path)
-        url = "https://example.test/account/proveedores.json"
-
-        redirect = _FakeHttpResponse(b"{}", url="https://example.test/login")
-        with patch("src.exporter._http_request_with_retries", return_value=redirect):
-            with pytest.raises(RuntimeError, match="Redirect"):
-                exporter._post_json(url, {"Proveedor": {"name": "Acme"}})
-
-        html = _FakeHttpResponse(b"<html></html>", url=url, content_type="text/html")
-        with patch("src.exporter._http_request_with_retries", return_value=html):
-            with pytest.raises(RuntimeError, match="no JSON"):
-                exporter._post_json(url, {"Proveedor": {"name": "Acme"}})
-
-        http_error = error.HTTPError(url, 500, "boom", {}, io.BytesIO(b"server"))
-        with patch("src.exporter._http_request_with_retries", side_effect=http_error):
-            with pytest.raises(RuntimeError, match="HTTP 500"):
-                exporter._post_json(url, {"Proveedor": {"name": "Acme"}})
-
-        with patch("src.exporter._http_request_with_retries", side_effect=error.URLError("dns")):
-            with pytest.raises(RuntimeError, match="URL error"):
-                exporter._post_json(url, {"Proveedor": {"name": "Acme"}})
-
-    def test_get_json_and_lookup_fallbacks(self, monkeypatch, tmp_path):
-        exporter = _gateway(monkeypatch, tmp_path)
-        url = "https://example.test/account/proveedores/index.json?cuit=20123456783"
-        response = _FakeHttpResponse(b'[{"id": 6, "value": "Acme (20-12345678-3)"}]', url=url)
-        with patch("src.exporter._http_request_with_retries", return_value=response):
-            assert exporter._get_json(url) == [{"id": 6, "value": "Acme (20-12345678-3)"}]
-
-        with patch.object(exporter, "_get_json", return_value=[{"id": 6, "value": "Acme (20-12345678-3)"}]):
-            assert exporter._lookup_proveedor_id_by_cuit("20123456783") == "6"
-
-        def fallback(url):
-            if "index" in url:
-                raise RuntimeError("index unavailable")
-            return {"proveedores": [{"id": 7, "cuit": "20-12345678-3"}]}
-
-        with patch.object(exporter, "_get_json", side_effect=fallback):
-            assert exporter._lookup_proveedor_id_by_cuit("20123456783") == "7"
-
-        with patch.object(exporter, "_get_json", side_effect=RuntimeError("down")):
-            assert exporter._lookup_proveedor_id_by_cuit("20123456783") is None
-            assert exporter._lookup_proveedores_enabled is False
-
-    def test_write_batch_create_skip_update_duplicate_and_errors(self, monkeypatch, tmp_path):
-        columns = ["COD_PROV", "FANTASIA", "RAZON_SOCIAL", "CUIT", "COD_IVA"]
-        row = ("1", "Acme", "Acme SA", "20-12345678-3", "RINS")
-
-        exporter = _gateway(monkeypatch, tmp_path)
-        with patch.object(exporter, "_post_json", return_value={"Proveedor": {"id": 50}}) as post:
-            exporter.write_batch("proveedores", columns, [row])
-        assert post.call_count == 1
-        assert exporter._link_store.get_remote_id("proveedores", "1") == "50"
-
-        with patch.object(exporter, "_post_json") as post:
-            exporter.write_batch("proveedores", columns, [row])
-        post.assert_not_called()
-
-        updater = _gateway(monkeypatch, tmp_path, force_update=True)
-        updater._link_store.save_link("proveedores", "2", "77", cuit="20123456783")
-        update_row = ("2", "Acme", "Acme SA", "20-12345678-3", "RINS")
-        with patch.object(updater, "_post_json", return_value={}) as post:
-            updater.write_batch("proveedores", columns, [update_row])
-        assert "edit/77.json" in post.call_args.args[0]
-
-        duplicate = _gateway(monkeypatch, tmp_path)
-        duplicate_error = AlreadyExistsError(
-            "ya existe",
-            parsed={"validationErrors": {"cuit": ["CUIT ya existe"]}},
-        )
-        with patch.object(duplicate, "_post_json", side_effect=duplicate_error), patch.object(
-            duplicate, "_lookup_proveedor_id_by_cuit", return_value="88"
-        ):
-            duplicate.write_batch("proveedores", columns, [("3", "Otro", "Otro SA", "20-12345678-3", "RINS")])
-        assert duplicate._link_store.get_remote_id("proveedores", "3") == "88"
-
-        failing = _gateway(monkeypatch, tmp_path)
-        with patch.object(failing, "_post_json", side_effect=RuntimeError("boom")):
-            with pytest.raises(RuntimeError, match="envíos fallidos"):
-                failing.write_batch("proveedores", columns, [("4", "Fail", "Fail SA", "20-12345678-3", "RINS")])
-
-        with pytest.raises(ValueError):
-            exporter.write_batch("orden_pago", columns, [row])
-
-
-ORDEN_COMPRA_COLUMNS = [
-    "EJERCICIO",
-    "UNI_COMPRA",
-    "NRO_OC",
-    "ITEM_OC",
-    "DELEG_SOLIC",
-    "NRO_SOLIC",
-    "ITEM_REAL",
-    "DESCRIPCION",
-    "CANTIDAD",
-    "IMP_UNITARIO",
-    "CANT_RECIB",
-    "COD_PROV",
-    "OC_FECH_OC",
-    "OC_OBSERVACIONES",
-    "OC_ESTADO_OC",
-    "OC_FECH_CONFIRM",
-    "OC_IMPORTE_TOT",
-    "SG_JURISDICCION",
-    "OC_CC_NRO",
-]
-
-
-def _orden_compra_row(**overrides):
-    data = {
-        "EJERCICIO": "2026",
-        "UNI_COMPRA": "1",
-        "NRO_OC": "100",
-        "ITEM_OC": "1",
-        "DELEG_SOLIC": "2",
-        "NRO_SOLIC": "300",
-        "ITEM_REAL": "4",
-        "DESCRIPCION": "Toner negro",
-        "CANTIDAD": "3",
-        "IMP_UNITARIO": "100.25",
-        "CANT_RECIB": "1",
-        "COD_PROV": "99",
-        "OC_FECH_OC": "2026-03-10 00:00:00",
-        "OC_OBSERVACIONES": "Compra urgente",
-        "OC_ESTADO_OC": "R",
-        "OC_FECH_CONFIRM": "2026-03-11 00:00:00",
-        "OC_IMPORTE_TOT": "300.75",
-        "SG_JURISDICCION": "1110104000",
-        "OC_CC_NRO": "0001-00000001",
-    }
-    data.update(overrides)
-    return tuple(data.get(col, "") for col in ORDEN_COMPRA_COLUMNS)
+    with patch("src.exporter.MigratorExporter", return_value="migrator") as migrator:
+        assert build_exporter() == "migrator"
+        migrator.assert_called_once_with(dry_run=False)
 
 
 class TestMigratorExporterExtraPaths:
-    def test_write_batch_dispatch_disabled_and_unknown(self, monkeypatch, tmp_path):
+    def test_write_batch_dispatch_empty_and_unknown(self, monkeypatch, tmp_path):
         exporter = _migrator(monkeypatch, tmp_path)
-        # orden_compra is disabled (migrated via oc_items instead)
-        exporter.write_batch("orden_compra", [], [])
-        # solic_gastos with empty rows is a no-op (lote vacío)
+        # solic_gastos con filas vacias es un no-op (lote vacío)
         exporter.write_batch("solic_gastos", [], [])
+        # orden_compra ya no es una entidad valida (se migra via oc_items)
+        with pytest.raises(ValueError):
+            exporter.write_batch("orden_compra", [], [])
         with pytest.raises(ValueError):
             exporter.write_batch("otra", [], [])
 
@@ -346,72 +120,6 @@ class TestMigratorExporterExtraPaths:
         assert link["remote_id"] == "700"
         assert link["cuit"] == "20123456783"
         assert link["cod_estado"] == "A"
-
-    def test_write_batch_orden_compra_create_anular_skip_and_register(self, monkeypatch, tmp_path):
-        exporter = _migrator(monkeypatch, tmp_path, dry_run=False)
-        exporter._link_store.save_link("proveedores", "99", "777")
-
-        anular_key = json.dumps({"ejercicio": 2026, "nro_oc": 200, "uni_compra": 1}, sort_keys=True)
-        exporter._link_store.save_link(
-            "orden_compra",
-            anular_key,
-            "880",
-            estado_oc="R",
-            gasto_linked_refs="",
-        )
-        same_state_key = json.dumps({"ejercicio": 2026, "nro_oc": 300, "uni_compra": 1}, sort_keys=True)
-        exporter._link_store.save_link(
-            "orden_compra",
-            same_state_key,
-            "990",
-            estado_oc="R",
-            gasto_linked_refs="0001-00000001",
-        )
-
-        sent = []
-
-        def fake_post(_url, payload):
-            sent.append(payload)
-            return {
-                "stats": {"ordenes_compra": {"ok": len(payload["ordenes_compra"]), "error": 0}},
-                "results": {
-                    "ordenes_compra": [
-                        {
-                            "success": True,
-                            "external_id": oc["external_id"],
-                            "id": 10000 + oc["external_id"]["nro_oc"],
-                            "gasto_ids": [1, 2],
-                        }
-                        for oc in payload["ordenes_compra"]
-                    ]
-                },
-            }
-
-        exporter._post_json = fake_post
-        rows = [
-            _orden_compra_row(NRO_OC="100", ITEM_OC="1", OC_ESTADO_OC="R"),
-            _orden_compra_row(NRO_OC="100", ITEM_OC="1", NRO_SOLIC="301", OC_ESTADO_OC="R"),
-            _orden_compra_row(NRO_OC="100", ITEM_OC="2", OC_ESTADO_OC="R"),
-            _orden_compra_row(NRO_OC="200", OC_ESTADO_OC="A"),
-            _orden_compra_row(NRO_OC="300", OC_ESTADO_OC="R"),
-            _orden_compra_row(NRO_OC="400", OC_ESTADO_OC="N", OC_CC_NRO=None),
-            _orden_compra_row(NRO_OC="500", COD_PROV="404", OC_ESTADO_OC="R"),
-        ]
-        exporter._write_batch_orden_compra(ORDEN_COMPRA_COLUMNS, rows)
-
-        assert len(sent) == 1
-        ordenes = sent[0]["ordenes_compra"]
-        assert [oc["external_id"]["nro_oc"] for oc in ordenes] == [100, 200]
-        created = ordenes[0]
-        assert created["Pedido"]["proveedor_id"] == 777
-        assert created["Pedido"]["observacion"] == "Compra urgente"
-        assert created["Pedido"]["created"] == "2026-03-10 00:00:00"
-        assert len(created["items"]) == 2
-        assert "gasto_nro_comprobante" not in created
-        assert ordenes[1]["Pedido"]["deleted"] == 1
-        assert exporter._link_store.get_link("orden_compra", same_state_key)["remote_id"] == "990"
-        skip_key = json.dumps({"ejercicio": 2026, "nro_oc": 400, "uni_compra": 1}, sort_keys=True)
-        assert exporter._link_store.get_link("orden_compra", skip_key)["estado_oc"] == "N"
 
     def test_write_batch_solic_gastos_filters_by_sent_oc_refs(self, monkeypatch, tmp_path):
         exporter = _migrator(monkeypatch, tmp_path, dry_run=False)

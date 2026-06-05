@@ -1,19 +1,15 @@
 """
-exporter.py — Destinos de salida intercambiables para los datos extraídos de Oracle.
+exporter.py — Destino de salida para los datos extraídos de Oracle.
 
 Interfaz común:
     exporter.write_batch(entity, columns, rows)
     exporter.close()
 
-Implementaciones:
-    CsvExporter   — escribe archivos CSV en output/
-    NoopExporter  — descarta los datos (modo dry-run / solo checkpoints)
-
-Cuando se implemente el gateway Paxapos, se agrega GatewayExporter aquí
-y se cambia una sola línea en main.py.
+Implementación:
+    MigratorExporter — envía los lotes al importador RAFAM -> Paxapos
+    (POST /rafam/migracion/importar.json). Soporta dry-run para preview.
 """
 
-import csv
 import json
 import logging
 import os
@@ -23,14 +19,11 @@ import ssl
 import time
 import unicodedata
 from abc import ABC, abstractmethod
-from datetime import datetime
-from pathlib import Path
-from typing import IO
 from urllib import parse
 from urllib import error, request
 
 from .entity_link_store import EntityLinkStore
-from .gateway_mapper import map_proveedor_migrator_row, map_proveedor_row, resolve_centro_costo_id
+from .gateway_mapper import map_proveedor_migrator_row, resolve_centro_costo_id
 from .retry_store import REASON_BACKEND_REJECTED, REASON_DEPENDENCY_MISSING
 
 logger = logging.getLogger(__name__)
@@ -134,428 +127,6 @@ class BaseExporter(ABC):
         """Llamado una vez al finalizar todas las entidades. Override si necesario."""
 
 
-# ─── CSV ─────────────────────────────────────────────────────────────────────
-
-class CsvExporter(BaseExporter):
-    """
-    Escribe un archivo CSV por entidad en output/.
-    Todos los lotes de la misma entidad se acumulan en el mismo archivo.
-    El archivo se crea (o sobreescribe) al enviar el primer lote.
-    """
-
-    def __init__(self, output_dir: str | Path = "output"):
-        self._output_dir = Path(output_dir)
-        self._output_dir.mkdir(parents=True, exist_ok=True)
-        self._writers: dict[str, csv.writer] = {}
-        self._files:   dict[str, IO[str]]     = {}
-        self._timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-    def _get_writer(self, entity: str, columns: list[str]) -> csv.writer:
-        if entity not in self._writers:
-            path = self._output_dir / f"{entity}_{self._timestamp}.csv"
-            f = open(path, "w", newline="", encoding="utf-8")
-            writer = csv.writer(f)
-            writer.writerow(columns)
-            self._files[entity]   = f
-            self._writers[entity] = writer
-            logger.info("Archivo creado: %s", path)
-        return self._writers[entity]
-
-    def write_batch(self, entity: str, columns: list[str], rows: list[tuple]) -> None:
-        writer = self._get_writer(entity, columns)
-        writer.writerows(rows)
-        # Flush after each batch so partial data is visible if the run is interrupted
-        self._files[entity].flush()
-
-    def close(self) -> None:
-        for f in self._files.values():
-            f.close()
-        self._files.clear()
-        self._writers.clear()
-
-
-# ─── Noop (dry-run) ──────────────────────────────────────────────────────────
-
-class NoopExporter(BaseExporter):
-    """Descarta los datos. Útil para correr solo la lógica de checkpoints."""
-
-    def write_batch(self, entity: str, columns: list[str], rows: list[tuple]) -> None:
-        pass
-
-
-# ─── Gateway (Paxapos) ───────────────────────────────────────────────────────
-
-class GatewayExporter(BaseExporter):
-    """Envía los lotes traducidos a endpoints JSON de Paxapos (CakePHP 2)."""
-
-    def __init__(self, force_update: bool = False):
-        self._base_url = _paxapos_url()
-        self._tenant = _paxapos_tenant()
-
-        self._app_env = os.getenv("APP_ENV", "dev").strip().lower()
-        self._timeout = int(os.getenv("PAXAPOS_TIMEOUT_SECONDS", "20"))
-        self._verify_ssl = _env_bool("PAXAPOS_VERIFY_SSL", default="true")
-        self._jwt = os.getenv("PAXAPOS_JWT", "").strip()
-        if not self._jwt:
-            raise ValueError("Falta PAXAPOS_JWT en .env para modo gateway")
-
-        self._entity_endpoints = {
-            "proveedores": os.getenv("PAXAPOS_PROVEEDORES_ENDPOINT", "account/proveedores.json"),
-        }
-        self._entity_update_endpoints = {
-            "proveedores": os.getenv("PAXAPOS_PROVEEDORES_UPDATE_ENDPOINT", "account/proveedores/edit/{id}.json"),
-        }
-        self._entity_lookup_endpoints = {
-            "proveedores": os.getenv("PAXAPOS_PROVEEDORES_LOOKUP_ENDPOINT", "account/proveedores/buscar.json"),
-        }
-        self._entity_lookup_index_endpoints = {
-            "proveedores": os.getenv("PAXAPOS_PROVEEDORES_LOOKUP_INDEX_ENDPOINT", "account/proveedores/index.json"),
-        }
-        self._lookup_proveedores_enabled = True
-        self._force_update = force_update
-        self._link_store = EntityLinkStore()
-
-        if not self._verify_ssl:
-            logger.warning("PAXAPOS_VERIFY_SSL=false: SSL certificate verification deshabilitada para gateway")
-
-    def write_batch(self, entity: str, columns: list[str], rows: list[tuple]) -> None:
-        endpoint = self._entity_endpoints.get(entity)
-        if not endpoint:
-            raise ValueError(
-                f"No hay endpoint gateway configurado para entidad '{entity}'. "
-                "Actualmente soportadas: proveedores"
-            )
-
-        sent = 0
-        updated = 0
-        skipped_existing = 0
-        skipped_linked = 0
-        errors_count = 0
-
-        for row in rows:
-            raw = dict(zip(columns, row))
-            payload = self._map_payload(entity, raw)
-            if payload is None:
-                continue
-
-            source_key = self._source_key(entity, raw)
-            if source_key is not None:
-                known_remote_id = self._link_store.get_remote_id(entity, source_key)
-                if known_remote_id:
-                    if self._force_update:
-                        update_url = self._build_update_url(entity, known_remote_id)
-                        if update_url is None:
-                            skipped_linked += 1
-                            continue
-                        try:
-                            logger.debug(
-                                "Gateway update [%s] POST %s remote_id=%s payload_keys=%s",
-                                entity,
-                                update_url,
-                                known_remote_id,
-                                sorted(payload.keys()),
-                            )
-                            parsed = self._post_json(update_url, payload)
-                            self._persist_link(entity, raw, parsed, fallback_remote_id=str(known_remote_id))
-                            updated += 1
-                            continue
-                        except Exception as exc:
-                            errors_count += 1
-                            logger.error("Gateway update error en %s (%s): %s", entity, update_url, exc)
-                            continue
-                    skipped_linked += 1
-                    continue
-
-            url = f"{self._base_url}/{endpoint.lstrip('/')}"
-            try:
-                logger.debug("Gateway request [%s] POST %s payload_keys=%s", entity, url, sorted(payload.keys()))
-                parsed = self._post_json(url, payload)
-                self._persist_link(entity, raw, parsed)
-                sent += 1
-            except AlreadyExistsError as exc:
-                skipped_existing += 1
-                self._resolve_and_persist_existing(entity, raw, exc.parsed)
-                logger.debug("Gateway skip existente [%s]: %s", entity, exc)
-            except Exception as exc:
-                errors_count += 1
-                logger.error("Gateway error en %s (%s): %s", entity, url, exc)
-
-        if errors_count:
-            raise RuntimeError(f"{entity}: {errors_count} envíos fallidos al gateway")
-
-        logger.info(
-            "Gateway OK [%s]: %d creados, %d actualizados, %d ya existentes, %d ya vinculados localmente",
-            entity,
-            sent,
-            updated,
-            skipped_existing,
-            skipped_linked,
-        )
-
-    def _map_payload(self, entity: str, raw: dict) -> dict | None:
-        if entity == "proveedores":
-            return map_proveedor_row(raw)
-        return None
-
-    def _headers(self) -> dict[str, str]:
-        return {
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "X-Tenant-Id": self._tenant,
-            "Authorization": f"Bearer {self._jwt}",
-            "User-Agent": "rafam-sync/1.0",
-        }
-
-    def _post_json(self, url: str, payload: dict) -> dict:
-        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        req = request.Request(url=url, data=data, headers=self._headers(), method="POST")
-        ssl_context = None
-        if not self._verify_ssl:
-            ssl_context = ssl._create_unverified_context()
-
-        try:
-            with _http_request_with_retries(req, timeout=self._timeout, ssl_context=ssl_context) as resp:
-                status = resp.getcode()
-                final_url = resp.geturl()
-                content_type = (resp.headers.get("Content-Type") or "").lower()
-                body = resp.read().decode("utf-8", errors="replace")
-
-                logger.debug(
-                    "Gateway response status=%s content_type=%s final_url=%s",
-                    status,
-                    content_type,
-                    final_url,
-                )
-
-                if status < 200 or status >= 300:
-                    raise RuntimeError(f"HTTP {status}: {body[:500]}")
-
-                # urllib puede seguir 302 al login y devolver HTML 200.
-                if final_url.rstrip("/") != url.rstrip("/"):
-                    raise RuntimeError(
-                        f"Redirect inesperado a {final_url}. Posible falta de autenticacion."
-                    )
-
-                if "json" not in content_type:
-                    raise RuntimeError(
-                        f"Respuesta no JSON (Content-Type={content_type}). "
-                        "Posible login HTML o endpoint incorrecto."
-                    )
-
-                parsed = json.loads(body) if body else {}
-                logger.debug(
-                    "Gateway response [%s] %s",
-                    status,
-                    self._summarize_gateway_payload(parsed),
-                )
-                if isinstance(parsed, dict) and ("error" in parsed or "validationErrors" in parsed):
-                    if self._is_duplicate_cuit_error(parsed):
-                        raise AlreadyExistsError("Proveedor ya existe por CUIT", parsed=parsed)
-                    raise RuntimeError(f"Error de validacion CakePHP: {json.dumps(parsed, ensure_ascii=False)[:500]}")
-                return parsed
-        except error.HTTPError as exc:
-            body = exc.read().decode("utf-8", errors="replace") if exc.fp else ""
-            raise RuntimeError(f"HTTP {exc.code}: {body[:500]}") from exc
-        except error.URLError as exc:
-            raise RuntimeError(f"URL error: {exc.reason}") from exc
-
-    def _get_json(self, url: str) -> dict:
-        req = request.Request(url=url, headers=self._headers(), method="GET")
-        ssl_context = None
-        if not self._verify_ssl:
-            ssl_context = ssl._create_unverified_context()
-
-        with _http_request_with_retries(req, timeout=self._timeout, ssl_context=ssl_context) as resp:
-            status = resp.getcode()
-            final_url = resp.geturl()
-            content_type = (resp.headers.get("Content-Type") or "").lower()
-            body = resp.read().decode("utf-8", errors="replace")
-
-            if status < 200 or status >= 300:
-                raise RuntimeError(f"Lookup HTTP {status}")
-
-            if final_url.rstrip("/") != url.rstrip("/"):
-                raise RuntimeError(f"Lookup redirect inesperado a {final_url}")
-
-            if "json" not in content_type:
-                raise RuntimeError(f"Lookup no devolvio JSON (Content-Type={content_type})")
-
-            return json.loads(body) if body else {}
-
-    def _persist_link(self, entity: str, raw: dict, parsed: dict, fallback_remote_id: str | None = None) -> None:
-        if entity != "proveedores":
-            return
-
-        remote_id = None
-        if isinstance(parsed, dict):
-            proveedor = parsed.get("Proveedor")
-            if isinstance(proveedor, dict):
-                remote_id = proveedor.get("id")
-        if remote_id is None:
-            remote_id = fallback_remote_id
-
-        source_key = raw.get("COD_PROV")
-        cuit = self._normalize_cuit(raw.get("CUIT"))
-
-        if remote_id is None or source_key is None:
-            return
-
-        self._link_store.save_link(
-            entity=entity,
-            source_key=str(source_key),
-            remote_id=str(remote_id),
-            cuit=cuit,
-        )
-
-    def _build_update_url(self, entity: str, remote_id: str) -> str | None:
-        template = self._entity_update_endpoints.get(entity)
-        if not template:
-            return None
-        path = template.format(id=remote_id)
-        return f"{self._base_url}/{path.lstrip('/')}"
-
-    def _resolve_and_persist_existing(self, entity: str, raw: dict, parsed: dict) -> None:
-        if entity != "proveedores":
-            return
-
-        source_key = raw.get("COD_PROV")
-        cuit = self._normalize_cuit(raw.get("CUIT"))
-        if source_key is None or not cuit:
-            return
-
-        remote_id = self._lookup_proveedor_id_by_cuit(cuit)
-        if not remote_id:
-            if self._lookup_proveedores_enabled:
-                logger.warning("No se pudo resolver ID remoto para proveedor existente CUIT=%s", cuit)
-            return
-
-        self._link_store.save_link(
-            entity=entity,
-            source_key=str(source_key),
-            remote_id=str(remote_id),
-            cuit=cuit,
-        )
-
-    def _lookup_proveedor_id_by_cuit(self, cuit: str) -> str | None:
-        if not self._lookup_proveedores_enabled:
-            return None
-
-        lookup_errors: list[str] = []
-
-        # 1) Preferimos index.json con filterArgs del modelo (cuit/search)
-        # porque suele estar mejor soportado por permisos y vistas en CakePHP.
-        index_endpoint = self._entity_lookup_index_endpoints.get("proveedores")
-        if index_endpoint:
-            for params in ({"cuit": cuit}, {"search": cuit}):
-                query = parse.urlencode(params)
-                url = f"{self._base_url}/{index_endpoint.lstrip('/')}?{query}"
-                try:
-                    parsed = self._get_json(url)
-                    provider_id = self._extract_provider_id_from_index_payload(parsed, cuit)
-                    if provider_id:
-                        return provider_id
-                except Exception as exc:
-                    lookup_errors.append(f"index({params})={exc}")
-
-        # 2) Fallback al endpoint buscar.json (q, limit)
-        search_endpoint = self._entity_lookup_endpoints.get("proveedores")
-        if search_endpoint:
-            query = parse.urlencode({"q": cuit, "limit": 20})
-            url = f"{self._base_url}/{search_endpoint.lstrip('/')}?{query}"
-            try:
-                parsed = self._get_json(url)
-                provider_id = self._extract_provider_id_from_search_payload(parsed, cuit)
-                if provider_id:
-                    return provider_id
-            except Exception as exc:
-                lookup_errors.append(f"buscar={exc}")
-
-        if lookup_errors:
-            self._lookup_proveedores_enabled = False
-            logger.warning(
-                "Lookup proveedor por CUIT deshabilitado para esta corrida: %s",
-                " | ".join(lookup_errors),
-            )
-        return None
-
-    def _extract_provider_id_from_search_payload(self, parsed: dict, cuit: str) -> str | None:
-        proveedores = parsed.get("proveedores", []) if isinstance(parsed, dict) else []
-        if not isinstance(proveedores, list):
-            return None
-
-        for prov in proveedores:
-            if not isinstance(prov, dict):
-                continue
-            if self._normalize_cuit(prov.get("cuit")) == cuit:
-                pid = prov.get("id")
-                return str(pid) if pid is not None else None
-        return None
-
-    def _extract_provider_id_from_index_payload(self, parsed, cuit: str) -> str | None:
-        # View Proveedores/json/index.ctp devuelve lista [{"id": ..., "value": "Nombre (CUIT)"}]
-        if not isinstance(parsed, list):
-            return None
-
-        for item in parsed:
-            if not isinstance(item, dict):
-                continue
-            value = item.get("value")
-            value_cuit = self._normalize_cuit(value)
-            if value_cuit == cuit:
-                pid = item.get("id")
-                return str(pid) if pid is not None else None
-        return None
-
-    @staticmethod
-    def _normalize_cuit(value) -> str | None:
-        if value is None:
-            return None
-        digits = "".join(ch for ch in str(value) if ch.isdigit())
-        return digits if len(digits) == 11 else None
-
-    @staticmethod
-    def _source_key(entity: str, raw: dict) -> str | None:
-        if entity == "proveedores":
-            value = raw.get("COD_PROV")
-            return str(value) if value is not None else None
-        return None
-
-    @staticmethod
-    def _summarize_gateway_payload(parsed: dict) -> str:
-        if not isinstance(parsed, dict):
-            return "payload no-objeto"
-
-        if "Proveedor" in parsed and isinstance(parsed["Proveedor"], dict):
-            prov = parsed["Proveedor"]
-            pid = prov.get("id")
-            cuit = prov.get("cuit")
-            return f"Proveedor creado/obtenido id={pid} cuit={cuit}"
-
-        if "error" in parsed or "validationErrors" in parsed:
-            err = parsed.get("error")
-            val = parsed.get("validationErrors")
-            return f"error={err} validationErrors={val}"
-
-        return f"keys={sorted(parsed.keys())}"
-
-    @staticmethod
-    def _is_duplicate_cuit_error(parsed: dict) -> bool:
-        """Detect CakePHP validation error for duplicate CUIT to keep sync idempotent."""
-        validation_errors = parsed.get("validationErrors")
-        if not isinstance(validation_errors, dict):
-            return False
-
-        cuit_errors = validation_errors.get("cuit")
-        if not isinstance(cuit_errors, list):
-            return False
-
-        text = " ".join(str(e).lower() for e in cuit_errors)
-        return "ya existe" in text and "cuit" in text
-
-    def close(self) -> None:
-        self._link_store.close()
-
-
 class MigratorExporter(BaseExporter):
     """Envía lotes al importador RAFAM -> Paxapos via /rafam/migracion/importar.json."""
 
@@ -622,7 +193,6 @@ class MigratorExporter(BaseExporter):
     _RESULT_SECTION_BY_ENTITY = {
         "proveedores": "proveedores",
         "oc_items": "ordenes_compra",
-        "orden_compra": "ordenes_compra",
         "solic_gastos": "gastos",
         "orden_pago": "ordenes_pago",
         "retenciones": "retenciones",
@@ -717,13 +287,6 @@ class MigratorExporter(BaseExporter):
             self._record_batch_outcomes(entity, self._last_parsed)
             return
 
-        if entity == "orden_compra":
-            logger.warning(
-                "Migrator [orden_compra]: entidad deshabilitada en migrator — las OCs se migran via 'oc_items' "
-                "(que envia header + items embebidos). El header-only generaba OCs vacias en Paxapos."
-            )
-            return
-
         if entity == "solic_gastos":
             self._write_batch_solic_gastos(columns, rows)
             self._record_batch_outcomes(entity, self._last_parsed)
@@ -740,7 +303,8 @@ class MigratorExporter(BaseExporter):
             return
 
         raise ValueError(
-            "Modo migrator soporta solo 4 entidades oficiales: proveedores, oc_items, orden_pago, retenciones. "
+            "Modo migrator soporta solo las 5 entidades oficiales: "
+            "proveedores, oc_items, solic_gastos, orden_pago, retenciones. "
             f"Recibido: {entity!r}"
         )
 
@@ -1059,275 +623,6 @@ class MigratorExporter(BaseExporter):
             self._dry_run,
         )
         self._log_unresolved_summary("oc_items")
-
-    def _write_batch_orden_compra(self, columns: list[str], rows: list[tuple]) -> None:
-        """Sync incremental de ORDEN_COMPRA con items.
-
-        La query trae filas a nivel de ítem (ORDEN_COMPRA → OC_ITEMS → SOLIC_GASTOS),
-        con cursor incremental sobre FECH_OC / ESTADO_OC.
-        Reutiliza la misma lógica de agrupación/mapeo que _write_batch_oc_items.
-
-        Casos:
-        - estado R sin link previo → crear en Paxapos (con items)
-        - estado R ya enviada sin gastos nuevos → skip
-        - estado R ya enviada con gastos nuevos → re-enviar para vincular
-        - estado R→A con remote_id → anular en Paxapos
-        - estado N/A sin link R previo → solo registrar localmente
-        """
-        # ── 1. Agrupar filas por OC (cabecera + items) ────────────────────
-        grouped: dict[tuple[int, int, int], dict] = {}
-        grouped_raw: dict[tuple[int, int, int], dict] = {}
-        grouped_gasto_refs: dict[tuple[int, int, int], list[str]] = {}
-        # seen_items_per_oc: dedup por ITEM_OC porque el LEFT JOIN a
-        # SOLIC_GASTOS y oc_to_cc (REG_COMP→CTA_COMPROB) puede multiplicar filas (44% multi-
-        # match en SG, 8% en CC). Sin esto, los totales en Paxapos se inflan
-        # porque sum(item.precio) cuenta cada item N veces.
-        seen_items_per_oc: dict[tuple[int, int, int], set[int]] = {}
-        skipped_no_prov: set[tuple[int, int, int]] = set()
-        unresolved_items = 0
-
-        for row in rows:
-            raw = dict(zip(columns, row))
-
-            ejercicio = self._to_int(raw.get("EJERCICIO"))
-            uni_compra = self._to_int(raw.get("UNI_COMPRA"))
-            nro_oc = self._to_int(raw.get("NRO_OC"))
-            if ejercicio is None or uni_compra is None or nro_oc is None:
-                continue
-
-            key = (ejercicio, uni_compra, nro_oc)
-            if key in skipped_no_prov:
-                continue
-            if key not in grouped:
-                # Resolver proveedor_id via link_store (RAFAM COD_PROV → Paxapos id)
-                cod_prov = raw.get("COD_PROV")
-                remote_prov_id: int | None = None
-                if cod_prov is not None:
-                    remote_prov = self._link_store.get_remote_id("proveedores", str(cod_prov))
-                    if remote_prov:
-                        remote_prov_id = int(remote_prov)
-
-                # Omitir OC sin proveedor — no tiene sentido migrarla
-                if remote_prov_id is None:
-                    logger.warning(
-                        "Migrator [orden_compra] OC %s-%s-%s: omitida — sin proveedor (COD_PROV=%s)",
-                        ejercicio, uni_compra, nro_oc, cod_prov,
-                    )
-                    skipped_no_prov.add(key)
-                    continue
-
-                pedido: dict = {
-                    "internal_id": f"{ejercicio % 100}-{nro_oc}",
-                    "tipo": "orden_compra",
-                    "estado_aprobacion": 2,
-                    "proveedor_id": remote_prov_id,
-                }
-
-                # Observación: solo incluir si la OC tiene observaciones reales en RAFAM
-                obs = self._compose_oc_observacion(raw)
-                if obs:
-                    pedido["observacion"] = obs
-
-                # Fecha de creación real de RAFAM (no la de migración)
-                fech_oc = self._format_date_only(raw.get("OC_FECH_OC"))
-                if fech_oc:
-                    pedido["created"] = f"{fech_oc} 00:00:00"
-
-                oc_data: dict = {
-                    "external_id": {
-                        "ejercicio": ejercicio,
-                        "uni_compra": uni_compra,
-                        "nro_oc": nro_oc,
-                    },
-                    "Pedido": pedido,
-                    "items": [],
-                }
-
-                # centro_costo_id desde la primera JURISDICCION disponible
-                sg_jurisdiccion = raw.get("SG_JURISDICCION")
-                centro_costo_id = self._resolve_centro_costo_id(sg_jurisdiccion)
-                if centro_costo_id is not None:
-                    oc_data["centro_costo_id"] = centro_costo_id
-
-                grouped[key] = oc_data
-                grouped_raw[key] = raw
-
-            # Recolectar ref de gasto
-            deleg_solic = self._to_int(raw.get("DELEG_SOLIC"))
-            nro_solic = self._to_int(raw.get("NRO_SOLIC"))
-            if deleg_solic is not None and nro_solic is not None:
-                rafam_ref = f"SG-{ejercicio}-{deleg_solic}-{nro_solic}"
-                refs = grouped_gasto_refs.setdefault(key, [])
-                if rafam_ref not in refs:
-                    refs.append(rafam_ref)
-
-            # Dedup por ITEM_OC: el LEFT JOIN a SOLIC_GASTOS / oc_to_cc
-            # multiplica filas. Sin esto los items se duplican y el total
-            # (sum(precio_unitario x cantidad)) en Paxapos queda inflado.
-            item_oc = self._to_int(raw.get("ITEM_OC"))
-            seen_items = seen_items_per_oc.setdefault(key, set())
-            if item_oc is not None and item_oc in seen_items:
-                continue
-
-            item = self._map_oc_item(raw)
-            if item is None:
-                unresolved_items += 1
-                self._track_unresolved_item(raw.get("DESCRIPCION"), raw.get("COD_PROV"))
-                continue
-            if item_oc is not None:
-                seen_items.add(item_oc)
-            grouped[key]["items"].append(item)
-
-        # ── 2. Clasificar OCs por acción según estado y link previo ───────
-        ocs_to_create: list[dict] = []
-        ocs_to_anular: list[dict] = []
-        ocs_to_skip_register: list[tuple[int, int, int]] = []
-        ocs_to_skip_has_op: list[tuple[int, int, int]] = []
-        ocs_same_state: list[tuple[int, int, int]] = []
-
-        for key, oc_data in grouped.items():
-            if not oc_data["items"]:
-                continue
-
-            raw = grouped_raw[key]
-            estado_actual = str(raw.get("OC_ESTADO_OC", "")).strip().upper()
-            source_key = json.dumps(
-                {"ejercicio": key[0], "nro_oc": key[2], "uni_compra": key[1]},
-                sort_keys=True,
-            )
-            link_previo = self._link_store.get_link("orden_compra", source_key)
-            estado_previo = link_previo.get("estado_oc", "").strip().upper() if link_previo else None
-
-            if estado_actual == "R":
-                if link_previo is None or estado_previo != "R":
-                    ocs_to_create.append(oc_data)
-                else:
-                    ocs_same_state.append(key)
-            elif estado_actual == "A":
-                if link_previo and estado_previo == "R" and link_previo.get("remote_id"):
-                    if link_previo.get("has_op"):
-                        logger.info(
-                            "Migrator [orden_compra] OC %s-%s-%s anulada en RAFAM pero tiene OP,"
-                            " no se elimina de Paxapos",
-                            key[0], key[1], key[2],
-                        )
-                        ocs_to_skip_has_op.append(key)
-                    else:
-                        oc_data["Pedido"]["deleted"] = 1
-                        ocs_to_anular.append(oc_data)
-                else:
-                    ocs_to_skip_register.append(key)
-            else:
-                # Estado N u otro → fallback: si tiene comprobante o OP
-                # asociada en RAFAM, enviar a Paxapos.
-                has_cc = bool(str(raw.get("OC_CC_NRO") or "").strip())
-                has_op = bool(link_previo and link_previo.get("has_op"))
-                if has_cc or has_op:
-                    logger.info(
-                        "Migrator [orden_compra] OC %s-%s-%s estado %s pero tiene %s,"
-                        " enviando a Paxapos como fallback",
-                        key[0], key[1], key[2], estado_actual,
-                        "comprobante+OP" if (has_cc and has_op)
-                        else ("comprobante" if has_cc else "OP"),
-                    )
-                    ocs_to_create.append(oc_data)
-                else:
-                    ocs_to_skip_register.append(key)
-
-        # ── 3. Registrar en link TODAS las OCs que no se envían ───────────
-        for key in ocs_to_skip_register + ocs_same_state + ocs_to_skip_has_op:
-            raw = grouped_raw[key]
-            source_key = json.dumps(
-                {"ejercicio": key[0], "nro_oc": key[2], "uni_compra": key[1]},
-                sort_keys=True,
-            )
-            estado_oc = str(raw.get("OC_ESTADO_OC", "")).strip().upper() or None
-            fech_confirm = self._format_date_only(raw.get("OC_FECH_CONFIRM", "")) or None
-            cod_prov = str(raw.get("COD_PROV")) if raw.get("COD_PROV") is not None else None
-            importe_tot = str(raw.get("OC_IMPORTE_TOT")) if raw.get("OC_IMPORTE_TOT") is not None else None
-            gasto_refs_list = grouped_gasto_refs.get(key, [])
-            gasto_refs = ",".join(gasto_refs_list) if gasto_refs_list else ""
-
-            existing = self._link_store.get_link("orden_compra", source_key)
-            remote_id = existing.get("remote_id", "") if existing else ""
-            gasto_linked_refs = existing.get("gasto_linked_refs", "") if existing else ""
-
-            self._link_store.save_link(
-                entity="orden_compra",
-                source_key=source_key,
-                remote_id=remote_id,
-                estado_oc=estado_oc,
-                fech_confirm=fech_confirm,
-                cod_prov=cod_prov,
-                importe_tot=importe_tot,
-                gasto_refs=gasto_refs,
-                gasto_linked_refs=gasto_linked_refs,
-            )
-
-        # ── 4. Enviar OCs a crear + OCs a anular ─────────────────────────
-        ordenes_compra = ocs_to_create + ocs_to_anular
-        raw_by_source_key: dict[str, dict] = {}
-        for key in grouped_raw:
-            sk = json.dumps(
-                {"ejercicio": key[0], "nro_oc": key[2], "uni_compra": key[1]},
-                sort_keys=True,
-            )
-            raw_by_source_key[sk] = grouped_raw[key]
-            gasto_refs_list = grouped_gasto_refs.get(key, [])
-            raw_by_source_key[sk]["_GASTO_REFS"] = ",".join(gasto_refs_list) if gasto_refs_list else ""
-            raw_by_source_key[sk]["_GASTO_LINKED_REFS"] = ""
-
-        if not ordenes_compra:
-            logger.info(
-                "Migrator [orden_compra]: nada que enviar (skip_estado=%d, mismo_estado=%d, skip_has_op=%d, sin_items=%d)",
-                len(ocs_to_skip_register),
-                len(ocs_same_state),
-                len(ocs_to_skip_has_op),
-                unresolved_items,
-            )
-            return
-
-        payload = {
-            "dry_run": self._dry_run,
-            "options": self._payload_options(),
-            "proveedores": [],
-            "pedidos": [],
-            "ordenes_compra": ordenes_compra,
-            "gastos": [],
-            "ordenes_pago": [],
-        }
-
-        url = self._import_url
-        logger.debug(
-            "Migrator request [orden_compra] POST %s dry_run=%s crear=%d anular=%d items_omitidos=%d",
-            url,
-            self._dry_run,
-            len(ocs_to_create),
-            len(ocs_to_anular),
-            unresolved_items,
-        )
-        parsed = self._post_json(url, payload)
-
-        stats = parsed.get("stats", {}) if isinstance(parsed, dict) else {}
-        section_stats = stats.get("ordenes_compra", {}) if isinstance(stats, dict) else {}
-        ok_count = section_stats.get("ok", 0)
-        error_count = section_stats.get("error", 0)
-
-        self._persist_links("orden_compra", parsed, raw_by_source_key)
-        self._raise_on_migrator_errors(parsed)
-        logger.info(
-            "Migrator OK [orden_compra]: %d ok, %d error, crear=%d, anular=%d, "
-            "skip_estado=%d, mismo_estado=%d, skip_has_op=%d, dry_run=%s",
-            ok_count,
-            error_count,
-            len(ocs_to_create),
-            len(ocs_to_anular),
-            len(ocs_to_skip_register),
-            len(ocs_same_state),
-            len(ocs_to_skip_has_op),
-            self._dry_run,
-        )
-        self._log_unresolved_summary("orden_compra")
 
     def _write_batch_solic_gastos(self, columns: list[str], rows: list[tuple]) -> None:
         # Solo enviar gastos vinculados a OCs ya enviadas a Paxapos
@@ -2083,11 +1378,11 @@ class MigratorExporter(BaseExporter):
                 else:
                     op["retenciones"] = ret_payload
 
-            # importe_neto/neto_transferido = IMPORTE_LIQUIDO de RAFAM (si disponible)
+            # importe_neto informativo (para el gasto). No enviar neto_transferido:
+            # Paxapos lo calcula como total - retenciones en _replaceRetencionesForEgreso.
             importe_liquido = op.pop("_importe_liquido", None)
             if importe_liquido is not None:
                 op["importe_neto"] = importe_liquido
-                op["Egreso"]["neto_transferido"] = importe_liquido
 
             # ── Validación: suma facturas vs total OC ─────────────────────
             # Si la suma de los importes de las facturas imputadas a esta OP
@@ -2876,8 +2171,6 @@ class MigratorExporter(BaseExporter):
             self._persist_links_proveedores(results, raw_by_source_key)
         elif entity == "oc_items":
             self._persist_links_orden_compra(results, raw_by_source_key)
-        elif entity == "orden_compra":
-            self._persist_links_orden_compra(results, raw_by_source_key)
         elif entity == "solic_gastos":
             self._persist_links_solic_gastos(results, raw_by_source_key)
         elif entity == "orden_pago":
@@ -3107,19 +2400,13 @@ class MigratorExporter(BaseExporter):
 
 # ─── Factory ─────────────────────────────────────────────────────────────────
 
-def build_exporter(mode: str, force_update: bool = False, dry_run: bool = False) -> BaseExporter:
+def build_exporter(dry_run: bool = False) -> MigratorExporter:
+    """Construye el exporter migrator (único destino de salida).
+
+    dry_run: si True, el receptor procesa el payload en modo preview
+    (no persiste) y el sync no avanza checkpoints.
     """
-    mode: 'csv' | 'noop' | 'gateway'
-    """
-    if mode == "csv":
-        return CsvExporter()
-    if mode == "noop":
-        return NoopExporter()
-    if mode == "gateway":
-        return GatewayExporter(force_update=force_update)
-    if mode == "migrator":
-        return MigratorExporter(dry_run=dry_run)
-    raise ValueError(f"Modo de exportación desconocido: '{mode}'. Opciones: csv, noop, gateway, migrator")
+    return MigratorExporter(dry_run=dry_run)
 
 
 def fetch_migrator_spec() -> dict:
