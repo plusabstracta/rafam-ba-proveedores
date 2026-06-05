@@ -9,13 +9,14 @@ _TABLE_PREFIX = "link_"
 # Override via the ``schemas`` parameter in EntityLinkStore.__init__().
 DEFAULT_LINK_SCHEMAS: dict[str, list[str]] = {
     "proveedores": ["cuit", "cod_estado"],
-    "unidad_medida": ["name", "codigo"],
-    "tipo_factura": ["name", "codigo"],
-    "tipo_pago": ["name", "codigo"],
-    "tipo_retencion": ["name", "codigo"],
     "orden_compra": ["fech_confirm", "estado_oc", "cod_prov", "importe_tot", "gasto_refs", "gasto_linked_refs", "paxapos_gasto_ids", "has_op"],
     "gasto": ["estado_solic", "importe_tot", "cod_prov"],
     "orden_pago": ["estado_op", "confirmado", "fech_confirm", "importe_total"],
+    # retenciones: idempotencia de la pasada standalone (F4). El receptor usa
+    # REPLACE (soft-delete + insert) por egreso, asi que sin link reenviariamos
+    # las mismas retenciones en cada corrida y se duplicarian con nuevos IDs.
+    # fingerprint = hash de las retenciones enviadas; retenciones_count = cantidad.
+    "retenciones": ["fingerprint", "retenciones_count"],
 }
 
 
@@ -137,6 +138,10 @@ class EntityLinkStore:
         self._conn.commit()
 
     def get_remote_id(self, entity: str, source_key: str) -> Optional[str]:
+        # Entidades fuera del schema: devolver None sin crear la tabla. Evita
+        # recrear tablas link obsoletas desde fallbacks de lectura.
+        if entity not in self._schemas:
+            return None
         table = self._ensure_table(entity)
         row = self._conn.execute(
             f"SELECT remote_id FROM [{table}] WHERE source_key = ?",
@@ -148,6 +153,8 @@ class EntityLinkStore:
 
     def get_link(self, entity: str, source_key: str) -> dict | None:
         """Return the full row as a dict, or None if not found."""
+        if entity not in self._schemas:
+            return None
         table = self._ensure_table(entity)
         row = self._conn.execute(
             f"SELECT * FROM [{table}] WHERE source_key = ?",

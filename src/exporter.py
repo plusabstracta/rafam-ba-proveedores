@@ -10,6 +10,7 @@ Implementación:
     (POST /rafam/migracion/importar.json). Soporta dry-run para preview.
 """
 
+import hashlib
 import json
 import logging
 import os
@@ -1015,8 +1016,12 @@ class MigratorExporter(BaseExporter):
 
         # 3. Construir payload solo para OPs migradas; encolar las pendientes.
         retenciones_payload = []
+        # op_sk -> (fingerprint, cantidad) de las OPs incluidas en este envio.
+        # Se persiste como link_retenciones tras la respuesta OK.
+        pending_fingerprints: dict[str, tuple[str, int]] = {}
         skipped_no_link = 0
         skipped_no_deduc = 0
+        skipped_unchanged = 0
         for ejercicio, nro_op in op_keys:
             deducciones = deducciones_by_op.get((ejercicio, nro_op), [])
             if not deducciones:
@@ -1045,16 +1050,28 @@ class MigratorExporter(BaseExporter):
             if not mapped:
                 continue
 
+            # Idempotencia: si estas retenciones ya se migraron sin cambios
+            # (mismo fingerprint), no reenviar. El receptor usa REPLACE
+            # (soft-delete + insert) por egreso, asi que reenviar lo mismo
+            # genera filas duplicadas con nuevos IDs en cada corrida.
+            fingerprint = self._retenciones_fingerprint(mapped)
+            ret_link = self._link_store.get_link("retenciones", op_sk)
+            if ret_link and ret_link.get("fingerprint") == fingerprint:
+                skipped_unchanged += 1
+                continue
+
+            pending_fingerprints[op_sk] = (fingerprint, len(mapped))
             retenciones_payload.append({
                 "external_id": {"ejercicio": ejercicio, "nro_op": nro_op},
                 "orden_pago_external_id": {"ejercicio": ejercicio, "nro_op": nro_op},
                 "retenciones": mapped,
             })
 
-        if skipped_no_link or skipped_no_deduc:
+        if skipped_no_link or skipped_no_deduc or skipped_unchanged:
             logger.info(
-                "Migrator [retenciones]: %d OP sin link (encoladas), %d sin deducciones",
-                skipped_no_link, skipped_no_deduc,
+                "Migrator [retenciones]: %d OP sin link (encoladas), %d sin deducciones, "
+                "%d ya migradas sin cambios (skip)",
+                skipped_no_link, skipped_no_deduc, skipped_unchanged,
             )
 
         self._flush_retencion_skip_counters("retenciones")
@@ -1083,6 +1100,7 @@ class MigratorExporter(BaseExporter):
 
         stats = parsed.get("stats", {}) if isinstance(parsed, dict) else {}
         section_stats = stats.get("retenciones", {}) if isinstance(stats, dict) else {}
+        self._persist_links_retenciones(parsed, pending_fingerprints)
         self._raise_on_migrator_errors(parsed)
         logger.info(
             "Migrator OK [retenciones]: %d ok, %d error, dry_run=%s",
@@ -1846,11 +1864,6 @@ class MigratorExporter(BaseExporter):
 
     def _resolve_tipo_retencion_id(self, cod_ret, descripcion) -> int | None:
         cod_text = str(cod_ret).strip() if cod_ret is not None else ""
-        if cod_text:
-            remote = self._link_store.get_remote_id("tipo_retencion", cod_text)
-            if remote and self._to_int(remote) is not None:
-                return int(remote)
-
         for value, index in (
             (cod_text, self._tipos_retencion_by_codigo),
             (cod_text, self._tipos_retencion_by_codename),
@@ -1959,14 +1972,8 @@ class MigratorExporter(BaseExporter):
             return None
 
     def _resolve_unidad_medida_id(self, raw: dict) -> int:
-        # Intentar resolver via link_store (si ya se mapeó previamente)
-        uni_med = raw.get("UNI_MED")
-        if uni_med is not None:
-            uni_med_str = str(uni_med).strip()
-            if uni_med_str:
-                remote = self._link_store.get_remote_id("unidad_medida", uni_med_str)
-                if remote and self._to_int(remote) is not None:
-                    return int(remote)
+        # RAFAM no expone un catalogo de unidades mapeable 1:1 con Paxapos.
+        # Todas las lineas migran con la unidad generica por defecto.
         # Default = 5 (Unidad) — id en compras_unidad_de_medidas del tenant.
         from .gateway_mapper import _UM_DEFAULT
         return _UM_DEFAULT
@@ -2189,6 +2196,59 @@ class MigratorExporter(BaseExporter):
             self._persist_links_solic_gastos(results, raw_by_source_key)
         elif entity == "orden_pago":
             self._persist_links_orden_pago(results, raw_by_source_key)
+
+    @staticmethod
+    def _retenciones_fingerprint(mapped: list[dict]) -> str:
+        """Hash estable del conjunto de retenciones enviadas para una OP.
+
+        Cambia si cambia cualquier campo de cualquier retencion (monto, tipo,
+        certificado) o la cantidad. Permite detectar si las retenciones de la
+        OP realmente cambiaron en RAFAM y solo reenviar en ese caso.
+        """
+        items = sorted(json.dumps(r, sort_keys=True, ensure_ascii=False) for r in mapped)
+        raw = "\n".join(items)
+        return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
+    def _persist_links_retenciones(
+        self, parsed: dict, pending_fingerprints: dict[str, tuple[str, int]]
+    ) -> None:
+        """Guarda link_retenciones por OP migrada con exito (idempotencia F4).
+
+        source_key = OP (ejercicio, nro_op); remote_id = egreso_id devuelto por
+        Paxapos; fingerprint = hash de las retenciones enviadas. En la proxima
+        corrida, si el fingerprint coincide, la OP se saltea sin reenviar.
+        """
+        if self._dry_run or not isinstance(parsed, dict):
+            return
+        results = parsed.get("results", {})
+        if not isinstance(results, dict):
+            return
+        section = results.get("retenciones", [])
+        if not isinstance(section, list):
+            return
+
+        for result in section:
+            if not isinstance(result, dict) or not result.get("success"):
+                continue
+            external_id = result.get("external_id") or {}
+            if not isinstance(external_id, dict):
+                continue
+            key_dict = {k: external_id[k] for k in ("ejercicio", "nro_op") if k in external_id}
+            if len(key_dict) != 2:
+                continue
+            source_key = json.dumps(key_dict, sort_keys=True)
+            fp_entry = pending_fingerprints.get(source_key)
+            if fp_entry is None:
+                continue
+            fingerprint, count = fp_entry
+            remote_id = result.get("id")
+            self._link_store.save_link(
+                entity="retenciones",
+                source_key=source_key,
+                remote_id=str(remote_id) if remote_id is not None else "",
+                fingerprint=fingerprint,
+                retenciones_count=str(count),
+            )
 
     def _persist_links_proveedores(self, results: dict, raw_by_source_key: dict[str, dict]) -> None:
         proveedores = results.get("proveedores", [])

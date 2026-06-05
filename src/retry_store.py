@@ -195,6 +195,12 @@ class RetryStore:
         self._commit()
         return cursor.rowcount
 
+    def clear_all(self) -> int:
+        """Borra TODA la cola de reintentos. Retorna cantidad de filas eliminadas."""
+        cursor = self._conn.execute(f"DELETE FROM {_TABLE}")
+        self._commit()
+        return cursor.rowcount
+
     # ── lectura ───────────────────────────────────────────────────────────
 
     def pending_external_ids(self, entity: str) -> set[str]:
@@ -233,12 +239,22 @@ class RetryStore:
             for row in rows
         ]
 
-    def counts_by_entity(self) -> dict[str, dict[str, int]]:
-        """Resumen {entity: {status: count}} para status/observabilidad."""
+    def counts_by_entity(
+        self, entities: Optional[list[str]] = None
+    ) -> dict[str, dict[str, int]]:
+        """Resumen {entity: {status: count}} para status/observabilidad.
+
+        Si ``entities`` se pasa, filtra el resultado a esas entidades. Lo usa el
+        run de una sola entidad (``--entity X``) para que el log de la cola no
+        muestre pendientes de otras entidades ajenas a esa corrida.
+        """
         rows = self._conn.execute(
             f"SELECT entity, status, COUNT(*) AS n FROM {_TABLE} GROUP BY entity, status"
         ).fetchall()
+        allow = set(entities) if entities is not None else None
         out: dict[str, dict[str, int]] = {}
         for row in rows:
+            if allow is not None and row["entity"] not in allow:
+                continue
             out.setdefault(row["entity"], {})[row["status"]] = row["n"]
         return out

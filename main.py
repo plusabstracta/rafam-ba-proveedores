@@ -50,6 +50,7 @@ _ENTITY_LINK_NAMES: dict[str, str] = {
     "oc_items": "orden_compra",
     "solic_gastos": "gasto",
     "orden_pago": "orden_pago",
+    "retenciones": "retenciones",
 }
 
 
@@ -143,7 +144,12 @@ def cmd_reset(args) -> None:
             if count:
                 logger.info("Links borrados: %s (%d)", link_entity, count)
         link_store.close()
-        logger.info("Todos los checkpoints y links reseteados — próxima ejecución será full load.")
+        retry_store = RetryStore()
+        retry_cleared = retry_store.clear_all()
+        retry_store.close()
+        if retry_cleared:
+            logger.info("Cola de reintentos vaciada: %d items eliminados", retry_cleared)
+        logger.info("Todos los checkpoints, links y reintentos reseteados — próxima ejecución será full load.")
         return
 
     if args.entity not in ENTITY_CONFIGS:
@@ -159,6 +165,11 @@ def cmd_reset(args) -> None:
         count = link_store.clear_entity(link_entity)
         logger.info("Links borrados: %s (%d)", link_entity, count)
     link_store.close()
+    retry_store = RetryStore()
+    retry_cleared = retry_store.clear_entity(args.entity)
+    retry_store.close()
+    if retry_cleared:
+        logger.info("Cola de reintentos vaciada para %s: %d items", args.entity, retry_cleared)
     logger.info("Checkpoint reseteado: %s", args.entity)
 
 
@@ -363,17 +374,44 @@ def cmd_run(args) -> None:
 def _cmd_run_locked(args) -> None:
     from src.config import _EJERCICIO_MIN, _EJERCICIO_MIN_ENTITIES
     if _EJERCICIO_MIN:
-        entidades = ", ".join(sorted(_EJERCICIO_MIN_ENTITIES))
-        logger.info(
-            "RAFAM_EJERCICIO_MIN=%d — aplica solo a: %s",
-            _EJERCICIO_MIN,
-            entidades,
-        )
+        if args.entity:
+            # Run de una sola entidad: el log habla solo de esa entidad.
+            aplica = "aplica" if args.entity in _EJERCICIO_MIN_ENTITIES else "no aplica"
+            logger.info(
+                "RAFAM_EJERCICIO_MIN=%d — %s a %s",
+                _EJERCICIO_MIN,
+                aplica,
+                args.entity,
+            )
+        else:
+            entidades = ", ".join(sorted(_EJERCICIO_MIN_ENTITIES))
+            logger.info(
+                "RAFAM_EJERCICIO_MIN=%d — aplica solo a: %s",
+                _EJERCICIO_MIN,
+                entidades,
+            )
     else:
         logger.info("RAFAM_EJERCICIO_MIN no configurado — se procesarán TODOS los ejercicios")
 
     exporter = build_exporter(dry_run=args.dry_run)
     engine   = _build_engine()
+
+    # Determinar las entidades a procesar ANTES de loguear la cola de reintentos,
+    # para filtrar el snapshot por lo que realmente corre esta vez (un run
+    # `--entity retenciones` no debe loguear pendientes de orden_pago/oc_items).
+    # Sin --entity explicito, ejecutar las 5 entidades oficiales en orden de FKs.
+    # Las demas no se migran:
+    #   - orden_compra (header) → reemplazado por oc_items (incluye items embebidos)
+    #   - pedidos / ped_items   → deshabilitados, los pedidos llegan como OCs via oc_items
+    # retenciones corre al final: depende de que la OP (Egreso) ya exista para
+    # resolver el destino; si no, se encola y se reintenta en la proxima corrida.
+    if args.entity:
+        targets = [args.entity]
+    else:
+        official = ["proveedores", "oc_items", "solic_gastos", "orden_pago", "retenciones"]
+        targets = [e for e in official if e in ENTITY_CONFIGS]
+        logger.info("Ejecutando entidades oficiales en orden FK → %s", targets)
+
     # Cola de reintentos (F1): captura filas rechazadas por el receptor para
     # reintentarlas en la proxima corrida. Manejo fila-a-fila — el batch no se
     # cancela por una fila mala; el watermark avanza con seguridad porque lo
@@ -381,21 +419,9 @@ def _cmd_run_locked(args) -> None:
     retry_store = RetryStore()
     if hasattr(exporter, "attach_retry_store"):
         exporter.attach_retry_store(retry_store)
-        pending = retry_store.counts_by_entity()
+        pending = retry_store.counts_by_entity(entities=targets)
         if pending:
             logger.info("Cola de reintentos al inicio: %s", json.dumps(pending, ensure_ascii=False))
-    targets  = [args.entity] if args.entity else list(ENTITY_CONFIGS.keys())
-
-    # Sin --entity explicito, ejecutar las 5 entidades oficiales en orden de FKs.
-    # Las demas no se migran:
-    #   - orden_compra (header) → reemplazado por oc_items (incluye items embebidos)
-    #   - pedidos / ped_items   → deshabilitados, los pedidos llegan como OCs via oc_items
-    # retenciones corre al final: depende de que la OP (Egreso) ya exista para
-    # resolver el destino; si no, se encola y se reintenta en la proxima corrida.
-    if not args.entity:
-        official = ["proveedores", "oc_items", "solic_gastos", "orden_pago", "retenciones"]
-        targets = [e for e in official if e in ENTITY_CONFIGS]
-        logger.info("Ejecutando entidades oficiales en orden FK → %s", targets)
 
     failed_entities: list[str] = []
     try:
@@ -417,7 +443,7 @@ def _cmd_run_locked(args) -> None:
     finally:
         exporter.close()
         try:
-            final_pending = retry_store.counts_by_entity()
+            final_pending = retry_store.counts_by_entity(entities=targets)
             if final_pending:
                 logger.info("Cola de reintentos al finalizar: %s", json.dumps(final_pending, ensure_ascii=False))
         finally:
