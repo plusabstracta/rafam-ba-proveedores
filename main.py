@@ -13,22 +13,22 @@ import argparse
 import fcntl
 import json
 import logging
-import logging.handlers
 import os
 import sys
 import time
 from contextlib import contextmanager
-from datetime import datetime
 from pathlib import Path
 
 from dotenv import load_dotenv
 from sqlalchemy.exc import SQLAlchemyError
 
+from src.batch_grouping import GROUPED_BATCH_FIELDS, ENTITY_LINK_NAMES, iter_grouped_batches
 from src.checkpoint_store import CheckpointStore
 from src.config import ENTITY_CONFIGS
 from src.db import create_source_engine
 from src.entity_link_store import EntityLinkStore
-from src.exporter import BaseExporter, _env_bool, build_exporter, fetch_migrator_lookups, fetch_migrator_spec
+from src.exporter import BaseExporter, build_exporter, fetch_migrator_lookups, fetch_migrator_spec
+from src.logging_config import setup_file_logging
 from src.retry_store import RetryStore
 from src.source_repository import SourceRepository
 from src.sync_engine import SyncEngine
@@ -37,21 +37,6 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-
-_GROUPED_BATCH_FIELDS = {
-    "oc_items": ["EJERCICIO", "UNI_COMPRA", "NRO_OC"],
-    "orden_pago": ["EJERCICIO", "NRO_OP"],
-    "retenciones": ["EJERCICIO", "NRO_OP"],
-}
-
-# Maps entity config names to the link store entity they write to.
-_ENTITY_LINK_NAMES: dict[str, str] = {
-    "proveedores": "proveedores",
-    "oc_items": "orden_compra",
-    "solic_gastos": "gasto",
-    "orden_pago": "orden_pago",
-    "retenciones": "retenciones",
-}
 
 
 def _build_engine() -> SyncEngine:
@@ -160,7 +145,7 @@ def cmd_reset(args) -> None:
         sys.exit(1)
 
     engine.reset_checkpoint(args.entity)
-    link_entity = _ENTITY_LINK_NAMES.get(args.entity)
+    link_entity = ENTITY_LINK_NAMES.get(args.entity)
     if link_entity:
         count = link_store.clear_entity(link_entity)
         logger.info("Links borrados: %s (%d)", link_entity, count)
@@ -256,9 +241,9 @@ def _sync_entity(
                         entity, cp_exc,
                     )
 
-        group_fields = _GROUPED_BATCH_FIELDS.get(entity)
+        group_fields = GROUPED_BATCH_FIELDS.get(entity)
         if group_fields:
-            for batch in _iter_grouped_batches(result, columns, group_fields, batch_size):
+            for batch in iter_grouped_batches(result, columns, group_fields, batch_size):
                 if limit is not None and total >= limit:
                     break
                 process_batch(batch)
@@ -318,48 +303,6 @@ def _warn_missing_cursor_fields(cfg, columns: list[str], entity: str) -> None:
         )
 
 
-def _iter_grouped_batches(result, columns: list[str], group_fields: list[str], batch_size: int):
-    """Yield batches without splitting rows that share the same business key."""
-    col_idx = {name.upper(): i for i, name in enumerate(columns)}
-    group_indexes = [col_idx.get(field.upper()) for field in group_fields]
-    if any(index is None for index in group_indexes):
-        while True:
-            rows = result.fetchmany(batch_size)
-            if not rows:
-                break
-            yield [tuple(row) for row in rows]
-        return
-
-    pending: list[tuple] = []
-    current_group: list[tuple] = []
-    current_key = None
-
-    while True:
-        rows = result.fetchmany(batch_size)
-        if not rows:
-            break
-
-        for raw_row in rows:
-            row = tuple(raw_row)
-            key = tuple(row[index] for index in group_indexes if index is not None)
-            if current_group and key != current_key:
-                if pending and len(pending) + len(current_group) > batch_size:
-                    yield pending
-                    pending = []
-                pending.extend(current_group)
-                current_group = []
-
-            current_key = key
-            current_group.append(row)
-
-    if current_group:
-        if pending and len(pending) + len(current_group) > batch_size:
-            yield pending
-            pending = []
-        pending.extend(current_group)
-
-    if pending:
-        yield pending
 
 
 def cmd_run(args) -> None:
@@ -528,58 +471,6 @@ def cmd_reconcile(args) -> None:
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 
-def _setup_file_logging(args) -> None:
-    """
-    Adjunta un FileHandler con rotacion mensual al logger raiz.
-
-    - Directorio: $RAFAM_LOG_DIR (default: ./logs).
-    - Un archivo por script/entidad: rafam-{entity}-YYYY-MM.log.
-      Para cmd_run usa el --entity (proveedores | oc_items | orden_pago).
-      Para los otros comandos (status/reset/spec/lookups) usa el nombre del comando.
-      Si --entity esta vacio en run (corrida full) usa 'all'.
-    - Rotacion mensual: cada vez que se ejecuta se abre el archivo del mes en
-      curso (rafam-proveedores-2026-05.log). Al cambiar de mes se crea el del
-      mes siguiente automaticamente. Codificar el nombre del archivo en YYYY-MM
-      da rotacion real, predecible y sin riesgo de perdida (no dependemos del
-      TimedRotatingFileHandler que solo rota dentro de un proceso vivo).
-    - Override completo via $RAFAM_LOG_FILE (un solo archivo, sin rotacion).
-    - Si $RAFAM_LOG_DIR='' o $RAFAM_LOG_DISABLE=true: no escribe a archivo.
-    """
-    if _env_bool("RAFAM_LOG_DISABLE", "false"):
-        return
-
-    log_dir = os.getenv("RAFAM_LOG_DIR", "logs").strip()
-    log_file_override = os.getenv("RAFAM_LOG_FILE", "").strip()
-
-    if log_file_override:
-        log_path = Path(log_file_override)
-    else:
-        if not log_dir:
-            return
-        cmd = getattr(args, "command", "app") or "app"
-        if cmd == "run":
-            entity = (getattr(args, "entity", None) or "all").strip() or "all"
-            base_name = f"rafam-{entity}"
-        else:
-            base_name = f"rafam-{cmd}"
-        month_suffix = datetime.now().strftime("%Y-%m")
-        log_path = Path(log_dir) / f"{base_name}-{month_suffix}.log"
-
-    try:
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        handler = logging.FileHandler(str(log_path), mode="a", encoding="utf-8")
-        handler.setFormatter(
-            logging.Formatter(
-                "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-                datefmt="%Y-%m-%d %H:%M:%S",
-            )
-        )
-        # Heredar el nivel del root logger (configurado por LOG_LEVEL)
-        handler.setLevel(logging.getLogger().level)
-        logging.getLogger().addHandler(handler)
-        logger.info("Logging a archivo: %s", log_path)
-    except OSError as exc:
-        logger.warning("No se pudo abrir archivo de log %s: %s", log_path, exc)
 
 
 def main() -> None:
@@ -639,7 +530,7 @@ def main() -> None:
     )
 
     args = parser.parse_args()
-    _setup_file_logging(args)
+    setup_file_logging(args)
     {"status": cmd_status, "reset": cmd_reset, "run": cmd_run, "spec": cmd_spec, "lookups": cmd_lookups, "reconcile": cmd_reconcile}[args.command](args)
 
 

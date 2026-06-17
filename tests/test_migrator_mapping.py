@@ -813,7 +813,7 @@ class TestWriteBatchOcItems:
             _oc_row(item_oc="3", cod_prov="999"),
         ]
         import logging
-        with patch.object(logging.getLogger("src.exporter"), "warning") as mock_warn:
+        with patch.object(logging.getLogger("src.mappers.oc_items"), "warning") as mock_warn:
             exp.write_batch("oc_items", OC_COLUMNS, rows)
         # Solo 1 warning para la OC, no 3
         oc_skip_calls = [

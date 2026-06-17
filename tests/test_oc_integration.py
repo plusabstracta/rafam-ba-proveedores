@@ -13,7 +13,7 @@ from unittest.mock import patch
 import pytest
 from sqlalchemy import create_engine, text
 
-from main import _iter_grouped_batches
+from src.batch_grouping import iter_grouped_batches
 from src.exporter import MigratorExporter
 from src.models import Checkpoint
 from src.source_repository import SourceRepository
@@ -82,7 +82,7 @@ def oc_payloads(dev_engine, exporter_with_links):
         stmt = repo.build_statement("oc_items", cp)
         result = conn.execute(stmt)
         columns = list(result.keys())
-        for batch in _iter_grouped_batches(result, columns, ["EJERCICIO", "UNI_COMPRA", "NRO_OC"], 500):
+        for batch in iter_grouped_batches(result, columns, ["EJERCICIO", "UNI_COMPRA", "NRO_OC"], 500):
             exporter_with_links.write_batch("oc_items", columns, batch)
 
     # Flatten all OCs from all payloads
