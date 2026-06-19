@@ -447,8 +447,7 @@ class OrdenPagoMapper:
         self._last_gastos_count = len(gastos_payload)
         return payload, raw_by_source_key
 
-    # ââ Mapping helpers ââââââââââââââââââââââââââââââââââââââââââââââââââ
-
+    
     def _build_gasto_from_op_row(self, raw: dict) -> tuple[dict | None, tuple | None]:
         """Construye un bloque Gasto desde un row de OP enriquecido con CTA_COMPROB."""
         cc_nro = str(raw.get("OPI_NRO_COMPROB") or "").strip()
@@ -640,8 +639,7 @@ class OrdenPagoMapper:
             )
             self._retencion_skipped_no_match = {}
 
-    # ââ Post-send ââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
-
+   
     def process_response(self, parsed: dict, raw_by_source_key: dict[str, dict], *, link_store, dry_run: bool) -> None:
         """Persist links y marcar OCs has_op despuÃ©s del POST."""
         persist_links_orden_pago(parsed, raw_by_source_key, link_store, dry_run)
@@ -689,7 +687,6 @@ class OrdenPagoMapper:
         )
 
 
-# ââ Persist Links ââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 
 def persist_links_orden_pago(parsed: dict, raw_by_source_key: dict[str, dict], link_store, dry_run: bool) -> None:
     """Persiste entity links de ordenes_pago desde la respuesta del API."""
@@ -737,7 +734,6 @@ def persist_links_orden_pago(parsed: dict, raw_by_source_key: dict[str, dict], l
         )
 
 
-# ââ Helpers ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 
 def _pedido_id_from_op_row(raw: dict) -> int | None:
     """Devuelve pedido_id si la fila ya lo trae."""
@@ -748,5 +744,4 @@ def _pedido_id_from_op_row(raw: dict) -> int | None:
     return None
 
 
-# SecciÃ³n de resultado en la respuesta del API
 RESULT_SECTION = "ordenes_pago"
