@@ -212,18 +212,6 @@ class OrdenPagoMapper:
             if remote_prov_id is not None:
                 grouped[key]["proveedor_id"] = remote_prov_id
 
-            importe_liquido = raw.get("IMPORTE_LIQUIDO")
-            if importe_liquido is not None:
-                res_neto = validate_amount(
-                    importe_liquido,
-                    field="IMPORTE_LIQUIDO",
-                    allow_zero=True,
-                    allow_negative=False,
-                    required=False,
-                )
-                if res_neto.ok and res_neto.value is not None:
-                    grouped[key]["_importe_liquido"] = res_neto.value
-
         # Fetch deducciones por OP
         deducciones_by_op: dict[tuple[int, int], list[dict]] = {}
         if grouped and self._source_repo is not None:
@@ -321,9 +309,10 @@ class OrdenPagoMapper:
                 else:
                     op["retenciones"] = ret_payload
 
-            importe_liquido = op.pop("_importe_liquido", None)
-            if importe_liquido is not None:
-                op["importe_neto"] = importe_liquido
+            # No enviamos el importe_neto a nivel de OP, sino por comprobante.
+            # importe_liquido = op.pop("_importe_liquido", None)
+            # if importe_liquido is not None:
+            #     op["importe_neto"] = importe_liquido
 
             # ValidaciÃ³n: suma facturas vs total OC
             oc_sks = grouped_oc_source_keys.get(key, [])
