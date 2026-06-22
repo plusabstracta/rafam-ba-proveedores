@@ -168,10 +168,9 @@ def engine_with_data():
 
         # ── 4 OPs ejercicio 2026 (vinculadas a las 4 OCs) ──
         for nro_oc in range(1, 5):
-            estado_op = "N" if nro_oc == 4 else "C"
             conn.execute(text(f"""
                 INSERT INTO ORDEN_PAGO VALUES
-                (2026, {500 + nro_oc}, 100, '{estado_op}', 'S', '2026-04-0{nro_oc}', {10000 * nro_oc}, {200 + nro_oc}, 'Pago OC {nro_oc}')
+                (2026, {500 + nro_oc}, 100, 'C', 'S', '2026-04-0{nro_oc}', {10000 * nro_oc}, {200 + nro_oc}, 'Pago OC {nro_oc}')
             """))
             # ORDEN_PAGO_IMPUT: bridge real OP ↔ CC
             conn.execute(text(f"""

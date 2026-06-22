@@ -71,6 +71,7 @@ def _migrator(monkeypatch, tmp_path, *, dry_run=True, lookups=None):
                 {"id": "102", "codename": "iva", "name": "Retencion IVA"},
                 {"id": "103", "name": "Ingresos Brutos"},
             ],
+            "mercaderias": [{"id": "88", "nombre_compra": "Papel A4"}],
         }
     }
     with patch("src.exporter.fetch_migrator_lookups", return_value=lookup_payload):

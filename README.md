@@ -109,6 +109,7 @@ PAXAPOS_TIMEOUT_SECONDS=20
 PAXAPOS_RAFAM_IMPORT_PATH=rafam/migracion/importar.json
 PAXAPOS_RAFAM_SPEC_PATH=rafam/migracion/spec.json
 PAXAPOS_RAFAM_LOOKUPS_PATH=rafam/migracion/lookups.json
+PAXAPOS_RAFAM_RESOLVER_MERCADERIA_PATH=rafam/migracion/resolver_mercaderia.json
 PAXAPOS_RAFAM_DEFAULT_UNIDAD_ID=1
 PAXAPOS_RAFAM_DEFAULT_TIPO_FACTURA_ID=
 PAXAPOS_RAFAM_DEFAULT_TIPO_PAGO_ID=1
@@ -249,6 +250,7 @@ PAXAPOS_TIMEOUT_SECONDS=30
 PAXAPOS_RAFAM_IMPORT_PATH=rafam/migracion/importar.json
 PAXAPOS_RAFAM_SPEC_PATH=rafam/migracion/spec.json
 PAXAPOS_RAFAM_LOOKUPS_PATH=rafam/migracion/lookups.json
+PAXAPOS_RAFAM_RESOLVER_MERCADERIA_PATH=rafam/migracion/resolver_mercaderia.json
 
 # Confirmar IDs con make migrator-lookups antes de importar.
 PAXAPOS_RAFAM_DEFAULT_UNIDAD_ID=1
@@ -278,7 +280,7 @@ make migrator-lookups
 make status
 ```
 
-Confirmar en `migrator-lookups` los IDs default de unidad, tipo de factura y tipo de pago.
+Confirmar en `migrator-lookups` los IDs default de unidad, tipo de factura, tipo de pago y, si se usará fallback, mercadería.
 
 Luego correr dry-run con volumen acotado:
 

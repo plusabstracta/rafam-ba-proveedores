@@ -99,11 +99,12 @@ graph LR
 |---|---|---|
 | `EJERCICIO` + `UNI_COMPRA` + `NRO_OC` + `ITEM_OC` | `external_ref` | |
 | `EJERCICIO` + `UNI_COMPRA` + `NRO_OC` | (FK) → OC | Vincula al pedido padre. |
-| `DESCRIPCION` | `mercaderia.name` | Si no existe, se crea. |
-| `UNI_MED` | `mercaderia.unidad_de_medida_id` | Vía `_UM` (UNIDAD=1, KILOGRAMO=2, LITRO=3, METRO=4, PAQUETE=5, HORAS=6, DIA=7). Default `1` (Unidad). |
+| `DESCRIPCION` | `mercaderia_id` | El script normaliza la descripción y resuelve la mercadería por link local, lookup limpio o `resolver_mercaderia.json`; el resolver recibe `item.name` con la descripción RAFAM limpia, sin `mercaderia_external_ref`, para que Paxapos cree por nombre y deje la identidad única en `barcode`. Luego envía siempre `mercaderia_id` al importador. |
+| `UNI_MED` | `unidad_de_medida_id` | Vía vínculo local de unidad; si no existe, fallback interno del tenant. |
 | `CANT` | `cantidad` | |
 | `PRECIO_UNIT` | `precio_unitario` | |
-| `CLASE` + `TIPO` + `INCISO` + `PAR_PRIN` + `PAR_PARC` | `mercaderia.codigo_clasificacion` | Si dos ítems comparten la misma clasificación, comparten la misma `mercaderia` en Paxapos. |
+
+El script no envía `mercaderia_external_ref` ni dentro de `ordenes_compra[].items[]` ni al resolver previo: ese campo activa la creación determinística legacy de Paxapos y agrega sufijos `[RAFAM-...]` al nombre visible. Para obtener el `mercaderia_id`, el script llama `resolver_mercaderia.json` con `item.name`/`item.descripcion`/`item.nombre_compra` desde `OC_ITEMS.DESCRIPCION` limpia y persiste el vínculo `name:{descripcion_normalizada}` -> `mercaderia_id` en SQLite. El nombre visible de la mercadería debe quedar igual a `OC_ITEMS.DESCRIPCION` limpia, sin sufijos `[RAFAM-...]` ni `{RAFAM:...}`; la identidad única queda en el `barcode` que devuelve Paxapos (por ejemplo `RAFAM-NAME:{hash}`). Así las corridas siguientes reutilizan el mismo ID de Paxapos y no generan duplicados de mercaderías.
 
 ### 2.4 `SOLIC_GASTOS` + `CTA_COMPROB` → `account_gastos` (entidad `solic_gastos`)
 
@@ -125,13 +126,13 @@ Facturas reales del proveedor (con número fiscal AFIP). **Pasada standalone `so
 
 ### 2.5 `ORDEN_PAGO` → `account_egresos`
 
-> **Filtro de migración:** se migran OPs con `ESTADO_OP IN ('C', 'N')`, `CONFIRMADO = 'S'`, `FECH_CONFIRM` presente, importe positivo y OC/gasto resoluble por la cadena canónica `ORDEN_PAGO_IMPUT -> REG_COMP -> ORDEN_COMPRA`. Las OPs anuladas (`A`), no confirmadas, sin fecha, sin importe válido o sin OC linkeada se omiten.
+> **Filtro de migración:** sólo se migran OPs con `ESTADO_OP = 'C'` (cancelada/pagada) **y** `CONFIRMADO = 'S'`. Las OPs en estado `N` sin confirmar o anuladas (`A`) se omiten.
 
 | RAFAM | Paxapos | Notas |
 |---|---|---|
 | `EJERCICIO` + `NRO_OP` | `external_ref` | |
 | `COD_PROV` | `proveedor_id` | |
-| `FECH_CONFIRM` | `fecha` | Sólo cuando `ESTADO_OP IN ('C', 'N')`, `CONFIRMADO='S'` y la OP tiene OC/gasto canónico. |
+| `FECH_CONFIRM` | `fecha` | Sólo cuando `ESTADO_OP='C'` y `CONFIRMADO='S'`. |
 | `IMPORTE_TOTAL` | `importe_total` | Total bruto de la OP. El payload conserva también `Egreso.total` por compatibilidad con el importador actual. |
 | `IMPORTE_LIQUIDO` | `importe_neto` | Neto líquido informativo según RAFAM. **`neto_transferido` NO se envía:** Paxapos lo calcula como `total − retenciones` en `_replaceRetencionesForEgreso`. |
 | `TIPO_CANCE` (CA/CM/NO) | `tipo_de_pago_id` | Vía `RAFAM_TIPO_CANCE_TO_PAXAPOS_PAGO_NAME` → lookup por `name` en `tipo_de_pagos`. Default `"Transferencia bancaria"`. |
@@ -175,11 +176,9 @@ Hay **dos caminos idempotentes** que emiten la misma sección `retenciones`:
 
 Las 5 entidades son **independientes** (1 comando = 1 checkpoint), pero deben ejecutarse en **orden de dependencia (FK)** porque cada una resuelve enlaces creados por la anterior vía el link store local:
 
-1. `proveedores` (`make migrate-proveedores`): crea/actualiza `account_proveedores` desde `PROVEEDORES`.
-2. `oc_items` (`make migrate-oc`): agrupa `ORDEN_COMPRA` + `OC_ITEMS` y envía `ordenes_compra[]` con `items[]` inline (cabecera + mercaderías en una sola pasada).
-3. `solic_gastos` (`make migrate-facturas`): crea `account_gastos` desde `SOLIC_GASTOS` + `CTA_COMPROB` (vía `REG_COMP`), resolviendo `pedido_id` contra las OCs ya migradas.
-4. `orden_pago` (`make migrate-op`): crea `account_egresos` desde `ORDEN_PAGO`, vincula gastos (HABTM `account_egresos_gastos` vía `ORDEN_PAGO_IMPUT`) y embebe retenciones (`ORDEN_PAGO_DEDUC`).
-5. `retenciones` (`make migrate-retenciones`): reenvía idempotentemente `account_retenciones` desde `ORDEN_PAGO_DEDUC` para las OPs ya migradas.
+1. `proveedores`: crea/actualiza `account_proveedores` desde `PROVEEDORES`.
+2. `oc_items`: agrupa `ORDEN_COMPRA` + `OC_ITEMS` y envía `ordenes_compra[]` con `items[]` inline. Antes de importar, cada item resuelve su mercadería por descripción normalizada y guarda el vínculo local; el payload final apunta a `mercaderia_id` sin `mercaderia_external_ref`.
+3. `orden_pago`: procesa `ORDEN_PAGO` y, en la misma pasada, resuelve `CTA_COMPROB` para crear/vincular gastos y `RETENCIONES` + `DEDUCCIONES` para crear `account_retenciones`.
 
 `make migrate-all` encadena las 5 en este orden. Cada comando tiene su variante `-dry` (o `--dry-run`) que envía `"dry_run": true` para que Paxapos **valide sin persistir** — método de preview profesional para revisar el payload y los conteos antes de escribir. Los checkpoints se reinician con `make reset-<entidad>` (o `make reset-all`).
 

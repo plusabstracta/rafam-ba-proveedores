@@ -451,16 +451,24 @@ class MigratorExporter(BaseExporter):
             return
 
         failed = []
+        fully_failed = []
         for section, section_stats in stats.items():
             if not isinstance(section_stats, dict):
                 continue
             error_count = section_stats.get("error", 0)
+            ok_count = section_stats.get("ok", 0)
             try:
                 error_count = int(error_count)
             except (TypeError, ValueError):
                 error_count = 0
+            try:
+                ok_count = int(ok_count)
+            except (TypeError, ValueError):
+                ok_count = 0
             if error_count > 0:
                 failed.append(f"{section}={error_count}")
+                if ok_count == 0:
+                    fully_failed.append(f"{section}={error_count}")
 
         if failed:
             log_fn = logger.error if strict else logger.warning
@@ -470,6 +478,12 @@ class MigratorExporter(BaseExporter):
                 ", ".join(failed),
             )
             has_errors = True
+
+        if fully_failed:
+            details = ", ".join(fully_failed)
+            raise RuntimeError(
+                f"Migrator devolvio errores para todas las filas de una seccion: {details}"
+            )
 
         if has_errors and strict:
             details = ", ".join(failed) if failed else "ver errors en respuesta"

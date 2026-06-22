@@ -753,7 +753,7 @@ class SourceRepository:
         )
 
         filters = [
-            cols["op_estado"].in_(("C", "N")),
+            cols["op_estado"] == "C",
             cols["op_confirmado"] == "S",
             cols["op_fech_confirm"].is_not(None),
             nonblank(cols["opi_nro"]).is_not(None),

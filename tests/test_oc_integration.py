@@ -39,6 +39,7 @@ def exporter_with_links(dev_engine):
             "unidades_de_medida": [{"id": "1", "name": "Unidad"}],
             "tipos_factura": [{"id": "2", "name": "Factura A", "codename": "factura_a"}],
             "tipos_de_pago": [{"id": "4", "name": "Transferencia"}],
+            "mercaderias": [],
         }
         with patch.dict("os.environ", {
             "PAXAPOS_URL": "https://test.example.com",
@@ -57,6 +58,18 @@ def exporter_with_links(dev_engine):
                 entity="proveedores",
                 source_key=str(cod),
                 remote_id=str(10000 + int(cod)),
+            )
+        # En dry-run no llamamos al resolver remoto; simulamos mercaderías ya linkeadas
+        # por la identidad RAFAM basada en la descripción normalizada.
+        descriptions = conn.execute(text("SELECT DISTINCT DESCRIPCION FROM OC_ITEMS WHERE DESCRIPCION IS NOT NULL")).fetchall()
+        for idx, (description,) in enumerate(descriptions, start=1):
+            normalized = exp._normalize_text(description)
+            if not normalized:
+                continue
+            exp._link_store.save_link(
+                entity="mercaderia",
+                source_key=exp._mercaderia_description_source_key(normalized),
+                remote_id=str(200000 + idx),
             )
     return exp
 
@@ -98,32 +111,15 @@ class TestOcIntegration:
         sent, all_ocs = oc_payloads
         assert len(sent) > 0, "Debería generar al menos un payload"
 
-    def test_total_ocs_enviables_por_estado_o_fallback(self, oc_payloads, dev_engine):
-        """Se envían OCs R y OCs N con comprobante asociado como fallback."""
+    def test_total_ocs_con_estado_r(self, oc_payloads, dev_engine):
+        """Solo OCs con estado R se envían (no A ni N)."""
         _, all_ocs = oc_payloads
         with dev_engine.connect() as conn:
-            allowed_count = conn.execute(
-                text("""
-                    SELECT COUNT(DISTINCT oc.EJERCICIO || '-' || oc.UNI_COMPRA || '-' || oc.NRO_OC)
-                    FROM ORDEN_COMPRA oc
-                    WHERE oc.ESTADO_OC = 'R'
-                       OR (
-                            oc.ESTADO_OC = 'N'
-                        AND EXISTS (
-                            SELECT 1
-                            FROM REG_COMP rc
-                            JOIN CTA_COMPROB cc
-                              ON cc.EJERCICIO = rc.EJERCICIO
-                             AND cc.NRO_REG_COMP = rc.NRO_REG_COMP
-                            WHERE rc.EJERCICIO = oc.EJERCICIO
-                              AND rc.UNI_COMPRA = oc.UNI_COMPRA
-                              AND rc.NRO_OC = oc.NRO_OC
-                        )
-                    )
-                """)
+            r_count = conn.execute(
+                text("SELECT COUNT(DISTINCT EJERCICIO || '-' || UNI_COMPRA || '-' || NRO_OC) FROM ORDEN_COMPRA WHERE ESTADO_OC = 'R'")
             ).scalar()
-        # Las OCs enviadas deberían ser ≤ enviables (puede ser menor si alguna no tiene items válidos)
-        assert len(all_ocs) <= allowed_count
+        # Las OCs enviadas deberían ser ≤ R_count (puede ser menor si alguna no tiene items válidos)
+        assert len(all_ocs) <= r_count
         assert len(all_ocs) > 0
 
     def test_cada_oc_tiene_proveedor_id(self, oc_payloads):
@@ -157,19 +153,17 @@ class TestOcIntegration:
                 assert "descripcion" not in item, f"Item con descripcion en {oc['external_id']}"
                 assert "observacion" not in item, f"Item con observacion en {oc['external_id']}"
 
-    def test_items_envian_name(self, oc_payloads):
-        """Los items envían `name` para que Paxapos nombre la mercadería."""
+    def test_items_envian_mercaderia_id_sin_external_ref(self, oc_payloads):
+        """Los items llegan al importador con mercaderia_id resuelto localmente."""
         _, all_ocs = oc_payloads
-        items_con_name = 0
         total_items = 0
         for oc in all_ocs:
             for item in oc.get("items", []):
                 total_items += 1
-                if "name" in item:
-                    items_con_name += 1
-                    assert len(item["name"]) > 0
-        # Prácticamente todos los items RAFAM tienen DESCRIPCION
-        assert items_con_name > total_items * 0.95
+                assert isinstance(item.get("mercaderia_id"), int)
+                assert "name" not in item
+                assert "mercaderia_external_ref" not in item
+        assert total_items > 0
 
     def test_centro_costo_id_presente(self, oc_payloads, dev_engine):
         """Las OCs con jurisdicción deben tener centro_costo_id."""
@@ -220,5 +214,6 @@ class TestOcIntegration:
             assert p["dry_run"] is True
             assert p["options"]["upsert"] is True
             assert p["options"]["send_oc_mail"] is False
+            assert p["options"]["auto_create_mercaderia"] is True
             assert "ordenes_compra" in p
             assert isinstance(p["ordenes_compra"], list)
