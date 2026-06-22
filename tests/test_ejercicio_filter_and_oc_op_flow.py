@@ -192,44 +192,38 @@ def engine_with_data():
 
 class TestEjercicioMinFilter:
 
-    def test_orden_compra_excluye_2025(self, engine_with_data):
+    def test_oc_items_excluye_2025(self, engine_with_data):
         cfg = EntityConfig(
-            name="orden_compra",
-            table_name="ORDEN_COMPRA",
-            ts_field="FECH_OC",
-            pending_state_field="ESTADO_OC",
-            pending_state_value="N",
-            pending_reprocess_days=30,
+            name="oc_items",
+            table_name="OC_ITEMS",
+            full_load=True,
             ejercicio_min=2026,
         )
-        cp = Checkpoint(entity="orden_compra")
+        cp = Checkpoint(entity="oc_items")
 
         with engine_with_data.connect() as conn:
             repo = SourceRepository(conn)
-            with patch.dict("src.config.ENTITY_CONFIGS", {"orden_compra": cfg}):
-                stmt = repo.build_statement("orden_compra", cp)
+            with patch.dict("src.config.ENTITY_CONFIGS", {"oc_items": cfg}):
+                stmt = repo.build_statement("oc_items", cp)
                 rows = conn.execute(stmt).fetchall()
 
         ejercicios = {r[0] for r in rows}  # EJERCICIO es la primera columna de OC_ITEMS
         assert 2025 not in ejercicios, "OCs de 2025 no deben aparecer con ejercicio_min=2026"
         assert 2026 in ejercicios, "OCs de 2026 deben aparecer"
 
-    def test_orden_compra_sin_filtro_incluye_2025(self, engine_with_data):
+    def test_oc_items_sin_filtro_incluye_2025(self, engine_with_data):
         cfg = EntityConfig(
-            name="orden_compra",
-            table_name="ORDEN_COMPRA",
-            ts_field="FECH_OC",
-            pending_state_field="ESTADO_OC",
-            pending_state_value="N",
-            pending_reprocess_days=30,
+            name="oc_items",
+            table_name="OC_ITEMS",
+            full_load=True,
         )
-        cp = Checkpoint(entity="orden_compra")
+        cp = Checkpoint(entity="oc_items")
 
         with engine_with_data.connect() as conn:
             repo = SourceRepository(conn)
             # Monkey-patch config to remove ejercicio_min
-            with patch.dict("src.config.ENTITY_CONFIGS", {"orden_compra": cfg}):
-                stmt = repo.build_statement("orden_compra", cp)
+            with patch.dict("src.config.ENTITY_CONFIGS", {"oc_items": cfg}):
+                stmt = repo.build_statement("oc_items", cp)
                 rows = conn.execute(stmt).fetchall()
 
         ejercicios = {r[0] for r in rows}
@@ -380,20 +374,17 @@ class TestEjercicioMinFilter:
     def test_4_ocs_2026_procesadas(self, engine_with_data):
         """Con ejercicio_min=2026, exactamente 4 OCs distintas deben retornar."""
         cfg = EntityConfig(
-            name="orden_compra",
-            table_name="ORDEN_COMPRA",
-            ts_field="FECH_OC",
-            pending_state_field="ESTADO_OC",
-            pending_state_value="N",
-            pending_reprocess_days=30,
+            name="oc_items",
+            table_name="OC_ITEMS",
+            full_load=True,
             ejercicio_min=2026,
         )
-        cp = Checkpoint(entity="orden_compra")
+        cp = Checkpoint(entity="oc_items")
 
         with engine_with_data.connect() as conn:
             repo = SourceRepository(conn)
-            with patch.dict("src.config.ENTITY_CONFIGS", {"orden_compra": cfg}):
-                stmt = repo.build_statement("orden_compra", cp)
+            with patch.dict("src.config.ENTITY_CONFIGS", {"oc_items": cfg}):
+                stmt = repo.build_statement("oc_items", cp)
                 rows = conn.execute(stmt).fetchall()
 
         # Agrupar por (EJERCICIO, UNI_COMPRA, NRO_OC) — las 3 primeras columnas de OC_ITEMS
@@ -480,12 +471,12 @@ class TestEjercicioMinFilter:
 class TestOcToOpFlow:
     """Verifica que el flujo OC→OP funciona:
     1. Se procesan 4 OCs de 2026
-    2. Las 4 OPs vinculadas (via ORDEN_PAGO_IMPUT) son encontradas
+    2. Las OPs vinculadas confirmadas (via ORDEN_PAGO_IMPUT) son encontradas
     3. Cada OP tiene OPI_NRO_COMPROB que vincula al gasto de la OC
     """
 
     def test_ops_vinculadas_a_ocs_encontradas(self, engine_with_data):
-        """Las 4 OPs de 2026 vinculadas a las 4 OCs deben retornar con OPI_NRO_COMPROB."""
+        """Las OPs confirmadas de 2026 vinculadas a OCs deben retornar con OPI_NRO_COMPROB."""
         cfg = EntityConfig(
             name="orden_pago",
             table_name="ORDEN_PAGO",
@@ -505,16 +496,18 @@ class TestOcToOpFlow:
                 columns = list(result.keys())
                 rows = result.fetchall()
 
-        # Debe haber 4 OPs (una por cada OC)
+        # Debe haber 3 OPs confirmadas; las OPs N quedan fuera del envio.
         op_keys = {(r[columns.index("EJERCICIO")], r[columns.index("NRO_OP")]) for r in rows}
-        assert len(op_keys) == 4, f"Deben ser 4 OPs, encontradas: {op_keys}"
+        assert len(op_keys) == 3, f"Deben ser 3 OPs confirmadas, encontradas: {op_keys}"
+        estados = {r[columns.index("ESTADO_OP")] for r in rows}
+        assert estados == {"C"}
 
         # Cada OP debe tener OPI_NRO_COMPROB (bridge ORDEN_PAGO_IMPUT)
         assert "OPI_NRO_COMPROB" in columns, "La columna OPI_NRO_COMPROB debe estar presente"
         cc_nro_idx = columns.index("OPI_NRO_COMPROB")
         cc_nros = {r[cc_nro_idx] for r in rows}
         assert None not in cc_nros, "Todas las OPs deben tener OPI_NRO_COMPROB"
-        assert len(cc_nros) == 4, f"Deben ser 4 OPI_NRO_COMPROB distintos, encontrados: {cc_nros}"
+        assert len(cc_nros) == 3, f"Deben ser 3 OPI_NRO_COMPROB distintos, encontrados: {cc_nros}"
 
     def test_op_tiene_datos_del_gasto_vinculado(self, engine_with_data):
         """Cada OP debe traer SG_DELEG_SOLIC y SG_NRO_SOLIC del LEFT JOIN."""
@@ -620,12 +613,9 @@ class TestOcToOpFlow:
     def test_cc_nro_coincide_entre_oc_y_op(self, engine_with_data):
         """El CC_NRO que trae la OC debe ser el mismo que trae la OP vinculada."""
         oc_cfg = EntityConfig(
-            name="orden_compra",
-            table_name="ORDEN_COMPRA",
-            ts_field="FECH_OC",
-            pending_state_field="ESTADO_OC",
-            pending_state_value="N",
-            pending_reprocess_days=30,
+            name="oc_items",
+            table_name="OC_ITEMS",
+            full_load=True,
             ejercicio_min=2026,
         )
         op_cfg = EntityConfig(
@@ -642,8 +632,8 @@ class TestOcToOpFlow:
             repo = SourceRepository(conn)
 
             # Obtener CC_NROs de las OCs
-            with patch.dict("src.config.ENTITY_CONFIGS", {"orden_compra": oc_cfg}):
-                oc_stmt = repo.build_statement("orden_compra", Checkpoint(entity="orden_compra"))
+            with patch.dict("src.config.ENTITY_CONFIGS", {"oc_items": oc_cfg}):
+                oc_stmt = repo.build_statement("oc_items", Checkpoint(entity="oc_items"))
                 oc_result = conn.execute(oc_stmt)
                 oc_cols = list(oc_result.keys())
                 oc_rows = oc_result.fetchall()
@@ -692,12 +682,12 @@ class TestOcToOpFlow:
         with engine_with_data.connect() as conn:
             repo = SourceRepository(conn)
 
-            # Primera corrida: checkpoint fresco → trae todas las OPs 2026
+            # Primera corrida: checkpoint fresco → trae todas las OPs confirmadas 2026
             cp_fresh = Checkpoint(entity="orden_pago")
             with patch.dict("src.config.ENTITY_CONFIGS", {"orden_pago": op_cfg}):
                 stmt1 = repo.build_statement("orden_pago", cp_fresh)
                 rows1 = conn.execute(stmt1).fetchall()
-            assert len(rows1) == 4, "Primera corrida debe traer 4 OPs"
+            assert len(rows1) == 3, "Primera corrida debe traer 3 OPs confirmadas"
 
             # Simular checkpoint avanzado (última FECH_CONFIRM procesada)
             cp_advanced = Checkpoint(

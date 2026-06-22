@@ -1,8 +1,7 @@
 """
 Tests de mapeo para MigratorExporter — sin llamadas HTTP reales.
 
-Validan que _map_solic_gasto, _map_ped_item, _map_oc_item y
-_write_batch_orden_pago construyen los payloads correctos.
+Validan que _map_oc_item y _write_batch_orden_pago construyen los payloads correctos.
 """
 import json
 from unittest.mock import patch
@@ -263,6 +262,7 @@ class TestWriteBatchOrdenPago:
             row(1004, 1, 100, estado="A"),  # anulada -> omitida por estado
             row(1005, 1, 100, estado="C", confirmado="N"),  # no confirmada -> omitida
             row(1006, 1, 100, estado="C", fech_confirm=""),  # sin FECH_CONFIRM -> omitida
+            row(1007, 1, 100, estado="N", cc_nro="0001-00000107"),  # normal confirmada -> omitida por estado
         ]
 
         sent_payloads = []
@@ -276,7 +276,6 @@ class TestWriteBatchOrdenPago:
 
         assert len(sent_payloads) == 1
         ops = sent_payloads[0]["ordenes_pago"]
-        # 1001 y 1002 tienen gasto; 1003 no tiene (SG_DELEG_SOLIC=None)
         assert len(ops) == 2
         ids = {op["external_id"]["nro_op"] for op in ops}
         assert ids == {1001, 1002}
@@ -464,7 +463,7 @@ class TestWriteBatchOrdenPago:
         assert op["pedido_id"] == 789
         assert op["importe_total"] == 12100.00
         assert op["importe_neto"] == 315814.05
-        assert op["Egreso"]["neto_transferido"] == 315814.05
+        assert "neto_transferido" not in op["Egreso"]
         # Gasto enviado con todos los datos fiscales reales
         assert len(payload["gastos"]) == 1
         gasto = payload["gastos"][0]["Gasto"]
@@ -747,7 +746,7 @@ def _oc_row(
 
 
 class TestWriteBatchOcItems:
-    """Tests para _write_batch_oc_items / _write_batch_orden_compra."""
+    """Tests para _write_batch_oc_items."""
 
     def _make_exporter_with_prov(self, cod_prov="99", remote_prov_id="777", *, dry_run=True, mercaderias=None):
         """Crea MigratorExporter con un proveedor pre-linkeado."""
@@ -820,7 +819,7 @@ class TestWriteBatchOcItems:
             _oc_row(item_oc="3", cod_prov="999"),
         ]
         import logging
-        with patch.object(logging.getLogger("src.exporter"), "warning") as mock_warn:
+        with patch.object(logging.getLogger("src.mappers.oc_items"), "warning") as mock_warn:
             exp.write_batch("oc_items", OC_COLUMNS, rows)
         # Solo 1 warning para la OC, no 3
         oc_skip_calls = [
@@ -1053,7 +1052,7 @@ class TestWriteBatchOcItems:
         assert item["cantidad"] == 10.0
         assert item["precio_unitario"] == 50.5
         assert item["recibida_cantidad"] == 3.0
-        assert item["mercaderia_id"] == 88
+        assert "name" in item
         assert "mercaderia_external_ref" not in item
         assert item["unidad_de_medida_id"] == 5  # fallback Unidad (id 5, link_store vacio)
 

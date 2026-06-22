@@ -81,99 +81,51 @@ class SourceRepository:
 
     def build_statement(self, entity: str, checkpoint: Checkpoint) -> Select:
         cfg = ENTITY_CONFIGS[entity]
-        if entity == "orden_compra":
-            return self._build_orden_compra_statement(cfg, checkpoint)
-        if entity == "ped_items":
-            return self._build_ped_items_statement(cfg, checkpoint)
         if entity == "oc_items":
             return self._build_oc_items_statement(cfg, checkpoint)
         if entity == "solic_gastos":
             return self._build_solic_gastos_statement(cfg, checkpoint)
         if entity == "orden_pago":
             return self._build_orden_pago_statement(cfg, checkpoint)
+        if entity == "retenciones":
+            # Retenciones escanea las mismas OP que orden_pago; el exporter
+            # trae las deducciones por OP via fetch_deducciones_for_ops.
+            return self._build_orden_pago_statement(cfg, checkpoint)
         return self._build_simple_table_statement(cfg, checkpoint)
 
     def execute(self, stmt: Select):
         return self._conn.execution_options(stream_results=True).execute(stmt)
 
-    def fetch_retenciones_for_ops(
+    def count_rows(
         self,
-        op_keys: list[tuple[int, int]] | set[tuple[int, int]],
-    ) -> dict[tuple[int, int], list[dict]]:
-        """Trae retenciones para un set de OPs identificadas por (EJERCICIO, NRO_CANCE).
+        table_name: str,
+        *,
+        distinct_fields: list[str] | None = None,
+        ejercicio_min: int | None = None,
+    ) -> int:
+        """Cuenta filas (o combinaciones distintas) de una tabla RAFAM.
 
-        Devuelve dict {(ejercicio, nro_cance): [{cod_ret, importe, descripcion}, ...]}.
-        Se hace en query separada para evitar producto cartesiano OP×RET×OPI
-        en _build_orden_pago_statement.
+        Usado por la reconciliacion (F4) para comparar el universo de origen
+        contra lo migrado localmente. Aplica el filtro de ejercicio cuando la
+        tabla tiene la columna EJERCICIO.
         """
-        if not op_keys:
-            return {}
+        table = self._reflect_table(table_name)
+        has_ejercicio = "EJERCICIO" in table.c
 
-        retenciones = self._reflect_optional_table("RETENCIONES")
-        if retenciones is None:
-            return {}
-        deducciones = self._reflect_optional_table("DEDUCCIONES")
+        if distinct_fields:
+            cols = [table.c[f] for f in distinct_fields if f in table.c]
+            if not cols:
+                return 0
+            inner = select(*cols).distinct()
+            if ejercicio_min and has_ejercicio:
+                inner = inner.where(table.c.EJERCICIO >= ejercicio_min)
+            stmt = select(func.count()).select_from(inner.subquery())
+        else:
+            stmt = select(func.count()).select_from(table)
+            if ejercicio_min and has_ejercicio:
+                stmt = stmt.where(table.c.EJERCICIO >= ejercicio_min)
 
-        ret_ej = self._safe_column(retenciones, "EJERCICIO")
-        ret_nc = self._safe_column(retenciones, "NRO_CANCE")
-        ret_cod = self._safe_column(retenciones, "COD_RET")
-        ret_imp = self._safe_column(retenciones, "IMPORTE")
-        if ret_ej is None or ret_nc is None or ret_cod is None or ret_imp is None:
-            return {}
-
-        select_cols = [
-            ret_ej.label("EJERCICIO"),
-            ret_nc.label("NRO_CANCE"),
-            ret_cod.label("COD_RET"),
-            ret_imp.label("IMPORTE"),
-        ]
-        from_clause = retenciones
-
-        if deducciones is not None:
-            ded_codigo = self._safe_column(deducciones, "CODIGO")
-            ded_desc = self._safe_column(deducciones, "DESCRIPCION")
-            if ded_codigo is not None:
-                join_conditions = [ret_cod == ded_codigo]
-                ded_ejercicio = self._safe_column(deducciones, "EJERCICIO")
-                if ded_ejercicio is not None:
-                    join_conditions.append(ret_ej == ded_ejercicio)
-                from_clause = from_clause.outerjoin(deducciones, and_(*join_conditions))
-                if ded_desc is not None:
-                    select_cols.append(ded_desc.label("DESCRIPCION"))
-
-        # Filtrar por (EJERCICIO, NRO_CANCE) IN (...) — usamos OR de tuplas para
-        # compatibilidad SQLite/Oracle.
-        # Agrupamos por ejercicio para minimizar predicados.
-        keys_by_ej: dict[int, set[int]] = {}
-        for ej, nc in op_keys:
-            if ej is None or nc is None:
-                continue
-            keys_by_ej.setdefault(int(ej), set()).add(int(nc))
-
-        if not keys_by_ej:
-            return {}
-
-        ej_filters = []
-        for ej, ncs in keys_by_ej.items():
-            ej_filters.append(and_(ret_ej == ej, ret_nc.in_(list(ncs))))
-
-        stmt = select(*select_cols).select_from(from_clause).where(or_(*ej_filters))
-
-        out: dict[tuple[int, int], list[dict]] = {}
-        for row in self._conn.execute(stmt):
-            mapping = row._mapping
-            try:
-                ej = int(mapping["EJERCICIO"])
-                nc = int(mapping["NRO_CANCE"])
-            except (TypeError, ValueError, KeyError):
-                continue
-            entry = {
-                "cod_ret": mapping.get("COD_RET"),
-                "importe": mapping.get("IMPORTE"),
-                "descripcion": mapping.get("DESCRIPCION") if "DESCRIPCION" in mapping.keys() else None,
-            }
-            out.setdefault((ej, nc), []).append(entry)
-        return out
+        return int(self._conn.execute(stmt).scalar() or 0)
 
     def fetch_deducciones_for_ops(
         self,
@@ -317,125 +269,6 @@ class SourceRepository:
         table = self._reflect_table(cfg.table_name)
         stmt = select(table)
         return self._apply_incremental_filters(stmt, table, cfg, checkpoint)
-
-    def _build_orden_compra_statement(
-        self,
-        cfg: EntityConfig,
-        checkpoint: Checkpoint,
-    ) -> Select:
-        oc = self._reflect_table("ORDEN_COMPRA")
-        oc_items = self._reflect_table("OC_ITEMS")
-        solic_gastos = self._reflect_table("SOLIC_GASTOS")
-        reg_comp = self._reflect_optional_table("REG_COMP")
-        cta_comprob = self._reflect_optional_table("CTA_COMPROB")
-
-        # ORDEN_COMPRA → OC_ITEMS (items) → SOLIC_GASTOS (jurisdicción).
-        # El cursor incremental aplica sobre ORDEN_COMPRA (FECH_OC / ESTADO_OC),
-        # así solo se traen OCs recién modificadas CON sus items.
-        select_cols = [
-            oc_items,
-            oc.c.COD_PROV,
-            oc.c.FECH_OC.label("OC_FECH_OC"),
-            oc.c.OBSERVACIONES.label("OC_OBSERVACIONES"),
-            oc.c.ESTADO_OC.label("OC_ESTADO_OC"),
-            oc.c.FECH_CONFIRM.label("OC_FECH_CONFIRM"),
-            oc.c.IMPORTE_TOT.label("OC_IMPORTE_TOT"),
-            solic_gastos.c.JURISDICCION.label("SG_JURISDICCION"),
-        ]
-
-        from_clause = (
-            oc.join(
-                oc_items,
-                and_(
-                    oc.c.EJERCICIO == oc_items.c.EJERCICIO,
-                    oc.c.UNI_COMPRA == oc_items.c.UNI_COMPRA,
-                    oc.c.NRO_OC == oc_items.c.NRO_OC,
-                ),
-            ).outerjoin(
-                solic_gastos,
-                and_(
-                    oc_items.c.EJERCICIO == solic_gastos.c.EJERCICIO,
-                    oc_items.c.DELEG_SOLIC == solic_gastos.c.DELEG_SOLIC,
-                    oc_items.c.NRO_SOLIC == solic_gastos.c.NRO_SOLIC,
-                ),
-            )
-        )
-
-        # LEFT JOIN subquery OC → SG → REG_COMP → CTA_COMPROB para obtener
-        # nro de comprobante asociado a cada OC (sin pasar por la VIEW
-        # (sin pasar por la VIEW CTA_HOJA_DE_RUTA: usamos las tablas reales)
-        oc_cc = self._build_oc_to_cc_subquery(reg_comp, cta_comprob)
-        if oc_cc is not None:
-            from_clause = from_clause.outerjoin(
-                oc_cc,
-                and_(
-                    oc.c.EJERCICIO == oc_cc.c.OC_EJERCICIO,
-                    oc.c.UNI_COMPRA == oc_cc.c.OC_UNI_COMPRA,
-                    oc.c.NRO_OC == oc_cc.c.OC_NRO,
-                ),
-            )
-            select_cols.extend([
-                oc_cc.c.OC_CC_NRO,
-                oc_cc.c.OC_CC_TIPO_COMPROB,
-                oc_cc.c.OC_CC_COD_PROV,
-            ])
-
-        stmt = select(*select_cols).select_from(from_clause)
-        extra_filters = []
-        if not (cfg.full_load or checkpoint.is_fresh):
-            fech_anul_col = self._safe_column(oc, "FECH_ANUL")
-            estado_col = self._safe_column(oc, "ESTADO_OC")
-            if fech_anul_col is not None and estado_col is not None:
-                window_start = datetime.now(timezone.utc) - timedelta(days=cfg.pending_reprocess_days or 30)
-                extra_filters.append(and_(estado_col == "A", fech_anul_col > window_start))
-
-        stmt = self._apply_oc_dependency_filter(
-            stmt,
-            cfg,
-            {
-                "ejercicio": oc.c.EJERCICIO,
-                "uni_compra": oc.c.UNI_COMPRA,
-                "nro_oc": oc.c.NRO_OC,
-            },
-        )
-        stmt = self._apply_incremental_filters(
-            stmt,
-            oc,
-            cfg,
-            checkpoint,
-            extra_filters=extra_filters,
-            apply_ejercicio_min=False,
-        )
-        return stmt.order_by(oc.c.EJERCICIO, oc.c.UNI_COMPRA, oc.c.NRO_OC, oc_items.c.ITEM_OC)
-
-    def _build_ped_items_statement(
-        self,
-        cfg: EntityConfig,
-        checkpoint: Checkpoint,
-    ) -> Select:
-        ped_items = self._reflect_table("PED_ITEMS")
-        pedidos = self._reflect_table("PEDIDOS")
-
-        stmt = (
-            select(
-                ped_items,
-                pedidos.c.FECH_EMI.label("PED_FECH_EMI"),
-                pedidos.c.OBSERVACIONES.label("PED_OBSERVACIONES"),
-                pedidos.c.CODIGO_DEP.label("PED_CODIGO_DEP"),
-                pedidos.c.COSTO_TOT.label("PED_COSTO_TOT"),
-            )
-            .select_from(
-                ped_items.outerjoin(
-                    pedidos,
-                    and_(
-                        ped_items.c.EJERCICIO == pedidos.c.EJERCICIO,
-                        ped_items.c.NUM_PED == pedidos.c.NUM_PED,
-                    ),
-                )
-            )
-        )
-        stmt = self._apply_incremental_filters(stmt, ped_items, cfg, checkpoint)
-        return stmt.order_by(ped_items.c.EJERCICIO, ped_items.c.NUM_PED, ped_items.c.ORDEN)
 
     def _build_oc_items_statement(
         self,
@@ -981,8 +814,8 @@ class SourceRepository:
         checkpoint: Checkpoint,
     ) -> Select:
         orden_pago = self._reflect_table("ORDEN_PAGO")
-        # NOTE: RETENCIONES y DEDUCCIONES NO se joinean acá — se traen aparte
-        # via fetch_retenciones_for_ops() para evitar producto cartesiano.
+        # NOTE: las deducciones/retenciones NO se joinean acá — se traen aparte
+        # via fetch_deducciones_for_ops() para evitar producto cartesiano.
         cta_comprob = self._reflect_optional_table("CTA_COMPROB")
         # ORDEN_PAGO_IMPUT: bridge fisico OP ↔ CTA_COMPROB (PK incluye
         # NRO_REG_COMP+TIPO_COMPROB+NRO_COMPROB+COD_PROV). Path PRIMARIO.

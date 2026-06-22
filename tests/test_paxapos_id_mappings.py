@@ -157,7 +157,11 @@ class TestResolveTipoPagoIdMappings:
 
 
 class TestResolveUnidadMedidaDefault:
-    """_resolve_unidad_medida_id retorna 5 (Unidad) cuando link_store esta vacio."""
+    """_resolve_unidad_medida_id siempre retorna 5 (Unidad).
+
+    RAFAM no expone un catalogo de unidades mapeable 1:1 con Paxapos, asi que
+    todas las lineas migran con la unidad generica por defecto.
+    """
 
     def test_link_store_vacio_devuelve_id_5(self, exporter):
         assert exporter._resolve_unidad_medida_id({"UNI_MED": "UNIDAD"}) == 5
@@ -165,9 +169,8 @@ class TestResolveUnidadMedidaDefault:
     def test_uni_med_none_devuelve_id_5(self, exporter):
         assert exporter._resolve_unidad_medida_id({}) == 5
 
-    def test_uni_med_resuelta_via_link_store(self, exporter):
-        exporter._link_store.save_link("unidad_medida", "KILOGRAMO", "3")
-        assert exporter._resolve_unidad_medida_id({"UNI_MED": "KILOGRAMO"}) == 3
+    def test_uni_med_arbitraria_devuelve_id_5(self, exporter):
+        assert exporter._resolve_unidad_medida_id({"UNI_MED": "KILOGRAMO"}) == 5
 
 
 # ─── pedido_id obligatorio en payload de OP ──────────────────────────────────

@@ -33,8 +33,9 @@ except ValueError:
     _EJERCICIO_MIN = None
 _EJERCICIO_MIN = _EJERCICIO_MIN or None
 _EJERCICIO_MIN_ENTITIES = {
-    "orden_compra",
     "oc_items",
+    "orden_pago",
+    "retenciones",
 }
 
 
@@ -46,28 +47,6 @@ ENTITY_CONFIGS: dict[str, EntityConfig] = {
         name="proveedores",
         table_name="PROVEEDORES",
         ts_field="FECHA_ULT_COMP",
-    ),
-    "pedidos": EntityConfig(
-        name="pedidos",
-        table_name="PEDIDOS",
-        ts_field="FECH_EMI",
-        ejercicio_min=_ejercicio_min_for("pedidos"),
-    ),
-    "ped_items": EntityConfig(
-        name="ped_items",
-        table_name="PED_ITEMS",
-        full_load=True,  # no reliable cursor column yet — confirm with explore_schema.py
-        ejercicio_min=_ejercicio_min_for("ped_items"),
-    ),
-    "orden_compra": EntityConfig(
-        name="orden_compra",
-        table_name="ORDEN_COMPRA",
-        ts_field="FECH_OC",
-        # Re-process OCs with estado N from recent days to detect N→A transitions.
-        pending_state_field="ESTADO_OC",
-        pending_state_value="N",
-        pending_reprocess_days=30,
-        ejercicio_min=_ejercicio_min_for("orden_compra"),
     ),
     "oc_items": EntityConfig(
         name="oc_items",
@@ -96,5 +75,19 @@ ENTITY_CONFIGS: dict[str, EntityConfig] = {
         pending_state_value="C",
         pending_reprocess_days=30,
         ejercicio_min=_ejercicio_min_for("orden_pago"),
+    ),
+    # Retenciones como pasada independiente (F3). Escanea ORDEN_PAGO (misma
+    # tabla/cursor que orden_pago) y por cada OP confirmada trae sus deducciones
+    # desde ORDEN_PAGO_DEDUC (clave 1:1 (EJERCICIO, NRO_OP)). NO usa la tabla
+    # RETENCIONES, cuya clave (EJERCICIO, NRO_CANCE) es N:1 con la OP y
+    # asignaria las retenciones a la orden de pago equivocada.
+    "retenciones": EntityConfig(
+        name="retenciones",
+        table_name="ORDEN_PAGO",
+        ts_field="FECH_CONFIRM",
+        pending_state_field="ESTADO_OP",
+        pending_state_value="C",
+        pending_reprocess_days=30,
+        ejercicio_min=_ejercicio_min_for("retenciones"),
     ),
 }

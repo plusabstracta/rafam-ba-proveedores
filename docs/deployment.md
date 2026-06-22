@@ -56,7 +56,7 @@ RAFAM_SOURCE_PASSWORD=<password>
 Ese perfil puede ejecutar:
 
 ```bash
-make export-rafam-csv
+.venv/bin/python scripts/export_last_3_months.py
 ```
 
 Para el perfil que importa o sincroniza hacia Paxapos, completar además:
@@ -66,11 +66,7 @@ LOCAL_STATE_DB_PATH=state/checkpoint.db
 
 PAXAPOS_URL=https://proveedores.madariaga.gob.ar
 PAXAPOS_TENANT=madariaga
-PAXAPOS_JWT=<jwt de Paxapos, solo si se usa modo gateway directo>
 PAXAPOS_API_KEY=<api key del migrator RAFAM>
-PAXAPOS_PROVEEDORES_ENDPOINT=account/proveedores.json
-PAXAPOS_PROVEEDORES_UPDATE_ENDPOINT=account/proveedores/edit/{id}.json
-PAXAPOS_PROVEEDORES_LOOKUP_INDEX_ENDPOINT=account/proveedores/index.json
 PAXAPOS_RAFAM_IMPORT_PATH=rafam/migracion/importar.json
 PAXAPOS_RAFAM_SPEC_PATH=rafam/migracion/spec.json
 PAXAPOS_RAFAM_LOOKUPS_PATH=rafam/migracion/lookups.json
@@ -95,11 +91,12 @@ GRANT CREATE SESSION TO rafam_ro;
 GRANT SELECT ON OWNER_RAFAM.PROVEEDORES       TO rafam_ro;
 GRANT SELECT ON OWNER_RAFAM.ORDEN_COMPRA      TO rafam_ro;
 GRANT SELECT ON OWNER_RAFAM.OC_ITEMS          TO rafam_ro;
+GRANT SELECT ON OWNER_RAFAM.SOLIC_GASTOS      TO rafam_ro;
 GRANT SELECT ON OWNER_RAFAM.CTA_COMPROB       TO rafam_ro;
 GRANT SELECT ON OWNER_RAFAM.REG_COMP          TO rafam_ro;
-GRANT SELECT ON OWNER_RAFAM.CTA_HOJA_DE_RUTA  TO rafam_ro;
 GRANT SELECT ON OWNER_RAFAM.ORDEN_PAGO        TO rafam_ro;
-GRANT SELECT ON OWNER_RAFAM.RETENCIONES       TO rafam_ro;
+GRANT SELECT ON OWNER_RAFAM.ORDEN_PAGO_IMPUT  TO rafam_ro;
+GRANT SELECT ON OWNER_RAFAM.ORDEN_PAGO_DEDUC  TO rafam_ro;
 GRANT SELECT ON OWNER_RAFAM.DEDUCCIONES       TO rafam_ro;
 ```
 
@@ -127,11 +124,8 @@ Muestra para cada entidad: estado, último ID/timestamp procesado, cuándo fue e
 # Limitar filas (útil para testear)
 .venv/bin/python main.py run --limit=100
 
-# Solo validar checkpoints sin escribir archivos
-.venv/bin/python main.py run --export=noop
-
-# Enviar proveedores al gateway JSON de Paxapos
-.venv/bin/python main.py run --entity=proveedores --export=gateway
+# Preview sin persistir en Paxapos (no avanza checkpoints; envia dry_run=true)
+.venv/bin/python main.py run --entity=proveedores --dry-run
 ```
 
 ### Forzar full reload de una entidad
@@ -156,11 +150,10 @@ La primera vez no existen checkpoints → el script hace full scan de todas las 
 Dependiendo del volumen puede tardar. Se recomienda:
 
 ```bash
-# Correr entidad por entidad para monitorear
+# Correr entidad por entidad para monitorear (orden de dependencia FK)
 .venv/bin/python main.py run --entity=proveedores
-.venv/bin/python main.py run --entity=orden_compra
 .venv/bin/python main.py run --entity=oc_items
-.venv/bin/python main.py run --entity=cta_comprob
+.venv/bin/python main.py run --entity=solic_gastos
 .venv/bin/python main.py run --entity=orden_pago
 .venv/bin/python main.py run --entity=retenciones
 ```
@@ -194,7 +187,7 @@ pytest tests/ -v
 | Ruta | Descripción |
 |------|-------------|
 | `state/checkpoint.db` | SQLite local de estado: checkpoints y vínculos RAFAM -> Paxapos. **No commitear.** |
-| `output/<entidad>_<timestamp>.csv` | CSVs exportados por cada run. **No commitear.** |
+| `output/rafam_ultimos_3_meses/*.csv` | Snapshots de RAFAM exportados por `scripts/export_last_3_months.py` (fuente para dev offline). **No commitear.** |
 
 ---
 
@@ -204,6 +197,6 @@ pytest tests/ -v
 |-------|---------------|----------|
 | `ORA-12170: TCP connect timeout` | Sin acceso de red al servidor Oracle | Conectarse a VPN / red interna |
 | `ORA-01017: invalid username/password` | Credenciales incorrectas en `.env` | Verificar `RAFAM_SOURCE_USER` y `RAFAM_SOURCE_PASSWORD` |
-| `ORA-00904: invalid identifier` | Nombre de columna incorrecto en `sync_engine.py` | Correr `explore_schema.py` y actualizar el `ts_field` correspondiente |
+| `ORA-00904: invalid identifier` | Nombre de columna incorrecto en `src/config.py` | Correr `explore_schema.py` y actualizar el `ts_field` correspondiente |
 | `DPI-1047: Cannot locate a 64-bit Oracle Client` | Instant Client no instalado o path incorrecto | Verificar que `oci.dll` exista en `C:\oracle\instantclient` |
 | Checkpoint no avanza | Error registrado en la última ejecución | Correr `python main.py status` para ver el error, corregir y volver a correr |

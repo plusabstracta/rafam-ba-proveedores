@@ -152,7 +152,7 @@ class TestSourceRepository:
         """Entidades full_load devuelven todos los registros sin importar el checkpoint."""
         db = create_engine("sqlite+pysqlite:///:memory:", future=True)
         metadata = MetaData()
-        # solic_gastos NO es full_load pero tiene ts_field; ped_items sí es full_load
+        # solic_gastos NO es full_load pero tiene ts_field; oc_items sí es full_load
         # Usamos solic_gastos con full_load=True para aislar el comportamiento
         from src.models import EntityConfig as EC
         from unittest.mock import patch

@@ -36,19 +36,22 @@ Principios operativos:
 ## Entidades y orden real de migracion
 
 El contrato funcional migra estas tablas RAFAM: `PROVEEDORES`, `ORDEN_COMPRA`, `OC_ITEMS`,
-`CTA_COMPROB`, `ORDEN_PAGO` y `RETENCIONES`.
+`SOLIC_GASTOS`, `CTA_COMPROB`, `ORDEN_PAGO` y `ORDEN_PAGO_DEDUC`.
 
-En el CLI actual, el modo migrator productivo se ejecuta en 3 pasos oficiales:
+El migrator se ejecuta en 5 entidades independientes (1 comando = 1 checkpoint), en orden de
+dependencia (FK):
 
-| Paso | Comando/entidad CLI | Payload Paxapos | Notas |
-| --- | --- | --- | --- |
-| 1 | `proveedores` | `proveedores[]` | Crea/actualiza proveedores. |
-| 2 | `oc_items` | `ordenes_compra[]` | Arma cabecera de OC + items embebidos. |
-| 3 | `orden_pago` | `ordenes_pago[]` + `gastos[]` + retenciones | Vincula o auto-crea gastos desde datos de `CTA_COMPROB` solo cuando la OP resuelve una OC migrada. |
+| Paso | Entidad CLI | Comando | Payload Paxapos | Notas |
+| --- | --- | --- | --- | --- |
+| 1 | `proveedores` | `make migrate-proveedores` | `proveedores[]` | Crea/actualiza proveedores. |
+| 2 | `oc_items` | `make migrate-oc` | `ordenes_compra[]` | Arma cabecera de OC + items embebidos. |
+| 3 | `solic_gastos` | `make migrate-facturas` | `gastos[]` | Crea gastos desde `SOLIC_GASTOS` + `CTA_COMPROB` (via `REG_COMP`), resolviendo `pedido_id` contra OCs migradas. |
+| 4 | `orden_pago` | `make migrate-op` | `ordenes_pago[]` + `gastos[]` + retenciones | Crea egresos, vincula gastos y embebe retenciones (`ORDEN_PAGO_DEDUC`). |
+| 5 | `retenciones` | `make migrate-retenciones` | `retenciones[]` | Reenvia retenciones (`ORDEN_PAGO_DEDUC`, 1:1 por `NRO_OP`) de OPs ya migradas. |
 
-No ejecutar `orden_compra` en migrator para produccion: esa entidad queda reemplazada por
-`oc_items`, que manda la OC completa con items. `solic_gastos` tambien esta deshabilitada en
-migrator productivo: los gastos se resuelven desde el flujo de OP o se crean en Paxapos.
+La entidad `orden_compra` fue eliminada: queda reemplazada por `oc_items`, que manda la OC
+completa con items. Las retenciones provienen de `ORDEN_PAGO_DEDUC` (no de la tabla `RETENCIONES`).
+Ver [docs/rafam_paxapos_equivalencias.md](docs/rafam_paxapos_equivalencias.md).
 
 ## Requisitos
 
@@ -114,8 +117,9 @@ RAFAM_SYNC_BATCH_DELAY_SECONDS=0
 RAFAM_EJERCICIO_MIN=2026
 ```
 
-Si solo vas a generar CSV o probar lectura local con `--export csv`, no hace falta completar
-`PAXAPOS_*`.
+Si solo vas a cargar snapshots o ver el estado con `make status`, no hace falta completar
+`PAXAPOS_*`. El migrator (incluso en `--dry-run`) valida contra Paxapos, asi que requiere
+`PAXAPOS_URL`, `PAXAPOS_TENANT` y `PAXAPOS_API_KEY`.
 
 ### 2. Cargar CSVs a SQLite
 
@@ -128,20 +132,11 @@ make load-dev CSV_DIR=output/rafam_ultimos_3_meses DEV_DB=state/dev_rafam.db
 El loader toma el CSV mas reciente de cada entidad, normaliza columnas de joins y crea una vista
 `CTA_HOJA_DE_RUTA` derivada cuando hace falta.
 
-### 3. Ejecutar pruebas locales sin Paxapos
+### 3. Inspeccionar estado y resetear
 
-Exportar a CSV:
-
-```bash
-make run-proveedores EXPORT=csv LIMIT=100
-make run-oc_items EXPORT=csv LIMIT=100
-make run-orden_pago EXPORT=csv LIMIT=100
-```
-
-Validar queries y checkpoints sin escribir archivos:
+Ver checkpoints y pendientes (no toca Oracle ni Paxapos):
 
 ```bash
-.venv/bin/python main.py run --entity proveedores --export noop --limit 100
 .venv/bin/python main.py status
 ```
 
@@ -150,6 +145,9 @@ Resetear estado local:
 ```bash
 make reset-all
 ```
+
+Para validar queries y el payload completo sin escribir en Paxapos, usar el dry-run del migrator
+(ver paso 4): envia `dry_run=true` y Paxapos valida sin persistir.
 
 ### 4. Probar migrator en desarrollo
 
@@ -171,7 +169,9 @@ Dry-run por paso:
 ```bash
 make migrate-proveedores-dry LIMIT=20 BATCH=20
 make migrate-oc-dry          LIMIT=20 BATCH=20
+make migrate-facturas-dry    LIMIT=20 BATCH=20
 make migrate-op-dry          LIMIT=20 BATCH=20
+make migrate-retenciones-dry LIMIT=20 BATCH=20
 ```
 
 Recordatorio: `--dry-run` envia `dry_run=true` al migrator y no avanza checkpoints.
@@ -216,7 +216,7 @@ Exportar otro rango o tablas puntuales:
 
 ```bash
 .venv/bin/python scripts/export_last_3_months.py --months 6
-.venv/bin/python scripts/export_last_3_months.py --months 6 --tables PROVEEDORES,ORDEN_PAGO,RETENCIONES
+.venv/bin/python scripts/export_last_3_months.py --months 6 --tables PROVEEDORES,ORDEN_PAGO,ORDEN_PAGO_DEDUC
 ```
 
 Los CSV quedan en `output/rafam_ultimos_3_meses/` por defecto.
@@ -268,8 +268,7 @@ Notas importantes:
 - El tenant tambien viaja en header `X-Tenant-Id`.
 - Para scripts productivos se recomienda `PAXAPOS_API_KEY`.
 - `PAXAPOS_VERIFY_SSL=false` solo debe usarse en desarrollo.
-- Las mercaderías de items OC/PED se resuelven antes de importar usando `PAXAPOS_RAFAM_RESOLVER_MERCADERIA_PATH`; el script manda `item.name` con la descripción RAFAM limpia, no manda `mercaderia_external_ref` al resolver, deja la identidad única en el `barcode` devuelto por Paxapos, y guarda el vínculo `name:{descripcion_normalizada}` -> `mercaderia_id` en SQLite para no volver a crear ni duplicar mercaderías.
-- `RAFAM_EJERCICIO_MIN` no filtra proveedores ni la query de OPs; aplica a OCs (`orden_compra`/`oc_items`). Si una OP confirmada dentro del alcance actual (`EJERCICIO >= mínimo` o `FECH_CONFIRM` desde el 1/1 del mínimo) requiere una OC anterior, esa OC se incluye igual para no crear pagos o gastos sueltos. Las OPs históricas fuera de ese alcance no arrastran OCs viejas.
+- `RAFAM_EJERCICIO_MIN` no filtra proveedores; aplica a `oc_items`, `orden_pago` y `retenciones`. Si una OP confirmada dentro del alcance actual (`EJERCICIO >= mínimo` o `FECH_CONFIRM` desde el 1/1 del mínimo) requiere una OC anterior, esa OC se incluye igual para no crear pagos o gastos sueltos. Las OPs históricas fuera de ese alcance no arrastran OCs viejas.
 
 ### 2. Validacion previa obligatoria
 
@@ -298,7 +297,9 @@ Ejecutar en orden estricto:
 ```bash
 make migrate-proveedores BATCH=500
 make migrate-oc          BATCH=500
+make migrate-facturas    BATCH=500
 make migrate-op          BATCH=500
+make migrate-retenciones BATCH=500
 ```
 
 Atajo equivalente:
@@ -315,11 +316,11 @@ migrator.
 Para una corrida completa incremental:
 
 ```bash
-.venv/bin/python main.py run --export migrator --batch-size 500
+.venv/bin/python main.py run --batch-size 500
 ```
 
-Ese comando, sin `--entity`, ejecuta solo las 3 entidades oficiales del migrator en orden:
-`proveedores`, `oc_items`, `orden_pago`.
+Ese comando, sin `--entity`, ejecuta las 5 entidades oficiales del migrator en orden de
+dependencia: `proveedores`, `oc_items`, `solic_gastos`, `orden_pago`, `retenciones`.
 
 Tambien se puede usar:
 
@@ -327,7 +328,7 @@ Tambien se puede usar:
 make migrate-all BATCH=500
 ```
 
-### 5. Crontab Debian sin sudo para las 3 pasadas oficiales
+### 5. Crontab Debian sin sudo para las 5 entidades oficiales
 
 Si no hay acceso `sudo` al servidor, configurar el cron del usuario que tiene el proyecto y la
 `.env` productiva. El ejemplo usa `flock` para evitar corridas superpuestas si una importacion
@@ -363,13 +364,19 @@ RAFAM_DIR=/home/rafam/rafam-ba-proveedores
 # flock con lock separado por entidad evita corridas superpuestas.
 
 # 1) PROVEEDORES -> account_proveedores
-*/15 * * * * cd "$RAFAM_DIR" && /usr/bin/flock -n state/prov.lock .venv/bin/python main.py run --entity proveedores --export migrator --batch-size 500
+*/15 * * * * cd "$RAFAM_DIR" && /usr/bin/flock -n state/prov.lock .venv/bin/python main.py run --entity proveedores --batch-size 500
 
 # 2) ORDEN_COMPRA + OC_ITEMS -> compras_pedidos + items
-*/15 * * * * cd "$RAFAM_DIR" && /usr/bin/flock -n state/oc.lock .venv/bin/python main.py run --entity oc_items --export migrator --batch-size 500
+*/15 * * * * cd "$RAFAM_DIR" && /usr/bin/flock -n state/oc.lock .venv/bin/python main.py run --entity oc_items --batch-size 500
 
-# 3) ORDEN_PAGO + CTA_COMPROB + RETENCIONES -> egresos + gastos + retenciones
-*/15 * * * * cd "$RAFAM_DIR" && /usr/bin/flock -n state/op.lock .venv/bin/python main.py run --entity orden_pago --export migrator --batch-size 500
+# 3) SOLIC_GASTOS + CTA_COMPROB -> account_gastos
+*/15 * * * * cd "$RAFAM_DIR" && /usr/bin/flock -n state/sg.lock .venv/bin/python main.py run --entity solic_gastos --batch-size 500
+
+# 4) ORDEN_PAGO + CTA_COMPROB + ORDEN_PAGO_DEDUC -> egresos + gastos + retenciones
+*/15 * * * * cd "$RAFAM_DIR" && /usr/bin/flock -n state/op.lock .venv/bin/python main.py run --entity orden_pago --batch-size 500
+
+# 5) ORDEN_PAGO_DEDUC -> account_retenciones (reenvio idempotente)
+*/15 * * * * cd "$RAFAM_DIR" && /usr/bin/flock -n state/ret.lock .venv/bin/python main.py run --entity retenciones --batch-size 500
 ```
 
 Notas sobre el crontab:
@@ -377,9 +384,9 @@ Notas sobre el crontab:
 - No hace falta redirigir stdout/stderr con `>>`: `main.py` escribe automaticamente a
   `logs/rafam-{entidad}-YYYY-MM.log` (rotacion mensual). Se puede cambiar la carpeta con
   la variable de entorno `RAFAM_LOG_DIR`.
-- Cada entidad tiene su propio lock (`prov.lock`, `oc.lock`, `op.lock`). Si una tarda
-  mas de 15 minutos, `flock -n` salta esa entidad sin bloquear las otras.
-- Si una entidad falla (ej: CUIT invalido en proveedores), OC y OP siguen corriendo.
+- Cada entidad tiene su propio lock (`prov.lock`, `oc.lock`, `sg.lock`, `op.lock`, `ret.lock`).
+  Si una tarda mas de 15 minutos, `flock -n` salta esa entidad sin bloquear las otras.
+- Si una entidad falla (ej: CUIT invalido en proveedores), las demas siguen corriendo.
 
 Verificar que quedo instalado:
 
@@ -392,16 +399,20 @@ Ver logs en vivo (reemplazar `YYYY-MM` por el mes actual):
 ```bash
 tail -f logs/rafam-proveedores-2026-05.log
 tail -f logs/rafam-oc_items-2026-05.log
+tail -f logs/rafam-solic_gastos-2026-05.log
 tail -f logs/rafam-orden_pago-2026-05.log
+tail -f logs/rafam-retenciones-2026-05.log
 ```
 
 Para probar exactamente lo que ejecuta cron antes de dejarlo activo:
 
 ```bash
 cd /home/rafam/rafam-ba-proveedores
-.venv/bin/python main.py run --entity proveedores --export migrator --batch-size 500 --dry-run
-.venv/bin/python main.py run --entity oc_items --export migrator --batch-size 500 --dry-run
-.venv/bin/python main.py run --entity orden_pago --export migrator --batch-size 500 --dry-run
+.venv/bin/python main.py run --entity proveedores --batch-size 500 --dry-run
+.venv/bin/python main.py run --entity oc_items --batch-size 500 --dry-run
+.venv/bin/python main.py run --entity solic_gastos --batch-size 500 --dry-run
+.venv/bin/python main.py run --entity orden_pago --batch-size 500 --dry-run
+.venv/bin/python main.py run --entity retenciones --batch-size 500 --dry-run
 ```
 
 ### 6. Verificacion post-importacion
@@ -436,33 +447,6 @@ make migrate-all BATCH=500
 
 `reset` borra tambien vinculos locales RAFAM -> Paxapos para la entidad afectada. Usarlo con cuidado en produccion.
 
-## Modo gateway directo legacy
-
-El exporter `gateway` existe para proveedores y usa endpoints JSON directos de Paxapos. Es util para
-mantenimiento puntual, pero el flujo productivo recomendado es `--export migrator`.
-
-Variables necesarias:
-
-```dotenv
-PAXAPOS_URL=https://proveedores.madariaga.gob.ar
-PAXAPOS_TENANT=madariaga
-PAXAPOS_JWT=<jwt>
-PAXAPOS_PROVEEDORES_ENDPOINT=account/proveedores.json
-PAXAPOS_PROVEEDORES_UPDATE_ENDPOINT=account/proveedores/edit/{id}.json
-```
-
-Crear solo proveedores nuevos:
-
-```bash
-.venv/bin/python main.py run --entity proveedores --export gateway
-```
-
-Actualizar proveedores ya vinculados localmente:
-
-```bash
-.venv/bin/python main.py run --entity proveedores --export gateway --force-update
-```
-
 ## Referencia rapida de comandos
 
 | Comando | Uso |
@@ -470,14 +454,18 @@ Actualizar proveedores ya vinculados localmente:
 | `make setup` | Crea `.venv`, instala dependencias y crea `.env` si no existe. |
 | `make load-dev CSV_DIR=...` | Carga CSVs a `state/dev_rafam.db`. |
 | `make status` | Muestra checkpoints. |
-| `make run-proveedores EXPORT=csv` | Export local de proveedores. |
-| `make run-oc_items EXPORT=csv` | Export local de OCs con items. |
-| `make run-orden_pago EXPORT=csv` | Export local de OPs. |
+| `make migrate-proveedores` | Migra proveedores. |
+| `make migrate-oc` | Migra OCs con items. |
+| `make migrate-facturas` | Migra gastos (`solic_gastos`). |
+| `make migrate-op` | Migra ordenes de pago. |
+| `make migrate-retenciones` | Migra retenciones. |
 | `make migrator-spec` | Consulta contrato remoto del migrator. |
 | `make migrator-lookups` | Consulta catalogos remotos. |
 | `make migrate-proveedores-dry` | Dry-run de proveedores. |
 | `make migrate-oc-dry` | Dry-run de OCs. |
+| `make migrate-facturas-dry` | Dry-run de gastos (`solic_gastos`). |
 | `make migrate-op-dry` | Dry-run de OPs. |
+| `make migrate-retenciones-dry` | Dry-run de retenciones. |
 | `make migrate-all-dry` | Dry-run del pipeline oficial completo. |
 | `make migrate-all` | Import real del pipeline oficial completo. |
 | `make reset-all` | Resetea checkpoints y links locales. |
@@ -486,7 +474,7 @@ Actualizar proveedores ya vinculados localmente:
 Variables Make utiles:
 
 ```bash
-BATCH=500 LIMIT=100 EXPORT=csv CSV_DIR=output/rafam_ultimos_3_meses DEV_DB=state/dev_rafam.db
+BATCH=500 LIMIT=100 CSV_DIR=output/rafam_ultimos_3_meses DEV_DB=state/dev_rafam.db
 ```
 
 ## Archivos generados
@@ -496,9 +484,8 @@ BATCH=500 LIMIT=100 EXPORT=csv CSV_DIR=output/rafam_ultimos_3_meses DEV_DB=state
 | `state/dev_rafam.db` | Snapshot SQLite de RAFAM para desarrollo. |
 | `state/checkpoint.db` | Checkpoints y vinculos RAFAM -> Paxapos. |
 | `state/migrator.lock` | Lock de corridas concurrentes (migrator). |
-| `state/prov.lock`, `oc.lock`, `op.lock` | Locks de cron por entidad. |
-| `output/*.csv` | Exportaciones CSV por entidad. |
-| `output/rafam_ultimos_3_meses/*.csv` | Snapshots exportados desde Oracle. |
+| `state/prov.lock`, `oc.lock`, `sg.lock`, `op.lock`, `ret.lock` | Locks de cron por entidad. |
+| `output/rafam_ultimos_3_meses/*.csv` | Snapshots de RAFAM (fuente para dev offline). |
 | `logs/rafam-{entidad}-YYYY-MM.log` | Logs rotativos mensuales por entidad (auto-generados). |
 
 No commitear `.env`, `state/*.db`, logs ni CSVs productivos.

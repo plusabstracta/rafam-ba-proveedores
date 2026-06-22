@@ -13,22 +13,23 @@ import argparse
 import fcntl
 import json
 import logging
-import logging.handlers
 import os
 import sys
 import time
 from contextlib import contextmanager
-from datetime import datetime
 from pathlib import Path
 
 from dotenv import load_dotenv
 from sqlalchemy.exc import SQLAlchemyError
 
+from src.batch_grouping import GROUPED_BATCH_FIELDS, ENTITY_LINK_NAMES, iter_grouped_batches
 from src.checkpoint_store import CheckpointStore
 from src.config import ENTITY_CONFIGS
 from src.db import create_source_engine
 from src.entity_link_store import EntityLinkStore
-from src.exporter import BaseExporter, _env_bool, build_exporter, fetch_migrator_lookups, fetch_migrator_spec
+from src.exporter import BaseExporter, build_exporter, fetch_migrator_lookups, fetch_migrator_spec
+from src.logging_config import setup_file_logging
+from src.retry_store import RetryStore
 from src.source_repository import SourceRepository
 from src.sync_engine import SyncEngine
 
@@ -36,24 +37,6 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-
-_GROUPED_BATCH_FIELDS = {
-    "ped_items": ["EJERCICIO", "NUM_PED"],
-    "oc_items": ["EJERCICIO", "UNI_COMPRA", "NRO_OC"],
-    "orden_compra": ["EJERCICIO", "UNI_COMPRA", "NRO_OC"],
-    "orden_pago": ["EJERCICIO", "NRO_OP"],
-}
-
-# Maps entity config names to the link store entity they write to.
-_ENTITY_LINK_NAMES: dict[str, str] = {
-    "proveedores": "proveedores",
-    "pedidos": "pedido",
-    "ped_items": "pedido",
-    "orden_compra": "orden_compra",
-    "oc_items": "orden_compra",
-    "solic_gastos": "gasto",
-    "orden_pago": "orden_pago",
-}
 
 
 def _build_engine() -> SyncEngine:
@@ -146,7 +129,12 @@ def cmd_reset(args) -> None:
             if count:
                 logger.info("Links borrados: %s (%d)", link_entity, count)
         link_store.close()
-        logger.info("Todos los checkpoints y links reseteados — próxima ejecución será full load.")
+        retry_store = RetryStore()
+        retry_cleared = retry_store.clear_all()
+        retry_store.close()
+        if retry_cleared:
+            logger.info("Cola de reintentos vaciada: %d items eliminados", retry_cleared)
+        logger.info("Todos los checkpoints, links y reintentos reseteados — próxima ejecución será full load.")
         return
 
     if args.entity not in ENTITY_CONFIGS:
@@ -157,11 +145,16 @@ def cmd_reset(args) -> None:
         sys.exit(1)
 
     engine.reset_checkpoint(args.entity)
-    link_entity = _ENTITY_LINK_NAMES.get(args.entity)
+    link_entity = ENTITY_LINK_NAMES.get(args.entity)
     if link_entity:
         count = link_store.clear_entity(link_entity)
         logger.info("Links borrados: %s (%d)", link_entity, count)
     link_store.close()
+    retry_store = RetryStore()
+    retry_cleared = retry_store.clear_entity(args.entity)
+    retry_store.close()
+    if retry_cleared:
+        logger.info("Cola de reintentos vaciada para %s: %d items", args.entity, retry_cleared)
     logger.info("Checkpoint reseteado: %s", args.entity)
 
 
@@ -248,9 +241,9 @@ def _sync_entity(
                         entity, cp_exc,
                     )
 
-        group_fields = _GROUPED_BATCH_FIELDS.get(entity)
+        group_fields = GROUPED_BATCH_FIELDS.get(entity)
         if group_fields:
-            for batch in _iter_grouped_batches(result, columns, group_fields, batch_size):
+            for batch in iter_grouped_batches(result, columns, group_fields, batch_size):
                 if limit is not None and total >= limit:
                     break
                 process_batch(batch)
@@ -310,48 +303,6 @@ def _warn_missing_cursor_fields(cfg, columns: list[str], entity: str) -> None:
         )
 
 
-def _iter_grouped_batches(result, columns: list[str], group_fields: list[str], batch_size: int):
-    """Yield batches without splitting rows that share the same business key."""
-    col_idx = {name.upper(): i for i, name in enumerate(columns)}
-    group_indexes = [col_idx.get(field.upper()) for field in group_fields]
-    if any(index is None for index in group_indexes):
-        while True:
-            rows = result.fetchmany(batch_size)
-            if not rows:
-                break
-            yield [tuple(row) for row in rows]
-        return
-
-    pending: list[tuple] = []
-    current_group: list[tuple] = []
-    current_key = None
-
-    while True:
-        rows = result.fetchmany(batch_size)
-        if not rows:
-            break
-
-        for raw_row in rows:
-            row = tuple(raw_row)
-            key = tuple(row[index] for index in group_indexes if index is not None)
-            if current_group and key != current_key:
-                if pending and len(pending) + len(current_group) > batch_size:
-                    yield pending
-                    pending = []
-                pending.extend(current_group)
-                current_group = []
-
-            current_key = key
-            current_group.append(row)
-
-    if current_group:
-        if pending and len(pending) + len(current_group) > batch_size:
-            yield pending
-            pending = []
-        pending.extend(current_group)
-
-    if pending:
-        yield pending
 
 
 def cmd_run(args) -> None:
@@ -366,28 +317,54 @@ def cmd_run(args) -> None:
 def _cmd_run_locked(args) -> None:
     from src.config import _EJERCICIO_MIN, _EJERCICIO_MIN_ENTITIES
     if _EJERCICIO_MIN:
-        entidades = ", ".join(sorted(_EJERCICIO_MIN_ENTITIES))
-        logger.info(
-            "RAFAM_EJERCICIO_MIN=%d — aplica solo a: %s",
-            _EJERCICIO_MIN,
-            entidades,
-        )
+        if args.entity:
+            # Run de una sola entidad: el log habla solo de esa entidad.
+            aplica = "aplica" if args.entity in _EJERCICIO_MIN_ENTITIES else "no aplica"
+            logger.info(
+                "RAFAM_EJERCICIO_MIN=%d — %s a %s",
+                _EJERCICIO_MIN,
+                aplica,
+                args.entity,
+            )
+        else:
+            entidades = ", ".join(sorted(_EJERCICIO_MIN_ENTITIES))
+            logger.info(
+                "RAFAM_EJERCICIO_MIN=%d — aplica solo a: %s",
+                _EJERCICIO_MIN,
+                entidades,
+            )
     else:
         logger.info("RAFAM_EJERCICIO_MIN no configurado — se procesarán TODOS los ejercicios")
 
-    exporter = build_exporter(args.export, force_update=args.force_update, dry_run=args.dry_run)
+    exporter = build_exporter(dry_run=args.dry_run)
     engine   = _build_engine()
-    targets  = [args.entity] if args.entity else list(ENTITY_CONFIGS.keys())
 
-    # En modo migrator, sin --entity explicito, restringir a las 3 entidades oficiales
-    # (proveedores, oc_items, orden_pago) en orden de FKs. Las demás no se migran:
+    # Determinar las entidades a procesar ANTES de loguear la cola de reintentos,
+    # para filtrar el snapshot por lo que realmente corre esta vez (un run
+    # `--entity retenciones` no debe loguear pendientes de orden_pago/oc_items).
+    # Sin --entity explicito, ejecutar las 5 entidades oficiales en orden de FKs.
+    # Las demas no se migran:
     #   - orden_compra (header) → reemplazado por oc_items (incluye items embebidos)
-    #   - solic_gastos          → los gastos los crean humanos en Paxapos / auto-crea el endpoint de OP
     #   - pedidos / ped_items   → deshabilitados, los pedidos llegan como OCs via oc_items
-    if not args.entity and args.export == "migrator":
-        official = ["proveedores", "oc_items", "orden_pago"]
+    # retenciones corre al final: depende de que la OP (Egreso) ya exista para
+    # resolver el destino; si no, se encola y se reintenta en la proxima corrida.
+    if args.entity:
+        targets = [args.entity]
+    else:
+        official = ["proveedores", "oc_items", "solic_gastos", "orden_pago", "retenciones"]
         targets = [e for e in official if e in ENTITY_CONFIGS]
-        logger.info("Modo migrator: ejecutando solo las 3 entidades oficiales en orden → %s", targets)
+        logger.info("Ejecutando entidades oficiales en orden FK → %s", targets)
+
+    # Cola de reintentos (F1): captura filas rechazadas por el receptor para
+    # reintentarlas en la proxima corrida. Manejo fila-a-fila — el batch no se
+    # cancela por una fila mala; el watermark avanza con seguridad porque lo
+    # pendiente queda registrado aca.
+    retry_store = RetryStore()
+    if hasattr(exporter, "attach_retry_store"):
+        exporter.attach_retry_store(retry_store)
+        pending = retry_store.counts_by_entity(entities=targets)
+        if pending:
+            logger.info("Cola de reintentos al inicio: %s", json.dumps(pending, ensure_ascii=False))
 
     failed_entities: list[str] = []
     try:
@@ -408,6 +385,12 @@ def _cmd_run_locked(args) -> None:
         sys.exit(1)
     finally:
         exporter.close()
+        try:
+            final_pending = retry_store.counts_by_entity(entities=targets)
+            if final_pending:
+                logger.info("Cola de reintentos al finalizar: %s", json.dumps(final_pending, ensure_ascii=False))
+        finally:
+            retry_store.close()
         logger.info("Proceso finalizado.")
 
     if failed_entities:
@@ -446,61 +429,48 @@ def cmd_lookups(args) -> None:
     print(json.dumps(lookups, ensure_ascii=False, indent=2))
 
 
+def cmd_reconcile(args) -> None:
+    """Reconciliacion read-only RAFAM vs estado migrado local (F4).
+
+    Compara conteos de origen contra links migrados y la cola de reintentos.
+    NO escribe nada. Sale con codigo 2 si detecta drift (para alertas de cron).
+    """
+    from src.config import _EJERCICIO_MIN
+    from src.reconcile import format_report, has_drift, reconcile
+
+    link_store = EntityLinkStore()
+    retry_store = RetryStore()
+    try:
+        source_engine = create_source_engine()
+        with source_engine.connect() as conn:
+            source_repo = SourceRepository(conn)
+            rows = reconcile(
+                source_repo,
+                link_store,
+                retry_store,
+                ejercicio_min=_EJERCICIO_MIN,
+            )
+    except (SQLAlchemyError, ValueError) as exc:
+        logger.error("Error en reconciliacion: %s", exc)
+        sys.exit(1)
+    finally:
+        link_store.close()
+        retry_store.close()
+
+    print()
+    print(format_report(rows))
+    print()
+
+    if has_drift(rows):
+        drifted = [r.label for r in rows if r.drift != 0]
+        logger.warning("Drift detectado en: %s", ", ".join(drifted))
+        sys.exit(2)
+    logger.info("Reconciliacion OK: sin drift.")
+
+
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 
-def _setup_file_logging(args) -> None:
-    """
-    Adjunta un FileHandler con rotacion mensual al logger raiz.
-
-    - Directorio: $RAFAM_LOG_DIR (default: ./logs).
-    - Un archivo por script/entidad: rafam-{entity}-YYYY-MM.log.
-      Para cmd_run usa el --entity (proveedores | oc_items | orden_pago).
-      Para los otros comandos (status/reset/spec/lookups) usa el nombre del comando.
-      Si --entity esta vacio en run (corrida full) usa 'all'.
-    - Rotacion mensual: cada vez que se ejecuta se abre el archivo del mes en
-      curso (rafam-proveedores-2026-05.log). Al cambiar de mes se crea el del
-      mes siguiente automaticamente. Codificar el nombre del archivo en YYYY-MM
-      da rotacion real, predecible y sin riesgo de perdida (no dependemos del
-      TimedRotatingFileHandler que solo rota dentro de un proceso vivo).
-    - Override completo via $RAFAM_LOG_FILE (un solo archivo, sin rotacion).
-    - Si $RAFAM_LOG_DIR='' o $RAFAM_LOG_DISABLE=true: no escribe a archivo.
-    """
-    if _env_bool("RAFAM_LOG_DISABLE", "false"):
-        return
-
-    log_dir = os.getenv("RAFAM_LOG_DIR", "logs").strip()
-    log_file_override = os.getenv("RAFAM_LOG_FILE", "").strip()
-
-    if log_file_override:
-        log_path = Path(log_file_override)
-    else:
-        if not log_dir:
-            return
-        cmd = getattr(args, "command", "app") or "app"
-        if cmd == "run":
-            entity = (getattr(args, "entity", None) or "all").strip() or "all"
-            base_name = f"rafam-{entity}"
-        else:
-            base_name = f"rafam-{cmd}"
-        month_suffix = datetime.now().strftime("%Y-%m")
-        log_path = Path(log_dir) / f"{base_name}-{month_suffix}.log"
-
-    try:
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        handler = logging.FileHandler(str(log_path), mode="a", encoding="utf-8")
-        handler.setFormatter(
-            logging.Formatter(
-                "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-                datefmt="%Y-%m-%d %H:%M:%S",
-            )
-        )
-        # Heredar el nivel del root logger (configurado por LOG_LEVEL)
-        handler.setLevel(logging.getLogger().level)
-        logging.getLogger().addHandler(handler)
-        logger.info("Logging a archivo: %s", log_path)
-    except OSError as exc:
-        logger.warning("No se pudo abrir archivo de log %s: %s", log_path, exc)
 
 
 def main() -> None:
@@ -540,6 +510,11 @@ def main() -> None:
         ),
     )
 
+    sub.add_parser(
+        "reconcile",
+        help="Reconciliacion read-only RAFAM vs migrado (drift). Exit 2 si hay drift.",
+    )
+
     reset_p = sub.add_parser("reset", help="Resetea checkpoints para forzar full load")
     reset_p.add_argument("--entity", metavar="NOMBRE", help="Entidad a resetear")
     reset_p.add_argument("--all", action="store_true", help="Resetear todas las entidades")
@@ -549,28 +524,14 @@ def main() -> None:
     run_p.add_argument("--limit", type=int, metavar="N", help="Máximo de filas por entidad (útil para testear)")
     run_p.add_argument("--batch-size", type=int, default=500, metavar="N", help="Filas por lote (default: 500)")
     run_p.add_argument(
-        "--export",
-        choices=["csv", "noop", "gateway", "migrator"],
-        default="csv",
-        help="Destino de salida: csv (default) | noop (solo checkpoints) | gateway | migrator",
-    )
-    run_p.add_argument(
         "--dry-run",
         action="store_true",
-        help="Preview: no avanza checkpoints; en migrator envia payload con dry_run=true",
-    )
-    run_p.add_argument(
-        "--force-update",
-        action="store_true",
-        help=(
-            "Solo gateway: si existe vinculacion local RAFAM->Paxapos, "
-            "envia update en vez de saltear (default: create-only)"
-        ),
+        help="Preview: no avanza checkpoints; envia el payload con dry_run=true (el receptor no persiste)",
     )
 
     args = parser.parse_args()
-    _setup_file_logging(args)
-    {"status": cmd_status, "reset": cmd_reset, "run": cmd_run, "spec": cmd_spec, "lookups": cmd_lookups}[args.command](args)
+    setup_file_logging(args)
+    {"status": cmd_status, "reset": cmd_reset, "run": cmd_run, "spec": cmd_spec, "lookups": cmd_lookups, "reconcile": cmd_reconcile}[args.command](args)
 
 
 if __name__ == "__main__":
