@@ -1,12 +1,18 @@
-"""Conecta a Oracle RAFAM y extrae:
+"""Conecta a Oracle RAFAM y extrae info de OC + unidades de medida.
 
-1. El catálogo completo de CAT_UNI_MED (unidades de medida).
-2. Los valores DISTINTOS de UNI_MED usados en OC_ITEMS, con su descripción
-   desde CAT_UNI_MED y la cantidad de ítems que usan cada uno.
-3. Un resumen de ORDEN_COMPRA (cabecera de órdenes de compra) con totales y
-   distribución por ejercicio.
+Basado en el schema real (docs/rafam_schema_and_joins.md):
+- OC_ITEMS NO tiene UNI_MED (sus columnas son: EJERCICIO, UNI_COMPRA,
+  NRO_OC, ITEM_OC, DELEG_SOLIC, NRO_SOLIC, ITEM_REAL, DESCRIPCION,
+  CANTIDAD, IMP_UNITARIO, CANT_RECIB, IMPORTE_EJER).
+- UNI_MED está en PED_ITEMS (FK a CAT_UNI_MED).
+- La cadena OC → UM pasa por:
+  OC_ITEMS (DELEG_SOLIC, NRO_SOLIC) → SOLIC_GASTOS (NRO_PED) →
+  PEDIDOS/PED_ITEMS (UNI_MED → CAT_UNI_MED).
 
 Genera: docs/oc_uni_med_report.md
+
+Uso:
+    python scripts/explore_oc_uni_med.py
 """
 
 import os
@@ -65,6 +71,21 @@ def _safe_fetch(cursor, sql, label=""):
         return []
 
 
+def _describe_table(cursor, schema, table_name):
+    """Devuelve las columnas de una tabla desde ALL_TAB_COLUMNS."""
+    rows = _safe_fetch(
+        cursor,
+        f"""
+        SELECT COLUMN_NAME, DATA_TYPE, DATA_LENGTH, NULLABLE
+        FROM ALL_TAB_COLUMNS
+        WHERE OWNER = '{schema}' AND TABLE_NAME = '{table_name}'
+        ORDER BY COLUMN_ID
+        """,
+        f"DESCRIBE {table_name}",
+    )
+    return rows
+
+
 def main():
     conn = _connect()
     cursor = conn.cursor()
@@ -74,72 +95,162 @@ def main():
     lines.append(f"> Generado automáticamente desde `{DB_HOST}:{DB_PORT}/{DB_SERVICE}`\n")
     lines.append("---\n")
 
-    # ── 1. Catálogo CAT_UNI_MED ──────────────────────────────────────────
-    print("1/3  Extrayendo CAT_UNI_MED ...")
-    cat_rows = _safe_fetch(
-        cursor,
-        f"SELECT CODIGO, DESCRIPCION FROM {SCHEMA}.CAT_UNI_MED ORDER BY CODIGO",
-        "CAT_UNI_MED",
-    )
-
-    lines.append("## 1. Catálogo CAT_UNI_MED (Unidades de Medida RAFAM)\n")
-    lines.append(f"Total: **{len(cat_rows)}** registros\n")
-    if cat_rows:
-        lines.append("| CODIGO | DESCRIPCION |")
-        lines.append("|--------|-------------|")
-        for row in cat_rows:
-            lines.append(f"| {row[0]} | {row[1]} |")
-    else:
-        lines.append("_No se pudieron obtener registros de CAT_UNI_MED._\n")
-    lines.append("")
-
-    # ── 2. UNI_MED distintos usados en OC_ITEMS ─────────────────────────
-    print("2/3  Extrayendo UNI_MED distintos de OC_ITEMS + CAT_UNI_MED ...")
-    uni_med_rows = _safe_fetch(
+    # ── 0. Verificar qué tablas existen ──────────────────────────────────
+    print("0/6  Verificando tablas disponibles ...")
+    tables_to_check = [
+        "OC_ITEMS", "ORDEN_COMPRA", "PED_ITEMS", "PEDIDOS",
+        "SOLIC_GASTOS", "CAT_UNI_MED", "PROVEEDORES",
+    ]
+    available = _safe_fetch(
         cursor,
         f"""
-        SELECT
-            oci.UNI_MED,
-            cum.DESCRIPCION  AS UM_DESCRIPCION,
-            COUNT(*)         AS CANT_ITEMS
-        FROM {SCHEMA}.OC_ITEMS oci
-        LEFT JOIN {SCHEMA}.CAT_UNI_MED cum
-            ON oci.UNI_MED = cum.CODIGO
-        GROUP BY oci.UNI_MED, cum.DESCRIPCION
-        ORDER BY COUNT(*) DESC
+        SELECT TABLE_NAME
+        FROM ALL_TABLES
+        WHERE OWNER = '{SCHEMA}'
+          AND TABLE_NAME IN ({', '.join(f"'{t}'" for t in tables_to_check)})
+        ORDER BY TABLE_NAME
         """,
-        "OC_ITEMS UNI_MED",
+        "ALL_TABLES check",
     )
+    available_set = {row[0] for row in available}
+    print(f"  Tablas disponibles: {sorted(available_set)}")
 
-    lines.append("## 2. Valores de UNI_MED usados en OC_ITEMS\n")
-    lines.append("Muestra cada código de unidad de medida con su descripción del catálogo ")
-    lines.append("y la cantidad de ítems de OC que lo usan.\n")
+    lines.append("## 0. Tablas verificadas\n")
+    for t in tables_to_check:
+        status = "✅" if t in available_set else "❌ NO DISPONIBLE"
+        lines.append(f"- `{t}`: {status}")
+    lines.append("")
+
+    # ── 1. Estructura de OC_ITEMS (columnas reales) ──────────────────────
+    print("1/6  Describiendo OC_ITEMS ...")
+    oc_items_cols = _describe_table(cursor, SCHEMA, "OC_ITEMS")
+
+    lines.append("## 1. Estructura de OC_ITEMS (columnas reales)\n")
+    if oc_items_cols:
+        lines.append("| COLUMNA | TIPO | LARGO | NULLABLE |")
+        lines.append("|---------|------|-------|----------|")
+        for row in oc_items_cols:
+            lines.append(f"| {row[0]} | {row[1]} | {row[2]} | {row[3]} |")
+        col_names = [r[0] for r in oc_items_cols]
+        has_uni_med = "UNI_MED" in col_names
+        lines.append(f"\n> **¿Tiene UNI_MED?** {'✅ SÍ' if has_uni_med else '❌ NO — UNI_MED está en PED_ITEMS'}")
+    else:
+        lines.append("_No se pudo describir OC_ITEMS._\n")
+    lines.append("")
+
+    # ── 2. Estructura de PED_ITEMS (tiene UNI_MED) ──────────────────────
+    print("2/6  Describiendo PED_ITEMS ...")
+    ped_items_cols = _describe_table(cursor, SCHEMA, "PED_ITEMS")
+
+    lines.append("## 2. Estructura de PED_ITEMS (contiene UNI_MED)\n")
+    if ped_items_cols:
+        lines.append("| COLUMNA | TIPO | LARGO | NULLABLE |")
+        lines.append("|---------|------|-------|----------|")
+        for row in ped_items_cols:
+            lines.append(f"| {row[0]} | {row[1]} | {row[2]} | {row[3]} |")
+    else:
+        lines.append("_No se pudo describir PED_ITEMS._\n")
+    lines.append("")
+
+    # ── 3. Catálogo CAT_UNI_MED ──────────────────────────────────────────
+    print("3/6  Extrayendo CAT_UNI_MED ...")
+    if "CAT_UNI_MED" in available_set:
+        cat_rows = _safe_fetch(
+            cursor,
+            f"SELECT CODIGO, DESCRIPCION FROM {SCHEMA}.CAT_UNI_MED ORDER BY CODIGO",
+            "CAT_UNI_MED",
+        )
+        lines.append("## 3. Catálogo CAT_UNI_MED\n")
+        if cat_rows:
+            lines.append(f"Total: **{len(cat_rows)}** registros\n")
+            lines.append("| CODIGO | DESCRIPCION |")
+            lines.append("|--------|-------------|")
+            for row in cat_rows:
+                lines.append(f"| {row[0]} | {row[1]} |")
+        else:
+            lines.append("_Tabla existe pero no se pudieron obtener registros._\n")
+    else:
+        # CAT_UNI_MED no disponible — intentar extraer valores únicos de PED_ITEMS
+        lines.append("## 3. CAT_UNI_MED\n")
+        lines.append("> ⚠️ `CAT_UNI_MED` no está disponible (falta permiso SELECT o no existe en este schema).\n")
+        lines.append("> Extrayendo valores distintos de `PED_ITEMS.UNI_MED` como alternativa.\n")
+
+        ped_uni_rows = _safe_fetch(
+            cursor,
+            f"""
+            SELECT DISTINCT UNI_MED
+            FROM {SCHEMA}.PED_ITEMS
+            ORDER BY UNI_MED
+            """,
+            "PED_ITEMS UNI_MED distintos",
+        )
+        if ped_uni_rows:
+            lines.append(f"Valores distintos de `UNI_MED` en PED_ITEMS: **{len(ped_uni_rows)}**\n")
+            lines.append("| UNI_MED (código) |")
+            lines.append("|------------------|")
+            for row in ped_uni_rows:
+                lines.append(f"| {row[0]} |")
+        else:
+            lines.append("_No se pudieron obtener valores de PED_ITEMS.UNI_MED._\n")
+        cat_rows = []
+    lines.append("")
+
+    # ── 4. UNI_MED usados en PED_ITEMS con conteo ───────────────────────
+    print("4/6  Extrayendo UNI_MED distintos de PED_ITEMS con conteo ...")
+
+    if "CAT_UNI_MED" in available_set:
+        uni_med_sql = f"""
+            SELECT
+                pi.UNI_MED,
+                cum.DESCRIPCION  AS UM_DESCRIPCION,
+                COUNT(*)         AS CANT_ITEMS
+            FROM {SCHEMA}.PED_ITEMS pi
+            LEFT JOIN {SCHEMA}.CAT_UNI_MED cum
+                ON pi.UNI_MED = cum.CODIGO
+            GROUP BY pi.UNI_MED, cum.DESCRIPCION
+            ORDER BY COUNT(*) DESC
+        """
+    else:
+        uni_med_sql = f"""
+            SELECT
+                pi.UNI_MED,
+                NULL            AS UM_DESCRIPCION,
+                COUNT(*)        AS CANT_ITEMS
+            FROM {SCHEMA}.PED_ITEMS pi
+            GROUP BY pi.UNI_MED
+            ORDER BY COUNT(*) DESC
+        """
+
+    uni_med_rows = _safe_fetch(cursor, uni_med_sql, "PED_ITEMS UNI_MED agrupado")
+
+    lines.append("## 4. Valores de UNI_MED usados en PED_ITEMS\n")
+    lines.append("Cada código de unidad de medida con su descripción del catálogo ")
+    lines.append("y la cantidad de ítems de pedido que lo usan.\n")
     if uni_med_rows:
         lines.append(f"Total combinaciones distintas: **{len(uni_med_rows)}**\n")
-        lines.append("| UNI_MED | DESCRIPCION (CAT_UNI_MED) | CANT_ITEMS |")
-        lines.append("|---------|---------------------------|------------|")
+        lines.append("| UNI_MED | DESCRIPCION | CANT_ITEMS |")
+        lines.append("|---------|-------------|------------|")
         for row in uni_med_rows:
             uni_med = row[0] if row[0] is not None else "(NULL)"
             desc = row[1] if row[1] is not None else "(sin catálogo)"
             cant = row[2]
             lines.append(f"| {uni_med} | {desc} | {cant} |")
     else:
-        lines.append("_No se pudieron obtener registros de OC_ITEMS._\n")
+        lines.append("_No se pudieron obtener registros de PED_ITEMS._\n")
     lines.append("")
 
-    # ── 3. Resumen ORDEN_COMPRA por ejercicio ────────────────────────────
-    print("3/3  Extrayendo resumen de ORDEN_COMPRA por ejercicio ...")
+    # ── 5. Resumen ORDEN_COMPRA por ejercicio ────────────────────────────
+    print("5/6  Extrayendo resumen de ORDEN_COMPRA por ejercicio ...")
     oc_summary = _safe_fetch(
         cursor,
         f"""
         SELECT
             EJERCICIO,
-            COUNT(*)                     AS CANT_OCS,
-            SUM(IMPORTE_TOT)             AS IMPORTE_TOTAL,
-            MIN(FECH_OC)                 AS FECHA_MIN,
-            MAX(FECH_OC)                 AS FECHA_MAX,
-            COUNT(DISTINCT COD_PROV)     AS PROVEEDORES_DISTINTOS,
-            COUNT(DISTINCT JURISDICCION) AS JURISDICCIONES_DISTINTAS
+            COUNT(*)                 AS CANT_OCS,
+            SUM(IMPORTE_TOT)         AS IMPORTE_TOTAL,
+            MIN(FECH_OC)             AS FECHA_MIN,
+            MAX(FECH_OC)             AS FECHA_MAX,
+            COUNT(DISTINCT COD_PROV) AS PROVEEDORES_DISTINTOS
         FROM {SCHEMA}.ORDEN_COMPRA
         GROUP BY EJERCICIO
         ORDER BY EJERCICIO DESC
@@ -147,10 +258,10 @@ def main():
         "ORDEN_COMPRA resumen",
     )
 
-    lines.append("## 3. Resumen de ORDEN_COMPRA por ejercicio\n")
+    lines.append("## 5. Resumen de ORDEN_COMPRA por ejercicio\n")
     if oc_summary:
-        lines.append("| EJERCICIO | CANT_OCS | IMPORTE_TOTAL | FECHA_MIN | FECHA_MAX | PROVEEDORES | JURISDICCIONES |")
-        lines.append("|-----------|----------|---------------|-----------|-----------|-------------|----------------|")
+        lines.append("| EJERCICIO | CANT_OCS | IMPORTE_TOTAL | FECHA_MIN | FECHA_MAX | PROVEEDORES |")
+        lines.append("|-----------|----------|---------------|-----------|-----------|-------------|")
         for row in oc_summary:
             ej = row[0]
             cant = row[1]
@@ -158,14 +269,13 @@ def main():
             f_min = str(row[3])[:10] if row[3] else "-"
             f_max = str(row[4])[:10] if row[4] else "-"
             provs = row[5]
-            juris = row[6]
-            lines.append(f"| {ej} | {cant} | {importe} | {f_min} | {f_max} | {provs} | {juris} |")
+            lines.append(f"| {ej} | {cant} | {importe} | {f_min} | {f_max} | {provs} |")
     else:
         lines.append("_No se pudieron obtener registros de ORDEN_COMPRA._\n")
     lines.append("")
 
-    # ── 4. Primeros 30 ítems de OC_ITEMS (muestra) ──────────────────────
-    print("  Extra: Muestra de 30 OC_ITEMS ...")
+    # ── 6. Muestra de OC_ITEMS (30 del último ejercicio) ─────────────────
+    print("6/6  Muestra de OC_ITEMS (30 ítems) ...")
     sample_rows = _safe_fetch(
         cursor,
         f"""
@@ -175,31 +285,27 @@ def main():
             oci.NRO_OC,
             oci.ITEM_OC,
             oci.DESCRIPCION,
-            oci.UNI_MED,
-            cum.DESCRIPCION AS UM_DESC,
-            oci.CANT,
-            oci.PRECIO_UNIT
+            oci.CANTIDAD,
+            oci.IMP_UNITARIO
         FROM {SCHEMA}.OC_ITEMS oci
-        LEFT JOIN {SCHEMA}.CAT_UNI_MED cum
-            ON oci.UNI_MED = cum.CODIGO
         WHERE oci.EJERCICIO = (SELECT MAX(EJERCICIO) FROM {SCHEMA}.OC_ITEMS)
         AND ROWNUM <= 30
-        ORDER BY oci.EJERCICIO DESC, oci.NRO_OC DESC, oci.ITEM_OC
+        ORDER BY oci.NRO_OC DESC, oci.ITEM_OC
         """,
         "OC_ITEMS sample",
     )
 
-    lines.append("## 4. Muestra de OC_ITEMS (últimos 30 del ejercicio más reciente)\n")
+    lines.append("## 6. Muestra de OC_ITEMS (últimos 30 del ejercicio más reciente)\n")
     if sample_rows:
-        lines.append("| EJERCICIO | UNI_COMPRA | NRO_OC | ITEM | DESCRIPCION | UNI_MED | UM_DESC | CANT | PRECIO_UNIT |")
-        lines.append("|-----------|------------|--------|------|-------------|---------|---------|------|-------------|")
+        lines.append("| EJERCICIO | UNI_COMPRA | NRO_OC | ITEM | DESCRIPCION | CANTIDAD | IMP_UNITARIO |")
+        lines.append("|-----------|------------|--------|------|-------------|----------|--------------|")
         for row in sample_rows:
-            desc = (str(row[4])[:40] + "…") if row[4] and len(str(row[4])) > 40 else (row[4] or "-")
-            um = row[5] if row[5] is not None else "(NULL)"
-            um_desc = row[6] if row[6] is not None else "-"
-            cant = row[7] if row[7] is not None else "-"
-            precio = f"{row[8]:,.2f}" if row[8] is not None else "-"
-            lines.append(f"| {row[0]} | {row[1]} | {row[2]} | {row[3]} | {desc} | {um} | {um_desc} | {cant} | {precio} |")
+            desc = (str(row[4])[:50] + "…") if row[4] and len(str(row[4])) > 50 else (row[4] or "-")
+            # Escapar pipes en descripción para no romper la tabla markdown
+            desc = desc.replace("|", "\\|")
+            cant = row[5] if row[5] is not None else "-"
+            precio = f"{row[6]:,.5f}" if row[6] is not None else "-"
+            lines.append(f"| {row[0]} | {row[1]} | {row[2]} | {row[3]} | {desc} | {cant} | {precio} |")
     else:
         lines.append("_No se pudieron obtener registros de muestra._\n")
     lines.append("")
@@ -214,8 +320,14 @@ def main():
         f.write("\n".join(lines))
 
     print(f"\n✅ Reporte generado: {output}")
-    print(f"   Secciones: CAT_UNI_MED ({len(cat_rows)}), UNI_MED en OC_ITEMS ({len(uni_med_rows)}), "
-          f"ORDEN_COMPRA ({len(oc_summary)})")
+    print(f"   Secciones:")
+    print(f"     - Tablas verificadas: {len(available_set)}/{len(tables_to_check)}")
+    print(f"     - UNI_MED en PED_ITEMS: {len(uni_med_rows)} valores distintos")
+    print(f"     - ORDEN_COMPRA: {len(oc_summary)} ejercicios")
+    if cat_rows:
+        print(f"     - CAT_UNI_MED: {len(cat_rows)} registros")
+    else:
+        print(f"     - CAT_UNI_MED: no disponible (usé PED_ITEMS como fallback)")
 
 
 if __name__ == "__main__":
