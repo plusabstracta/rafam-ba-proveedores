@@ -8,15 +8,15 @@ _TABLE_PREFIX = "link_"
 # Extra columns per entity (beyond the base source_key, remote_id, updated_at).
 # Override via the ``schemas`` parameter in EntityLinkStore.__init__().
 DEFAULT_LINK_SCHEMAS: dict[str, list[str]] = {
-    "proveedores": ["cuit", "cod_estado"],
-    "orden_compra": ["fech_confirm", "estado_oc", "cod_prov", "importe_tot", "gasto_refs", "gasto_linked_refs", "paxapos_gasto_ids", "has_op"],
-    "gasto": ["estado_solic", "importe_tot", "cod_prov"],
-    "orden_pago": ["estado_op", "confirmado", "fech_confirm", "importe_total"],
+    "proveedores": ["cuit", "cod_estado", "content_hash", "deleted_at"],
+    "orden_compra": ["fech_confirm", "estado_oc", "cod_prov", "importe_tot", "gasto_refs", "gasto_linked_refs", "paxapos_gasto_ids", "has_op", "deleted_at"],
+    "gasto": ["estado_solic", "importe_tot", "cod_prov", "deleted_at"],
+    "orden_pago": ["estado_op", "confirmado", "fech_confirm", "importe_total", "deleted_at"],
     # retenciones: idempotencia de la pasada standalone (F4). El receptor usa
     # REPLACE (soft-delete + insert) por egreso, asi que sin link reenviariamos
     # las mismas retenciones en cada corrida y se duplicarian con nuevos IDs.
     # fingerprint = hash de las retenciones enviadas; retenciones_count = cantidad.
-    "retenciones": ["fingerprint", "retenciones_count"],
+    "retenciones": ["fingerprint", "retenciones_count", "deleted_at"],
 }
 
 
@@ -192,3 +192,40 @@ class EntityLinkStore:
                 if ref:
                     refs.add(ref)
         return refs
+
+    def mark_deleted(self, entity: str, source_key: str) -> None:
+        """Marca un link como anulado/eliminado en RAFAM (soft-delete local).
+
+        Escribe deleted_at = datetime('now'). No borra el registro para que
+        quede auditado. El pipeline principal ignora links con deleted_at IS NOT NULL
+        si se agrega ese filtro en el futuro; el script de integridad lo usa
+        para evitar re-verificar registros ya marcados.
+        """
+        table = self._ensure_table(entity)
+        self._conn.execute(
+            f"UPDATE [{table}] SET [deleted_at] = datetime('now'), updated_at = datetime('now')"
+            f" WHERE source_key = ?",
+            (source_key,),
+        )
+        self._conn.commit()
+
+    def iter_all_links(
+        self,
+        entity: str,
+        *,
+        include_deleted: bool = False,
+    ) -> list[dict]:
+        """Devuelve todos los links de una entidad como lista de dicts.
+
+        Por defecto excluye los registros ya marcados con deleted_at (anulados).
+        Usar include_deleted=True para incluirlos (ej: auditoría).
+
+        Cada dict contiene todas las columnas del link store, incluyendo
+        source_key, remote_id, updated_at y los campos extra del schema.
+        """
+        table = self._ensure_table(entity)
+        where = "" if include_deleted else "WHERE [deleted_at] IS NULL"
+        rows = self._conn.execute(
+            f"SELECT * FROM [{table}] {where} ORDER BY source_key"
+        ).fetchall()
+        return [dict(row) for row in rows]

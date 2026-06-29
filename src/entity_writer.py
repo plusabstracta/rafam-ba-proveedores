@@ -101,11 +101,16 @@ class EntityWriter:
         Returns:
             Dict parseado de la respuesta, o None si no se enviÃ³ nada.
         """
-        result = self._mapper.build_payload(
-            columns, rows,
-            dry_run=dry_run,
-            payload_options=payload_options,
-        )
+        import inspect
+        sig = inspect.signature(self._mapper.build_payload)
+        kwargs = {
+            "dry_run": dry_run,
+            "payload_options": payload_options,
+        }
+        if "link_store" in sig.parameters:
+            kwargs["link_store"] = link_store
+
+        result = self._mapper.build_payload(columns, rows, **kwargs)
 
         # Los mappers devuelven (payload, context) â el context varÃ­a por entidad.
         if not isinstance(result, tuple) or len(result) < 2:

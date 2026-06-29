@@ -20,6 +20,7 @@ LIMIT ?=
 	migrate-retenciones migrate-retenciones-dry \
 	migrate-all migrate-all-dry \
 	reset-all reset-proveedores reset-oc_items reset-solic_gastos reset-orden_pago reset-retenciones \
+	check-integrity-dry check-integrity install-cron show-cron uninstall-cron \
 	test coverage
 
 help:
@@ -50,6 +51,11 @@ help:
 	@echo "  make reset-orden_pago   Resetea checkpoint de orden_pago"
 	@echo "  make reset-retenciones  Resetea checkpoint de retenciones"
 	@echo "  make reset-all          Resetea todos los checkpoints"
+	@echo "  make check-integrity-dry  Ejecuta verificador de integridad en modo lectura (dry-run)"
+	@echo "  make check-integrity      Aplica correcciones de integridad (anulaciones + reenvio de proveedores)"
+	@echo "  make install-cron         Instala/actualiza los cron jobs basados en cron.conf con flock"
+	@echo "  make show-cron            Muestra los cron jobs activos de este proyecto"
+	@echo "  make uninstall-cron       Elimina todos los cron jobs de este proyecto en el crontab"
 	@echo "  make test               Corre tests"
 	@echo "  make coverage           Corre tests y exige 80%+ de cobertura en src/"
 	@echo ""
@@ -177,3 +183,21 @@ test:
 coverage:
 	$(COVERAGE) run --source=src -m pytest -q
 	$(COVERAGE) report --fail-under=80 -m
+
+# ─── Integridad y Cron ────────────────────────────────────────────────────────
+
+check-integrity-dry:
+	$(PY) scripts/check_integrity.py --dry-run
+
+check-integrity:
+	$(PY) scripts/check_integrity.py --apply
+
+install-cron:
+	bash scripts/install_crons.sh
+
+show-cron:
+	@crontab -l 2>/dev/null | grep "$(shell pwd)" || echo "Sin cron jobs instalados para este proyecto."
+
+uninstall-cron:
+	@( crontab -l 2>/dev/null | grep -v "$(shell pwd)" ) | crontab - && echo "Cron jobs de este proyecto eliminados."
+

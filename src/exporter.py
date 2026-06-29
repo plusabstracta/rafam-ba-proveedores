@@ -137,6 +137,14 @@ class MigratorExporter(BaseExporter):
         self._timeout = self._http._timeout
         self._verify_ssl = self._http._verify_ssl
 
+        # URL del resolvedor de mercaderías para compatibilidad retroactiva con tests
+        self._resolver_endpoint = _resolve_endpoint(
+            "PAXAPOS_RAFAM_RESOLVER_PATH", "rafam/migracion/resolver_mercaderia.json"
+        )
+        self._resolver_url = _build_migrator_url_impl(
+            self._base_url, self._tenant, self._resolver_endpoint
+        )
+
         self._lookup_payload = fetch_migrator_lookups([
             "unidades_de_medida",
             "tipos_factura",
