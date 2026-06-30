@@ -489,13 +489,39 @@ class MigratorExporter(BaseExporter):
 
         if fully_failed:
             details = ", ".join(fully_failed)
-            raise RuntimeError(
-                f"Migrator devolvio errores para todas las filas de una seccion: {details}"
-            )
+            err_list = []
+            if isinstance(errors, list):
+                for err in errors:
+                    msg = err.get("message") or "Error desconocido"
+                    val_errs = err.get("validationErrors")
+                    if val_errs:
+                        msg += f" -> **DETALLE DE VALIDACIÓN: {json.dumps(val_errs, ensure_ascii=False)}**"
+                    err_list.append(f"[{err.get('section', 'unknown').upper()}] {msg}")
+            
+            err_msg = f"Migrator devolvió errores para todas las filas de una sección: {details}"
+            if err_list:
+                err_msg += "\n\n >>> RESPUESTA DE ERROR DE PAXAPOS >>>\n"
+                err_msg += "\n".join(f"  * {e}" for e in err_list)
+                err_msg += "\n <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<"
+            raise RuntimeError(err_msg)
 
         if has_errors and strict:
             details = ", ".join(failed) if failed else "ver errors en respuesta"
-            raise RuntimeError(f"Migrator devolvio errores parciales: {details}")
+            err_list = []
+            if isinstance(errors, list):
+                for err in errors:
+                    msg = err.get("message") or "Error desconocido"
+                    val_errs = err.get("validationErrors")
+                    if val_errs:
+                        msg += f" -> **DETALLE DE VALIDACIÓN: {json.dumps(val_errs, ensure_ascii=False)}**"
+                    err_list.append(f"[{err.get('section', 'unknown').upper()}] {msg}")
+            
+            err_msg = f"Migrator devolvió errores parciales: {details}"
+            if err_list:
+                err_msg += "\n\n >>> RESPUESTA DE ERROR DE PAXAPOS >>>\n"
+                err_msg += "\n".join(f"  * {e}" for e in err_list)
+                err_msg += "\n <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<"
+            raise RuntimeError(err_msg)
 
     def close(self) -> None:
         self._link_store.close()

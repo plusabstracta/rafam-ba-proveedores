@@ -34,18 +34,74 @@ import argparse
 import logging
 import os
 import sys
+import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+# Logging a consola — siempre activo independientemente del archivo de log
+_CONSOLE_FORMAT = "%(asctime)s [%(levelname)s] %(message)s"
+_CONSOLE_DATE_FORMAT = "%H:%M:%S"
+
+
+def setup_console_logging(level: int = logging.INFO) -> None:
+    """Agrega un StreamHandler a stderr para ver los logs en tiempo real en consola."""
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setLevel(level)
+    handler.setFormatter(logging.Formatter(_CONSOLE_FORMAT, datefmt=_CONSOLE_DATE_FORMAT))
+    logging.getLogger().addHandler(handler)
+
+
+def format_exception_context(exc: Exception, entity: str, source_key: str | None, context: str) -> str:
+    """Formatea detalladamente una excepción con su traceback completo, archivo, línea y contexto."""
+    tb_lines = traceback.format_exception(type(exc), exc, exc.__traceback__)
+    tb_text = "".join(tb_lines)
+
+    # Extraer la última línea de origen del traceback para referencia rápida
+    origin_file = "Desconocido"
+    origin_line = "Desconocido"
+    origin_func = "Desconocido"
+
+    tb = exc.__traceback__
+    if tb:
+        # Caminar hasta el último frame
+        while tb.tb_next:
+            tb = tb.tb_next
+        frame = tb.tb_frame
+        code = frame.f_code
+        origin_file = Path(code.co_filename).name
+        origin_line = tb.tb_lineno
+        origin_func = code.co_name
+
+    res = (
+        f"======================================================================\n"
+        f"ERROR DETECTADO EN ENTIDAD: '{entity}' (source_key: '{source_key}')\n"
+        f"Contexto de la operación: {context}\n"
+        f"Ubicación del error: Archivo: {origin_file}, Línea: {origin_line}, Función: {origin_func}\n"
+        f"Clase de excepción: {type(exc).__name__}\n"
+        f"Mensaje de error: {exc}\n"
+        f"----------------------------------------------------------------------\n"
+        f"Traceback completo:\n"
+        f"{tb_text}"
+        f"======================================================================"
+    )
+    return res
+
 
 # Asegurar que src/ esté en el path cuando se llama directamente desde scripts/
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
+# Cambiar al directorio raíz del proyecto para que todas las rutas relativas
+# (state/checkpoint.db, .env, logs/, etc.) se resuelvan correctamente
+# sin importar desde qué directorio se invoque el script.
+os.chdir(REPO_ROOT)
+
 from src.config import ENTITY_CONFIGS  # noqa: E402
 from src.entity_link_store import EntityLinkStore  # noqa: E402
 from src.logging_config import setup_file_logging  # noqa: E402
 from src.mappers.proveedores import compute_content_hash  # noqa: E402
+from src.notifier import notify_integrity_result  # noqa: E402
 from src.source_repository import SourceRepository  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -83,9 +139,18 @@ def check_anulaciones(
     """Verifica anulaciones para una entidad. Devuelve el resultado."""
     result = EntityResult(entity=entity)
 
-    links = link_store.iter_all_links(entity, include_deleted=False)
-    # Solo verificar links que ya tienen remote_id (fueron enviados a Paxapos)
-    links = [lk for lk in links if lk.get("remote_id")]
+    try:
+        links = link_store.iter_all_links(entity, include_deleted=False)
+        # Solo verificar links que ya tienen remote_id (fueron enviados a Paxapos)
+        links = [lk for lk in links if lk.get("remote_id")]
+    except Exception as exc:
+        msg = format_exception_context(
+            exc, entity, None, "Obteniendo enlaces locales (links) de la base de datos de checkpoints"
+        )
+        logger.error("\n" + msg)
+        result.errores += 1
+        result.warnings.append(msg)
+        return result
 
     for link in links:
         source_key = link["source_key"]
@@ -95,33 +160,40 @@ def check_anulaciones(
         try:
             info = repo.fetch_estado_by_key(entity, source_key)
         except Exception as exc:
-            msg = f"{entity} key={source_key}: error al consultar RAFAM: {exc}"
-            logger.error(msg)
+            msg = format_exception_context(
+                exc, entity, source_key, "Consultando estado de anulación en RAFAM"
+            )
+            logger.error("\n" + msg)
             result.errores += 1
-            result.warnings.append(f"ERROR: {msg}")
+            result.warnings.append(msg)
             continue
 
         if info is None:
             # Registro eliminado físicamente de RAFAM (muy raro)
             msg = (
-                f"{entity} key={source_key} remote_id={remote_id}: "
-                f"ELIMINADO FÍSICAMENTE de RAFAM (no existe en tabla)"
+                f"Entidad '{entity}' clave '{source_key}' (remote_id: {remote_id}): "
+                f"ELIMINADO FÍSICAMENTE de RAFAM (no existe en la tabla de origen)"
             )
-            logger.error(msg)
+            logger.warning(msg)
             result.fisicamente_eliminados += 1
             result.warnings.append(f"FÍSICO: {msg}")
             if apply:
                 try:
                     link_store.mark_deleted(entity, source_key)
                 except Exception as exc2:
-                    logger.error("mark_deleted falló para %s key=%s: %s", entity, source_key, exc2)
+                    msg_err = format_exception_context(
+                        exc2, entity, source_key, "Marcando registro como eliminado físicamente en base de datos local"
+                    )
+                    logger.error("\n" + msg_err)
+                    result.errores += 1
+                    result.warnings.append(msg_err)
             continue
 
         if info["anulado"]:
             msg = (
-                f"{entity} key={source_key} remote_id={remote_id}: "
-                f"ANULADO en RAFAM (estado={info['estado']!r}"
-                + (f", fech_anul={info['fech_anul']!r}" if info.get("fech_anul") else "")
+                f"Entidad '{entity}' clave '{source_key}' (remote_id: {remote_id}): "
+                f"ANULADO en RAFAM (estado: {info['estado']!r}"
+                + (f", fecha_anulación: {info['fech_anul']!r}" if info.get("fech_anul") else "")
                 + ")"
             )
             logger.warning(msg)
@@ -130,10 +202,14 @@ def check_anulaciones(
             if apply:
                 try:
                     link_store.mark_deleted(entity, source_key)
-                    logger.info("mark_deleted OK: %s key=%s", entity, source_key)
+                    logger.info("Registro marcado como anulado localmente: %s key=%s", entity, source_key)
                 except Exception as exc2:
-                    logger.error("mark_deleted falló para %s key=%s: %s", entity, source_key, exc2)
+                    msg_err = format_exception_context(
+                        exc2, entity, source_key, "Marcando registro como anulado en base de datos local"
+                    )
+                    logger.error("\n" + msg_err)
                     result.errores += 1
+                    result.warnings.append(msg_err)
         else:
             result.sin_cambios += 1
 
@@ -152,8 +228,17 @@ def check_content_hash_proveedores(
 
     result = EntityResult(entity="proveedores")
 
-    links = link_store.iter_all_links("proveedores", include_deleted=False)
-    links = [lk for lk in links if lk.get("remote_id")]
+    try:
+        links = link_store.iter_all_links("proveedores", include_deleted=False)
+        links = [lk for lk in links if lk.get("remote_id")]
+    except Exception as exc:
+        msg = format_exception_context(
+            exc, "proveedores", None, "Obteniendo enlaces locales de proveedores de la base de datos de checkpoints"
+        )
+        logger.error("\n" + msg)
+        result.errores += 1
+        result.warnings.append(msg)
+        return result
 
     for link in links:
         source_key = link["source_key"]
@@ -162,20 +247,24 @@ def check_content_hash_proveedores(
 
         try:
             cod_prov = int(source_key)
-        except (ValueError, TypeError):
-            msg = f"proveedores key={source_key}: source_key no es entero válido"
-            logger.error(msg)
+        except (ValueError, TypeError) as exc:
+            msg = format_exception_context(
+                exc, "proveedores", source_key, "Conversión de clave de proveedor (source_key) a entero"
+            )
+            logger.error("\n" + msg)
             result.errores += 1
-            result.warnings.append(f"ERROR: {msg}")
+            result.warnings.append(msg)
             continue
 
         try:
             raw = repo.fetch_proveedor_row(cod_prov)
         except Exception as exc:
-            msg = f"proveedores key={source_key}: error al consultar RAFAM: {exc}"
-            logger.error(msg)
+            msg = format_exception_context(
+                exc, "proveedores", source_key, "Consultando fila completa del proveedor en RAFAM para control de hash"
+            )
+            logger.error("\n" + msg)
             result.errores += 1
-            result.warnings.append(f"ERROR: {msg}")
+            result.warnings.append(msg)
             continue
 
         if raw is None:
@@ -209,10 +298,12 @@ def check_content_hash_proveedores(
                 result.actualizados += 1
                 logger.info("Proveedor COD_PROV=%s reenviado y hash actualizado", source_key)
             except Exception as exc:
-                msg2 = f"proveedores COD_PROV={source_key}: error al reenviar: {exc}"
-                logger.error(msg2)
+                msg2 = format_exception_context(
+                    exc, "proveedores", source_key, f"Reenviando proveedor modificado a Paxapos (cuit={raw.get('CUIT')}, fantasia={raw.get('FANTASIA')})"
+                )
+                logger.error("\n" + msg2)
                 result.errores += 1
-                result.warnings.append(f"ERROR: {msg2}")
+                result.warnings.append(msg2)
         else:
             # dry-run: contar como "actualizados pendientes"
             result.actualizados += 1
@@ -322,6 +413,12 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Procesa solo la entidad indicada (default: todas).",
     )
+    parser.add_argument(
+        "--no-notify",
+        action="store_true",
+        default=False,
+        help="Suprime el envío de notificaciones por email para esta ejecución.",
+    )
     return parser.parse_args()
 
 
@@ -329,6 +426,12 @@ def main() -> int:
     args = parse_args()
     apply = args.apply
     dry_run = not apply
+
+    # Configurar logging: consola primero, luego archivo
+    log_level_name = os.getenv("LOG_LEVEL", "INFO").upper()
+    log_level = getattr(logging, log_level_name, logging.INFO)
+    logging.root.setLevel(log_level)   # nivel raíz sin agregar handlers
+    setup_console_logging(log_level)
 
     args.command = "check_integrity"
     setup_file_logging(args)
@@ -361,19 +464,21 @@ def main() -> int:
 
     # ── Paso 1: Anulaciones (todas las entidades) ─────────────────────────
     for entity in entities:
-        logger.info("Verificando anulaciones: %s ...", entity)
         r = check_anulaciones(entity, link_store, repo, apply=apply)
-        # Para proveedores, las anulaciones ya se reportan aquí;
-        # los cambios de contenido se reportan en el paso 2.
         results.append(r)
-        logger.info(
-            "%s: %d verificados, %d anulados, %d eliminados físicos, %d errores",
-            entity, r.verificados, r.anulados, r.fisicamente_eliminados, r.errores,
-        )
+
+        # Log ultra-corto y conciso si no hay anomalías ni errores
+        if r.anulados == 0 and r.fisicamente_eliminados == 0 and r.errores == 0:
+            logger.info("Verificando anulaciones para %s... OK", entity)
+        else:
+            # Si hay anomalías o errores, dar un resumen explícito de anomalías
+            logger.info(
+                "Verificando anulaciones para %s... ANOMALÍAS/ERRORES DETECTADOS (Verificados: %d, Anulados: %d, Físicos: %d, Errores: %d)",
+                entity, r.verificados, r.anulados, r.fisicamente_eliminados, r.errores
+            )
 
     # ── Paso 2: Content hash — solo proveedores ───────────────────────────
     if "proveedores" in entities:
-        logger.info("Verificando content hash: proveedores ...")
         r_hash = check_content_hash_proveedores(
             link_store, repo, apply=apply, exporter=exporter
         )
@@ -387,15 +492,57 @@ def main() -> int:
                 # deleted_at del paso 1 (se verifican los activos en ambos pasos)
                 break
 
-        logger.info(
-            "proveedores hash: %d verificados, %d actualizados, %d errores",
-            r_hash.verificados, r_hash.actualizados, r_hash.errores,
-        )
+        # Log ultra-corto y conciso si no hay cambios ni errores
+        if r_hash.actualizados == 0 and r_hash.errores == 0:
+            logger.info("Verificando cambios de contenido para proveedores... OK")
+        else:
+            logger.info(
+                "Verificando cambios de contenido para proveedores... MODIFICACIONES/ERRORES DETECTADOS (Verificados: %d, Actualizados: %d, Errores: %d)",
+                r_hash.verificados, r_hash.actualizados, r_hash.errores
+            )
 
     print_summary(results, dry_run=dry_run)
 
-    # Código de salida: 0 si todo OK o solo warnings, 1 si hay errores
+    # ── Notificación por email ────────────────────────────────────────────
+    total_actualizados = sum(r.actualizados for r in results)
+    total_anulados = sum(r.anulados for r in results)
     total_errores = sum(r.errores for r in results)
+
+    # Solo notificar por mail si hay errores reales (total_errores > 0)
+    if total_errores > 0 and not getattr(args, "no_notify", False):
+        # Construir resumen tabular como texto para el cuerpo del email
+        summary_lines: list[str] = []
+        header = f"  {'Entidad':<16} {'Verif':>7} {'OK':>7} {'Actualiz':>9} {'Anulados':>9} {'Físicos':>8} {'Errores':>8}"
+        summary_lines.append(header)
+        summary_lines.append("  " + "─" * (len(header) - 2))
+        for r in results:
+            act_str = str(r.actualizados) if r.entity in ENTITIES_CONTENT_HASH else "—"
+            summary_lines.append(
+                f"  {r.entity:<16} {r.verificados:>7} {r.sin_cambios:>7} "
+                f"{act_str:>9} {r.anulados:>9} {r.fisicamente_eliminados:>8} {r.errores:>8}"
+            )
+
+        all_warnings: list[str] = []
+        for r in results:
+            all_warnings.extend(r.warnings)
+
+        sent = notify_integrity_result(
+            summary_lines=summary_lines,
+            warnings=all_warnings,
+            dry_run=dry_run,
+            entity=args.entity,
+            total_actualizados=total_actualizados,
+            total_anulados=total_anulados,
+            total_errores=total_errores,
+        )
+        if sent:
+            logger.info("Notificación por email enviada exitosamente")
+    elif total_errores == 0:
+        logger.debug("Notificaciones omitidas: no se registraron errores (total_errores=0)")
+    else:
+        logger.debug("Notificaciones suprimidas por --no-notify")
+
+    # Código de salida: 0 si todo OK o solo warnings, 1 si hay errores
     return 1 if total_errores > 0 else 0
 
 
