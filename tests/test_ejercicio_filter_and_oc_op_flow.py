@@ -168,9 +168,10 @@ def engine_with_data():
 
         # ── 4 OPs ejercicio 2026 (vinculadas a las 4 OCs) ──
         for nro_oc in range(1, 5):
+            estado_op = "N" if nro_oc == 4 else "C"
             conn.execute(text(f"""
                 INSERT INTO ORDEN_PAGO VALUES
-                (2026, {500 + nro_oc}, 100, 'C', 'S', '2026-04-0{nro_oc}', {10000 * nro_oc}, {200 + nro_oc}, 'Pago OC {nro_oc}')
+                (2026, {500 + nro_oc}, 100, '{estado_op}', 'S', '2026-04-0{nro_oc}', {10000 * nro_oc}, {200 + nro_oc}, 'Pago OC {nro_oc}')
             """))
             # ORDEN_PAGO_IMPUT: bridge real OP ↔ CC
             conn.execute(text(f"""
@@ -464,6 +465,68 @@ class TestEjercicioMinFilter:
         oc_keys = {(r[0], r[1], r[2]) for r in rows}
         assert (2025, 1, 1) in oc_keys
         assert (2026, 1, 1) in oc_keys
+
+    def test_orden_pago_aplica_ejercicio_min_pero_incluye_confirmada_reciente(self, engine_with_data):
+        cfg = EntityConfig(
+            name="orden_pago",
+            table_name="ORDEN_PAGO",
+            ts_field="FECH_CONFIRM",
+            pending_state_field="ESTADO_OP",
+            pending_state_value="N",
+            pending_reprocess_days=30,
+            ejercicio_min=2026,
+        )
+        cp = Checkpoint(entity="orden_pago")
+
+        with engine_with_data.connect() as conn:
+            conn.execute(text("""
+                INSERT INTO ORDEN_PAGO VALUES
+                (2025, 888, 100, 'C', 'S', '2026-01-15 00:00:00', 15000, 100, 'Pago viejo confirmado en 2026')
+            """))
+            conn.execute(text("""
+                INSERT INTO ORDEN_PAGO_IMPUT VALUES
+                (2025, 888, 900, 'FA', 'CC-2025-1', 100)
+            """))
+            conn.commit()
+
+            repo = SourceRepository(conn)
+            with patch.dict("src.config.ENTITY_CONFIGS", {"orden_pago": cfg}):
+                stmt = repo.build_statement("orden_pago", cp)
+                rows = conn.execute(stmt).fetchall()
+
+        op_keys = {(r[0], r[1]) for r in rows}
+        assert (2025, 888) in op_keys, "La OP de 2025 confirmada en 2026 debe ser incluida"
+        assert (2026, 501) in op_keys
+        assert (2025, 999) not in op_keys, "La OP de 2025 confirmada en 2025 no debe ser incluida"
+
+    def test_oc_items_aplica_ejercicio_min_pero_incluye_confirmada_reciente(self, engine_with_data):
+        cfg = EntityConfig(
+            name="oc_items",
+            table_name="OC_ITEMS",
+            full_load=True,
+            ejercicio_min=2026,
+        )
+        cp = Checkpoint(entity="oc_items")
+
+        with engine_with_data.connect() as conn:
+            conn.execute(text("""
+                INSERT INTO ORDEN_COMPRA VALUES
+                (2025, 1, 88, 100, '2025-06-01', '2026-01-15 00:00:00', 'OC vieja confirmada en 2026', 'R', 50000, NULL)
+            """))
+            conn.execute(text("""
+                INSERT INTO OC_ITEMS VALUES
+                (2025, 1, 88, 1, 'Item viejo confirmado en 2026', 10, 5000, 1, 100)
+            """))
+            conn.commit()
+
+            repo = SourceRepository(conn)
+            with patch.dict("src.config.ENTITY_CONFIGS", {"oc_items": cfg}):
+                stmt = repo.build_statement("oc_items", cp)
+                rows = conn.execute(stmt).fetchall()
+
+        oc_keys = {(r[0], r[1], r[2]) for r in rows}
+        assert (2025, 1, 88) in oc_keys, "La OC de 2025 confirmada en 2026 debe ser incluida"
+        assert (2025, 1, 1) not in oc_keys, "La OC de 2025 no confirmada en 2026 no debe ser incluida"
 
 
 # ─── Tests: Flujo OC → OP ────────────────────────────────────────────────────

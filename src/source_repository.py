@@ -338,6 +338,7 @@ class SourceRepository:
                 "uni_compra": oc_items.c.UNI_COMPRA,
                 "nro_oc": oc_items.c.NRO_OC,
             },
+            fech_confirm_col=orden_compra.c.FECH_CONFIRM,
         )
         stmt = self._apply_incremental_filters(
             stmt,
@@ -790,11 +791,24 @@ class SourceRepository:
         stmt: Select,
         cfg: EntityConfig,
         key_cols: dict[str, object],
+        fech_confirm_col=None,
     ) -> Select:
         if cfg.ejercicio_min is None:
             return stmt
 
-        base_filter = key_cols["ejercicio"] >= cfg.ejercicio_min
+        if fech_confirm_col is not None:
+            cutoff = (
+                f"{cfg.ejercicio_min:04d}-01-01"
+                if self._conn.dialect.name == "sqlite"
+                else datetime(cfg.ejercicio_min, 1, 1)
+            )
+            base_filter = or_(
+                key_cols["ejercicio"] >= cfg.ejercicio_min,
+                fech_confirm_col >= cutoff,
+            )
+        else:
+            base_filter = key_cols["ejercicio"] >= cfg.ejercicio_min
+
         required_ocs = self._build_op_required_oc_subquery(cfg.ejercicio_min)
         if required_ocs is None:
             return stmt.where(base_filter)
@@ -883,12 +897,27 @@ class SourceRepository:
         extra_filters: list | None = None,
         apply_ejercicio_min: bool = True,
     ) -> Select:
-        # Apply ejercicio_min only for entities whose config explicitly enables it.
-        # It is independent from full_load/fresh checkpoint behavior.
         if apply_ejercicio_min and cfg.ejercicio_min is not None:
             ej_col = self._safe_column(table, "EJERCICIO")
             if ej_col is not None:
-                stmt = stmt.where(ej_col >= cfg.ejercicio_min)
+                if cfg.name in ("orden_pago", "retenciones"):
+                    fech_confirm_col = self._safe_column(table, "FECH_CONFIRM")
+                    if fech_confirm_col is not None:
+                        cutoff = (
+                            f"{cfg.ejercicio_min:04d}-01-01"
+                            if self._conn.dialect.name == "sqlite"
+                            else datetime(cfg.ejercicio_min, 1, 1)
+                        )
+                        stmt = stmt.where(
+                            or_(
+                                ej_col >= cfg.ejercicio_min,
+                                fech_confirm_col >= cutoff,
+                            )
+                        )
+                    else:
+                        stmt = stmt.where(ej_col >= cfg.ejercicio_min)
+                else:
+                    stmt = stmt.where(ej_col >= cfg.ejercicio_min)
 
         if cfg.full_load or cp.is_fresh or (cp.last_id is None and cp.last_ts is None):
             return stmt
