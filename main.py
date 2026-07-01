@@ -27,6 +27,7 @@ from src.checkpoint_store import CheckpointStore
 from src.config import ENTITY_CONFIGS
 from src.db import create_source_engine
 from src.entity_link_store import EntityLinkStore
+from src.error_formatting import describe_exception, format_exception_context
 from src.exporter import BaseExporter, build_exporter, fetch_migrator_lookups, fetch_migrator_spec
 from src.logging_config import setup_file_logging
 from src.retry_store import RetryStore
@@ -187,6 +188,7 @@ def _sync_entity(
     batches_ok = 0
     batch_times = []
     last_batch_error: str | None = None
+    last_batch_error_detail: str | None = None
     query_duration = 0.0
     total = 0
 
@@ -201,6 +203,11 @@ def _sync_entity(
         "batch_times": [],
         "success": False,
         "error_msg": None,
+        # Detalle de diagnóstico para el reporte por email (soporte/dev).
+        "error_type": None,        # clase de la excepción (ej: RuntimeError)
+        "error_location": None,    # archivo, línea y función de origen
+        "error_trace": None,       # traceback completo + contexto
+        "migrator_error": None,    # mensaje crudo devuelto por el migrator
     }
 
     try:
@@ -218,7 +225,7 @@ def _sync_entity(
         last_ts = None
 
         def process_batch(batch: list[tuple]) -> None:
-            nonlocal last_id, last_ts, total, batch_count, failed_batches, last_batch_error, batches_ok
+            nonlocal last_id, last_ts, total, batch_count, failed_batches, last_batch_error, last_batch_error_detail, batches_ok
             bid, bts = engine.extract_cursor_values(columns, batch, entity)
             if bid is not None:
                 last_id = max(last_id, bid) if last_id is not None else bid
@@ -237,6 +244,17 @@ def _sync_entity(
                 batch_times.append(time.monotonic() - t_batch_start)
                 failed_batches += 1
                 last_batch_error = str(exc)
+                # Capturar contexto detallado (clase, archivo/línea, traceback,
+                # y respuesta cruda del migrator) para el reporte por email.
+                last_batch_error_detail = format_exception_context(
+                    exc, entity, None,
+                    f"exporter.write_batch — batch #{batch_count + 1} ({len(batch)} filas)",
+                )
+                _info = describe_exception(exc)
+                metrics["error_type"] = _info["error_type"]
+                metrics["error_location"] = _info["error_location"]
+                metrics["error_trace"] = last_batch_error_detail
+                metrics["migrator_error"] = _info["error_message"]
                 logger.error(
                     "[%-11s] %s — batch #%d (%d filas) FALLO: %s. Continuando con el siguiente batch.",
                     mode, entity, batch_count + 1, len(batch), exc,
@@ -313,8 +331,15 @@ def _sync_entity(
         if not dry_run:
             engine.mark_error(entity, str(exc))
         logger.error("[%-11s] %s — ERROR: %s", mode, entity, exc, exc_info=True)
+        _info = describe_exception(exc)
         metrics["success"] = False
         metrics["error_msg"] = str(exc)
+        metrics["error_type"] = _info["error_type"]
+        metrics["error_location"] = _info["error_location"]
+        metrics["error_trace"] = format_exception_context(
+            exc, entity, None, "sincronización de entidad (nivel superior)",
+        )
+        metrics["migrator_error"] = _info["error_message"]
         metrics["duration_secs"] = time.monotonic() - t_start
         return False, str(exc), metrics
 

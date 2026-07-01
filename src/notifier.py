@@ -230,204 +230,180 @@ def notify_sync_error(
     return send_notification(subject, body)
 
 
+def _retry_total(value) -> int:
+    """Normaliza el conteo de reintentos a un entero.
+
+    ``retry_store.counts_by_entity`` devuelve ``{entity: {status: count}}``,
+    pero versiones/orígenes antiguos podían usar ``{entity: count}``. Se
+    soportan ambas formas.
+    """
+    if isinstance(value, dict):
+        return sum(v for v in value.values() if isinstance(v, int))
+    if isinstance(value, int):
+        return value
+    return 0
+
+
+def _parse_hhmmss(value: str) -> float:
+    """Convierte 'HH:MM:SS' (o 'MM:SS' / 'SS') a segundos. 0.0 si no parsea."""
+    try:
+        parts = [int(p) for p in str(value).split(":")]
+    except (ValueError, AttributeError):
+        return 0.0
+    if len(parts) == 3:
+        h, m, s = parts
+    elif len(parts) == 2:
+        h, m, s = 0, parts[0], parts[1]
+    elif len(parts) == 1:
+        h, m, s = 0, 0, parts[0]
+    else:
+        return 0.0
+    return h * 3600 + m * 60 + s
+
+
+def _emit_error_block(lines: list[str], metrics: dict, indent: str = "  ") -> None:
+    """Agrega al reporte el bloque de diagnóstico de un fallo de entidad.
+
+    Incluye motivo, clase de excepción, ubicación (archivo/línea/función),
+    respuesta cruda del migrator y traceback completo, cada uno multilinea.
+    """
+    lines.append(f"{indent}DIAGNÓSTICO DE FALLO:")
+    if metrics.get("error_msg"):
+        lines.append(f"{indent}  Motivo          : {metrics['error_msg']}")
+    if metrics.get("error_type"):
+        lines.append(f"{indent}  Clase excepción : {metrics['error_type']}")
+    if metrics.get("error_location"):
+        lines.append(f"{indent}  Ubicación       : {metrics['error_location']}")
+    if metrics.get("migrator_error"):
+        lines.append(f"{indent}  Error del migrator:")
+        for l in str(metrics["migrator_error"]).splitlines():
+            lines.append(f"{indent}    {l}")
+    if metrics.get("error_trace"):
+        lines.append(f"{indent}  Traceback / contexto completo:")
+        for l in str(metrics["error_trace"]).splitlines():
+            lines.append(f"{indent}    {l}")
+
+
 def notify_run_report(
     summary_data: dict,
     entity_metrics: list[dict],
     *,
     dry_run: bool = False,
 ) -> bool:
-    """Envía un reporte resumen en formato HTML al finalizar una corrida (run)."""
+    """Envía un reporte de diagnóstico DETALLADO en texto plano al finalizar una corrida.
+
+    Pensado para el equipo de soporte/desarrollo: prioriza información útil
+    (qué falló, por qué, cómo, archivo, hora, tiempos y velocidad en minutos,
+    error devuelto por el migrator y traceback) por sobre la estética.
+    """
     if not _is_enabled() or not _env("NOTIFY_RUN_REPORT", "false").lower() == "true":
         return False
 
     mode_label = "DRY-RUN" if dry_run else "APPLY"
-    status_icon = "✅" if summary_data["success"] else "❌"
-    status_label = "OK" if summary_data["success"] else "CON ERRORES"
-    subject = f"{status_icon} Reporte Sincronización RAFAM [{mode_label}] — {status_label}"
+    success = summary_data.get("success", False)
+    status_label = "OK" if success else "CON ERRORES"
+    subject = f"Reporte Sincronización RAFAM [{mode_label}] — {status_label}"
 
-    # Construir filas de la tabla de entidades
-    table_rows = []
+    SEP = "=" * 70
+    SUB = "-" * 70
+
+    # Tiempo total de la corrida (para métricas en minutos)
+    duration_fmt = summary_data.get("duration_formatted", "00:00:00")
+    run_secs = _parse_hhmmss(duration_fmt)
+    run_mins = run_secs / 60.0
+
+    # Agregados globales
+    total_entities = len(entity_metrics)
+    ok_entities = sum(1 for m in entity_metrics if m.get("success"))
+    fail_entities = total_entities - ok_entities
+    total_records = sum(m.get("records_ok", 0) for m in entity_metrics)
+    total_batches_ok = sum(m.get("batches_ok", 0) for m in entity_metrics)
+    total_batches_failed = sum(m.get("batches_failed", 0) for m in entity_metrics)
+    global_speed_min = (total_records / run_mins) if run_mins > 0 else 0.0
+    global_speed_sec = (total_records / run_secs) if run_secs > 0 else 0.0
+
+    lines: list[str] = []
+    lines.append(SEP)
+    lines.append("REPORTE DE SINCRONIZACIÓN RAFAM → PAXAPOS")
+    lines.append(SEP)
+    lines.append(f"Estado global : {status_label}")
+    lines.append(f"Modo          : {mode_label}")
+    lines.append(f"Servidor      : {summary_data.get('hostname', 'Desconocido')}")
+    lines.append(f"Inicio        : {summary_data.get('start_time', '—')}")
+    lines.append(f"Fin           : {summary_data.get('end_time', '—')}")
+    lines.append(f"Duración total: {duration_fmt}   ({run_mins:.2f} min / {run_secs:.0f} s)")
+    lines.append("")
+
+    lines.append("RESUMEN GLOBAL")
+    lines.append(SUB)
+    lines.append(f"  • Entidades procesadas   : {total_entities}  (OK: {ok_entities}, con error: {fail_entities})")
+    lines.append(f"  • Registros migrados     : {total_records:,}")
+    lines.append(f"  • Batches OK / con error : {total_batches_ok} / {total_batches_failed}")
+    lines.append(f"  • Velocidad global       : {global_speed_min:,.1f} reg/min   ({global_speed_sec:,.1f} reg/s)")
+    lines.append("")
+
+    # Error general de la corrida
+    if not success and summary_data.get("error_msg"):
+        lines.append("ERROR GENERAL DE LA CORRIDA")
+        lines.append(SUB)
+        for l in str(summary_data["error_msg"]).splitlines():
+            lines.append(f"  {l}")
+        lines.append("")
+
+    # Detalle por entidad
+    lines.append("DETALLE POR ENTIDAD")
+    lines.append(SEP)
     for m in entity_metrics:
-        # Calcular velocidad de carga (registros / segundo)
-        duration = m["duration_secs"]
-        speed = m["records_ok"] / duration if duration > 0 else 0
-        speed_str = f"{speed:.1f} reg/s" if speed > 0 else "—"
-        
-        status_badge_color = "#10b981" if m["success"] else "#ef4444"
-        status_badge_text = "OK" if m["success"] else "ERROR"
-        
-        mode_badge_color = "#3b82f6" if m["mode"] == "FULL LOAD" else "#6b7280"
+        ent = m.get("entity", "?")
+        ent_ok = m.get("success", False)
+        ent_status = "OK" if ent_ok else "ERROR"
+        duration = m.get("duration_secs", 0.0) or 0.0
+        dur_min = duration / 60.0
+        records = m.get("records_ok", 0)
+        speed_min = (records / dur_min) if dur_min > 0 else 0.0
+        speed_sec = (records / duration) if duration > 0 else 0.0
+        query_dur = m.get("query_duration_secs", 0.0) or 0.0
+        batch_times = m.get("batch_times") or []
+        if batch_times:
+            b_min = min(batch_times)
+            b_max = max(batch_times)
+            b_avg = sum(batch_times) / len(batch_times)
+        else:
+            b_min = b_max = b_avg = 0.0
 
-        table_rows.append(f"""
-        <tr style="border-bottom: 1px solid #e5e7eb;">
-            <td style="padding: 12px; font-weight: bold; color: #1f2937;">{m['entity']}</td>
-            <td style="padding: 12px;">
-                <span style="background-color: {mode_badge_color}; color: white; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: bold;">
-                    {m['mode']}
-                </span>
-            </td>
-            <td style="padding: 12px;">
-                <span style="background-color: {status_badge_color}; color: white; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: bold;">
-                    {status_badge_text}
-                </span>
-            </td>
-            <td style="padding: 12px; text-align: right;">{m['records_ok']:,}</td>
-            <td style="padding: 12px; text-align: right; color: #10b981;">{m['batches_ok']}</td>
-            <td style="padding: 12px; text-align: right; color: { '#ef4444' if m['batches_failed'] > 0 else '#6b7280' }; font-weight: { 'bold' if m['batches_failed'] > 0 else 'normal' };">{m['batches_failed']}</td>
-            <td style="padding: 12px; text-align: right;">{duration:.2f}s</td>
-            <td style="padding: 12px; text-align: right; font-weight: 500;">{speed_str}</td>
-        </tr>
-        """)
+        lines.append(f"[{ent}]  ({m.get('mode', '—')})  →  {ent_status}")
+        lines.append(f"  Registros migrados      : {records:,}")
+        lines.append(f"  Batches OK / con error  : {m.get('batches_ok', 0)} / {m.get('batches_failed', 0)}")
+        lines.append(f"  Duración                : {duration:.2f} s   ({dur_min:.2f} min)")
+        lines.append(f"  Query origen (SQL)      : {query_dur:.2f} s")
+        lines.append(f"  Velocidad               : {speed_min:,.1f} reg/min   ({speed_sec:,.1f} reg/s)")
+        lines.append(f"  Latencia batch (POST)   : min {b_min:.3f}s | prom {b_avg:.3f}s | max {b_max:.3f}s")
+        if not ent_ok:
+            lines.append(f"  {SUB}")
+            _emit_error_block(lines, m, indent="  ")
+        lines.append("")
 
-    # Construir filas de la tabla de reintentos
-    retry_rows = []
+    # Cola de reintentos
+    lines.append("COLA DE REINTENTOS (errores F1 pendientes)")
+    lines.append(SEP)
     start_retries = summary_data.get("retry_counts_start") or {}
     end_retries = summary_data.get("retry_counts_end") or {}
-
-    def _retry_total(value) -> int:
-        """Normaliza el conteo de reintentos a un entero.
-
-        ``retry_store.counts_by_entity`` devuelve ``{entity: {status: count}}``,
-        pero versiones/orígenes antiguos podían usar ``{entity: count}``. Se
-        soportan ambas formas.
-        """
-        if isinstance(value, dict):
-            return sum(v for v in value.values() if isinstance(v, int))
-        if isinstance(value, int):
-            return value
-        return 0
-
-    all_entities_set = set(start_retries.keys()) | set(end_retries.keys())
-    
-    if all_entities_set:
-        for ent in sorted(all_entities_set):
-            start_count = _retry_total(start_retries.get(ent, 0))
-            end_count = _retry_total(end_retries.get(ent, 0))
-            diff = end_count - start_count
-            diff_color = "#ef4444" if diff > 0 else ("#10b981" if diff < 0 else "#6b7280")
-            diff_sign = "+" if diff > 0 else ""
-            diff_str = f"({diff_sign}{diff})" if diff != 0 else "—"
-            
-            retry_rows.append(f"""
-            <tr style="border-bottom: 1px solid #e5e7eb;">
-                <td style="padding: 10px; color: #374151; font-weight: 500;">{ent}</td>
-                <td style="padding: 10px; text-align: right; color: #4b5563;">{start_count}</td>
-                <td style="padding: 10px; text-align: right; color: #1f2937; font-weight: bold;">{end_count}</td>
-                <td style="padding: 10px; text-align: right; color: {diff_color}; font-weight: 500;">{diff_str}</td>
-            </tr>
-            """)
+    all_ents = sorted(set(start_retries) | set(end_retries))
+    if all_ents:
+        for ent in all_ents:
+            s = _retry_total(start_retries.get(ent, 0))
+            e = _retry_total(end_retries.get(ent, 0))
+            diff = e - s
+            diff_str = f"{diff:+d}" if diff != 0 else "sin cambios"
+            lines.append(f"  • {ent:<24} inicio: {s:>4}  →  fin: {e:>4}   ({diff_str})")
     else:
-        retry_rows.append("""
-        <tr>
-            <td colspan="4" style="padding: 15px; text-align: center; color: #9ca3af; font-style: italic;">
-                Sin registros pendientes de reintento.
-            </td>
-        </tr>
-        """)
+        lines.append("  Sin registros pendientes de reintento.")
+    lines.append("")
+    lines.append(SEP)
+    lines.append("Email generado automáticamente por el pipeline de sincronización RAFAM (Madariaga).")
 
-    # Si hay errores generales, mostrarlos arriba
-    error_box = ""
-    if not summary_data["success"] and summary_data.get("error_msg"):
-        error_box = f"""
-        <div style="background-color: #fef2f2; border-left: 4px solid #ef4444; padding: 16px; margin-bottom: 24px; border-radius: 4px;">
-            <h3 style="margin-top: 0; color: #991b1b; font-size: 16px;">Detalle de error general:</h3>
-            <pre style="white-space: pre-wrap; font-family: monospace; font-size: 13px; color: #7f1d1d; margin: 0; background: #fff5f5; padding: 10px; border-radius: 4px; border: 1px solid #fee2e2;">{summary_data['error_msg']}</pre>
-        </div>
-        """
-
-    # Estructura del cuerpo HTML
-    html_body = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <meta charset="utf-8">
-        <title>Reporte Sincronización</title>
-    </head>
-    <body style="margin: 0; padding: 20px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; background-color: #f3f4f6; color: #374151;">
-        <div style="max-width: 800px; margin: 0 auto; background-color: #ffffff; border-radius: 12px; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06); overflow: hidden; border: 1px solid #e5e7eb;">
-            <!-- Header con Gradiente -->
-            <div style="background: linear-gradient(135deg, {'#059669, #10b981' if summary_data['success'] else '#dc2626, #f87171'}); padding: 30px 24px; color: #ffffff; text-align: center;">
-                <h1 style="margin: 0; font-size: 24px; font-weight: 800; letter-spacing: -0.025em; text-transform: uppercase;">
-                    RAFAM &rarr; Paxapos Sync
-                </h1>
-                <p style="margin: 5px 0 0 0; font-size: 15px; opacity: 0.9;">
-                    Reporte de Corrida en modo <b>{mode_label}</b>
-                </p>
-            </div>
-            
-            <div style="padding: 24px;">
-                {error_box}
-                
-                <!-- Metadata Grid -->
-                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; margin-bottom: 24px; background-color: #f9fafb; padding: 16px; border-radius: 8px; border: 1px solid #f3f4f6;">
-                    <div style="padding: 5px;">
-                        <span style="font-size: 11px; text-transform: uppercase; color: #6b7280; font-weight: bold; display: block; margin-bottom: 2px;">Servidor</span>
-                        <strong style="font-size: 14px; color: #1f2937;">{summary_data['hostname']}</strong>
-                    </div>
-                    <div style="padding: 5px;">
-                        <span style="font-size: 11px; text-transform: uppercase; color: #6b7280; font-weight: bold; display: block; margin-bottom: 2px;">Inicio</span>
-                        <strong style="font-size: 14px; color: #1f2937;">{summary_data['start_time']}</strong>
-                    </div>
-                    <div style="padding: 5px;">
-                        <span style="font-size: 11px; text-transform: uppercase; color: #6b7280; font-weight: bold; display: block; margin-bottom: 2px;">Fin</span>
-                        <strong style="font-size: 14px; color: #1f2937;">{summary_data['end_time']}</strong>
-                    </div>
-                    <div style="padding: 5px;">
-                        <span style="font-size: 11px; text-transform: uppercase; color: #6b7280; font-weight: bold; display: block; margin-bottom: 2px;">Duración Total</span>
-                        <strong style="font-size: 14px; color: {'#10b981' if summary_data['success'] else '#ef4444'};">{summary_data['duration_formatted']}</strong>
-                    </div>
-                </div>
-
-                <!-- Tabla de Entidades -->
-                <h2 style="font-size: 18px; color: #111827; margin: 0 0 12px 0; border-bottom: 2px solid #f3f4f6; padding-bottom: 6px;">Métricas por Entidad</h2>
-                <div style="overflow-x: auto; margin-bottom: 28px;">
-                    <table style="width: 100%; border-collapse: collapse; text-align: left; font-size: 13px;">
-                        <thead>
-                            <tr style="background-color: #f9fafb; border-bottom: 2px solid #e5e7eb; color: #4b5563; font-weight: bold;">
-                                <th style="padding: 10px 12px;">Entidad</th>
-                                <th style="padding: 10px 12px;">Modo</th>
-                                <th style="padding: 10px 12px;">Estado</th>
-                                <th style="padding: 10px 12px; text-align: right;">Registros</th>
-                                <th style="padding: 10px 12px; text-align: right;">Batches OK</th>
-                                <th style="padding: 10px 12px; text-align: right;">Batches Error</th>
-                                <th style="padding: 10px 12px; text-align: right;">Tiempo</th>
-                                <th style="padding: 10px 12px; text-align: right;">Velocidad</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {"".join(table_rows)}
-                        </tbody>
-                    </table>
-                </div>
-
-                <!-- Tabla de Reintentos -->
-                <h2 style="font-size: 18px; color: #111827; margin: 0 0 12px 0; border-bottom: 2px solid #f3f4f6; padding-bottom: 6px;">Cola de Reintentos (Errores F1)</h2>
-                <div style="overflow-x: auto; max-width: 500px; margin-bottom: 12px;">
-                    <table style="width: 100%; border-collapse: collapse; text-align: left; font-size: 13px;">
-                        <thead>
-                            <tr style="background-color: #f9fafb; border-bottom: 2px solid #e5e7eb; color: #4b5563; font-weight: bold;">
-                                <th style="padding: 8px 10px;">Entidad</th>
-                                <th style="padding: 8px 10px; text-align: right;">Al Inicio</th>
-                                <th style="padding: 8px 10px; text-align: right;">Al Final</th>
-                                <th style="padding: 8px 10px; text-align: right;">Variación</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {"".join(retry_rows)}
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-            
-            <div style="background-color: #f9fafb; padding: 16px 24px; text-align: center; border-top: 1px solid #e5e7eb; font-size: 12px; color: #9ca3af;">
-                Este email fue generado automáticamente por el sistema de sincronización de Madariaga.
-            </div>
-        </div>
-    </body>
-    </html>
-    """
-
-    return send_notification(subject, html_body, is_html=True)
+    body = "\n".join(lines)
+    return send_notification(subject, body, is_html=False)
 
 
 def notify_entity_detailed_report(
@@ -436,18 +412,19 @@ def notify_entity_detailed_report(
     *,
     dry_run: bool = False,
 ) -> bool:
-    """Envía un reporte detallado e individual de performance para una corrida FULL LOAD."""
+    """Envía un reporte detallado (texto plano) de performance/diagnóstico de una entidad FULL LOAD."""
     if not _is_enabled() or not _env("NOTIFY_RUN_REPORT", "false").lower() == "true":
         return False
 
     mode_label = "DRY-RUN" if dry_run else "APPLY"
-    status_icon = "🚀" if metrics["success"] else "⚠️"
-    subject = f"{status_icon} FULL LOAD Detalle: {entity} [{mode_label}]"
+    status_label = "OK" if metrics.get("success") else "CON ERRORES"
+    subject = f"FULL LOAD Detalle: {entity} [{mode_label}]"
 
-    # Procesar tiempos de batch
+    SEP = "=" * 70
+    SUB = "-" * 70
+
     batch_times = metrics.get("batch_times") or []
     num_batches = len(batch_times)
-    
     if num_batches > 0:
         avg_batch = sum(batch_times) / num_batches
         max_batch = max(batch_times)
@@ -455,118 +432,55 @@ def notify_entity_detailed_report(
     else:
         avg_batch = max_batch = min_batch = 0.0
 
-    # Calcular overheads
-    total_duration = metrics["duration_secs"]
-    query_duration = metrics.get("query_duration_secs", 0.0)
+    total_duration = metrics.get("duration_secs", 0.0) or 0.0
+    query_duration = metrics.get("query_duration_secs", 0.0) or 0.0
     net_duration = total_duration - query_duration
+    query_pct = (query_duration / total_duration * 100) if total_duration > 0 else 0.0
+    net_pct = (net_duration / total_duration * 100) if total_duration > 0 else 0.0
+    records = metrics.get("records_ok", 0)
+    dur_min = total_duration / 60.0
+    speed_min = (records / dur_min) if dur_min > 0 else 0.0
+    speed_sec = (records / total_duration) if total_duration > 0 else 0.0
 
-    query_pct = (query_duration / total_duration * 100) if total_duration > 0 else 0
-    net_pct = (net_duration / total_duration * 100) if total_duration > 0 else 0
+    lines: list[str] = []
+    lines.append(SEP)
+    lines.append(f"DETALLE FULL LOAD — {entity}")
+    lines.append(SEP)
+    lines.append(f"Estado : {status_label}")
+    lines.append(f"Modo   : {mode_label}")
+    lines.append("")
 
-    # Si hay errores de validacion/migracion parciales
-    error_section = ""
-    if metrics.get("error_msg"):
-        error_section = f"""
-        <div style="background-color: #fff5f5; border-left: 4px solid #f87171; padding: 16px; border-radius: 4px; margin-bottom: 24px;">
-            <strong style="color: #991b1b; display: block; margin-bottom: 8px;">Detalle de Error / Fallo:</strong>
-            <pre style="margin: 0; background: #ffffff; padding: 10px; border-radius: 4px; border: 1px solid #fee2e2; font-family: monospace; font-size: 12px; color: #7f1d1d; white-space: pre-wrap;">{metrics['error_msg']}</pre>
-        </div>
-        """
+    lines.append("MÉTRICAS GENERALES")
+    lines.append(SUB)
+    lines.append(f"  • Registros procesados  : {records:,}")
+    lines.append(f"  • Batches OK            : {metrics.get('batches_ok', 0)}")
+    lines.append(f"  • Batches fallidos      : {metrics.get('batches_failed', 0)}")
+    lines.append(f"  • Tiempo total de carga : {total_duration:.2f} s   ({dur_min:.2f} min)")
+    lines.append(f"  • Velocidad             : {speed_min:,.1f} reg/min   ({speed_sec:,.1f} reg/s)")
+    lines.append("")
 
-    html_body = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <meta charset="utf-8">
-        <title>Performance Full Load: {entity}</title>
-    </head>
-    <body style="margin: 0; padding: 20px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; background-color: #f3f4f6; color: #374151;">
-        <div style="max-width: 700px; margin: 0 auto; background-color: #ffffff; border-radius: 12px; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06); overflow: hidden; border: 1px solid #e5e7eb;">
-            <!-- Header -->
-            <div style="background: linear-gradient(135deg, #1e3a8a, #3b82f6); padding: 24px; color: #ffffff; text-align: center;">
-                <h1 style="margin: 0; font-size: 20px; font-weight: 800; letter-spacing: -0.025em; text-transform: uppercase;">
-                    Performance Full Load: {entity}
-                </h1>
-                <p style="margin: 5px 0 0 0; font-size: 14px; opacity: 0.9;">
-                    Análisis de Overhead de Red y Base de Datos &bull; {mode_label}
-                </p>
-            </div>
+    lines.append("DISTRIBUCIÓN DE OVERHEAD")
+    lines.append(SUB)
+    lines.append(f"  • Overhead SQL (query origen) : {query_duration:.2f}s   ({query_pct:.1f}%)")
+    lines.append(f"  • Envío HTTP & red (Paxapos)  : {net_duration:.2f}s   ({net_pct:.1f}%)")
+    lines.append("")
 
-            <div style="padding: 24px;">
-                {error_section}
+    lines.append("LATENCIA POR BATCH (POST)")
+    lines.append(SUB)
+    lines.append(f"  • Lotes totales   : {num_batches}")
+    lines.append(f"  • Latencia mínima : {min_batch:.3f}s")
+    lines.append(f"  • Latencia prom.  : {avg_batch:.3f}s")
+    lines.append(f"  • Latencia máxima : {max_batch:.3f}s")
 
-                <!-- Tabla Resumen Metricas -->
-                <h2 style="font-size: 16px; color: #111827; margin: 0 0 12px 0; border-bottom: 2px solid #f3f4f6; padding-bottom: 6px;">Métricas Generales</h2>
-                <table style="width: 100%; border-collapse: collapse; font-size: 13px; margin-bottom: 24px;">
-                    <tr style="border-bottom: 1px solid #f3f4f6;">
-                        <td style="padding: 10px 0; color: #6b7280; font-weight: bold;">Registros Procesados</td>
-                        <td style="padding: 10px 0; text-align: right; font-weight: bold; color: #111827;">{metrics['records_ok']:,}</td>
-                    </tr>
-                    <tr style="border-bottom: 1px solid #f3f4f6;">
-                        <td style="padding: 10px 0; color: #6b7280;">Batches OK</td>
-                        <td style="padding: 10px 0; text-align: right; color: #10b981; font-weight: bold;">{metrics['batches_ok']}</td>
-                    </tr>
-                    <tr style="border-bottom: 1px solid #f3f4f6;">
-                        <td style="padding: 10px 0; color: #6b7280;">Batches Fallidos</td>
-                        <td style="padding: 10px 0; text-align: right; color: {'#ef4444' if metrics['batches_failed'] > 0 else '#6b7280'}; font-weight: bold;">{metrics['batches_failed']}</td>
-                    </tr>
-                    <tr style="border-bottom: 1px solid #f3f4f6;">
-                        <td style="padding: 10px 0; color: #6b7280; font-weight: bold;">Tiempo Total de Carga</td>
-                        <td style="padding: 10px 0; text-align: right; font-weight: bold; color: #1e3a8a;">{total_duration:.2f} segundos</td>
-                    </tr>
-                </table>
+    if metrics.get("error_msg") or metrics.get("error_trace"):
+        lines.append("")
+        lines.append("DIAGNÓSTICO DE ERROR")
+        lines.append(SUB)
+        _emit_error_block(lines, metrics, indent="")
 
-                <!-- Distribucion de Overhead -->
-                <h2 style="font-size: 16px; color: #111827; margin: 0 0 12px 0; border-bottom: 2px solid #f3f4f6; padding-bottom: 6px;">Distribución de Overhead</h2>
-                <div style="margin-bottom: 24px; padding: 16px; background-color: #f9fafb; border-radius: 8px; border: 1px solid #f3f4f6;">
-                    <div style="height: 24px; display: flex; border-radius: 12px; overflow: hidden; margin-bottom: 12px;">
-                        <div style="width: {query_pct}%; background-color: #f59e0b; color: white; display: flex; align-items: center; justify-content: center; font-size: 10px; font-weight: bold;" title="Query SQL">
-                            {query_pct:.0f}%
-                        </div>
-                        <div style="width: {net_pct}%; background-color: #3b82f6; color: white; display: flex; align-items: center; justify-content: center; font-size: 10px; font-weight: bold;" title="Network POST">
-                            {net_pct:.0f}%
-                        </div>
-                    </div>
-                    <div style="display: flex; justify-content: space-between; font-size: 12px;">
-                        <div>
-                            <span style="display: inline-block; width: 12px; height: 12px; background-color: #f59e0b; border-radius: 50%; margin-right: 4px;"></span>
-                            Overhead SQL (Query Origen): <b>{query_duration:.2f}s</b> ({query_pct:.1f}%)
-                        </div>
-                        <div>
-                            <span style="display: inline-block; width: 12px; height: 12px; background-color: #3b82f6; border-radius: 50%; margin-right: 4px;"></span>
-                            Envío HTTP &amp; Red (Paxapos): <b>{net_duration:.2f}s</b> ({net_pct:.1f}%)
-                        </div>
-                    </div>
-                </div>
+    lines.append("")
+    lines.append(SEP)
+    lines.append("Reporte individual de entidad — Pipeline RAFAM (Madariaga).")
 
-                <!-- Detalles de Latencia de Red por Batch -->
-                <h2 style="font-size: 16px; color: #111827; margin: 0 0 12px 0; border-bottom: 2px solid #f3f4f6; padding-bottom: 6px;">Detalle de Latencia por Batch (POST)</h2>
-                <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
-                    <tr style="border-bottom: 1px solid #f3f4f6;">
-                        <td style="padding: 8px 0; color: #6b7280;">Lotes Totales</td>
-                        <td style="padding: 8px 0; text-align: right; font-weight: bold; color: #111827;">{num_batches}</td>
-                    </tr>
-                    <tr style="border-bottom: 1px solid #f3f4f6;">
-                        <td style="padding: 8px 0; color: #6b7280;">Latencia Mínima</td>
-                        <td style="padding: 8px 0; text-align: right; color: #10b981;">{min_batch:.3f}s</td>
-                    </tr>
-                    <tr style="border-bottom: 1px solid #f3f4f6;">
-                        <td style="padding: 8px 0; color: #6b7280;">Latencia Promedio</td>
-                        <td style="padding: 8px 0; text-align: right; color: #3b82f6; font-weight: bold;">{avg_batch:.3f}s</td>
-                    </tr>
-                    <tr style="border-bottom: 1px solid #f3f4f6;">
-                        <td style="padding: 8px 0; color: #6b7280;">Latencia Máxima (Lote más lento)</td>
-                        <td style="padding: 8px 0; text-align: right; color: #ef4444; font-weight: bold;">{max_batch:.3f}s</td>
-                    </tr>
-                </table>
-            </div>
-
-            <div style="background-color: #f9fafb; padding: 16px; text-align: center; border-top: 1px solid #e5e7eb; font-size: 12px; color: #9ca3af;">
-                Reporte de performance individual &bull; Madariaga RAFAM Pipeline
-            </div>
-        </div>
-    </body>
-    </html>
-    """
-
-    return send_notification(subject, html_body, is_html=True)
+    body = "\n".join(lines)
+    return send_notification(subject, body, is_html=False)

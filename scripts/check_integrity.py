@@ -34,7 +34,6 @@ import argparse
 import logging
 import os
 import sys
-import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -52,42 +51,6 @@ def setup_console_logging(level: int = logging.INFO) -> None:
     logging.getLogger().addHandler(handler)
 
 
-def format_exception_context(exc: Exception, entity: str, source_key: str | None, context: str) -> str:
-    """Formatea detalladamente una excepción con su traceback completo, archivo, línea y contexto."""
-    tb_lines = traceback.format_exception(type(exc), exc, exc.__traceback__)
-    tb_text = "".join(tb_lines)
-
-    # Extraer la última línea de origen del traceback para referencia rápida
-    origin_file = "Desconocido"
-    origin_line = "Desconocido"
-    origin_func = "Desconocido"
-
-    tb = exc.__traceback__
-    if tb:
-        # Caminar hasta el último frame
-        while tb.tb_next:
-            tb = tb.tb_next
-        frame = tb.tb_frame
-        code = frame.f_code
-        origin_file = Path(code.co_filename).name
-        origin_line = tb.tb_lineno
-        origin_func = code.co_name
-
-    res = (
-        f"======================================================================\n"
-        f"ERROR DETECTADO EN ENTIDAD: '{entity}' (source_key: '{source_key}')\n"
-        f"Contexto de la operación: {context}\n"
-        f"Ubicación del error: Archivo: {origin_file}, Línea: {origin_line}, Función: {origin_func}\n"
-        f"Clase de excepción: {type(exc).__name__}\n"
-        f"Mensaje de error: {exc}\n"
-        f"----------------------------------------------------------------------\n"
-        f"Traceback completo:\n"
-        f"{tb_text}"
-        f"======================================================================"
-    )
-    return res
-
-
 # Asegurar que src/ esté en el path cuando se llama directamente desde scripts/
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
@@ -99,6 +62,7 @@ os.chdir(REPO_ROOT)
 
 from src.config import ENTITY_CONFIGS  # noqa: E402
 from src.entity_link_store import EntityLinkStore  # noqa: E402
+from src.error_formatting import format_exception_context  # noqa: E402
 from src.logging_config import setup_file_logging  # noqa: E402
 from src.mappers.proveedores import compute_content_hash  # noqa: E402
 from src.notifier import notify_integrity_result  # noqa: E402

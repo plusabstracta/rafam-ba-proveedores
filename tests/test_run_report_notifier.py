@@ -50,15 +50,15 @@ def test_notify_run_report_enabled(mock_send, mock_is_enabled, clean_env):
         # Obtener los argumentos pasados a send_notification
         args, kwargs = mock_send.call_args
         subject = args[0]
-        html_body = args[1]
+        body = args[1]
         is_html = kwargs.get("is_html")
         
         assert "Reporte Sincronización RAFAM [APPLY] — OK" in subject
-        assert is_html is True
-        assert "test-server" in html_body
-        assert "proveedores" in html_body
-        assert "FULL LOAD" in html_body
-        assert "00:05:00" in html_body
+        assert is_html is False
+        assert "test-server" in body
+        assert "proveedores" in body
+        assert "FULL LOAD" in body
+        assert "00:05:00" in body
 
 @patch("src.notifier._is_enabled", return_value=True)
 @patch("src.notifier.send_notification")
@@ -97,10 +97,10 @@ def test_notify_run_report_nested_retry_counts(mock_send, mock_is_enabled, clean
         assert res is True
         mock_send.assert_called_once()
         args, _ = mock_send.call_args
-        html_body = args[1]
+        body = args[1]
         # El conteo pendiente (3) debe aparecer como entero, no como dict.
-        assert "{'pending'" not in html_body
-        assert ">3<" in html_body
+        assert "{'pending'" not in body
+        assert "(+3)" in body
 
 
 @patch("src.notifier._is_enabled", return_value=True)
@@ -129,14 +129,14 @@ def test_notify_entity_detailed_report(mock_send, mock_is_enabled, clean_env):
         
         args, kwargs = mock_send.call_args
         subject = args[0]
-        html_body = args[1]
+        body = args[1]
         is_html = kwargs.get("is_html")
         
         assert "FULL LOAD Detalle: proveedores [DRY-RUN]" in subject
-        assert is_html is True
-        # Verificar cálculos de overhead en HTML
-        assert "Overhead SQL" in html_body
-        assert "5.00s" in html_body  # tiempo query
-        assert "20.00s" in html_body  # tiempo de red (25.0 - 5.0)
-        assert "5.000s" in html_body  # max batch latency
-        assert "3.000s" in html_body  # min batch latency
+        assert is_html is False
+        # Verificar cálculos de overhead en texto plano
+        assert "Overhead SQL" in body
+        assert "5.00s" in body  # tiempo query
+        assert "20.00s" in body  # tiempo de red (25.0 - 5.0)
+        assert "5.000s" in body  # max batch latency
+        assert "3.000s" in body  # min batch latency
