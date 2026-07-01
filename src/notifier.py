@@ -283,12 +283,26 @@ def notify_run_report(
     retry_rows = []
     start_retries = summary_data.get("retry_counts_start") or {}
     end_retries = summary_data.get("retry_counts_end") or {}
+
+    def _retry_total(value) -> int:
+        """Normaliza el conteo de reintentos a un entero.
+
+        ``retry_store.counts_by_entity`` devuelve ``{entity: {status: count}}``,
+        pero versiones/orígenes antiguos podían usar ``{entity: count}``. Se
+        soportan ambas formas.
+        """
+        if isinstance(value, dict):
+            return sum(v for v in value.values() if isinstance(v, int))
+        if isinstance(value, int):
+            return value
+        return 0
+
     all_entities_set = set(start_retries.keys()) | set(end_retries.keys())
     
     if all_entities_set:
         for ent in sorted(all_entities_set):
-            start_count = start_retries.get(ent, 0)
-            end_count = end_retries.get(ent, 0)
+            start_count = _retry_total(start_retries.get(ent, 0))
+            end_count = _retry_total(end_retries.get(ent, 0))
             diff = end_count - start_count
             diff_color = "#ef4444" if diff > 0 else ("#10b981" if diff < 0 else "#6b7280")
             diff_sign = "+" if diff > 0 else ""

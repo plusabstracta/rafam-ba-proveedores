@@ -62,6 +62,49 @@ def test_notify_run_report_enabled(mock_send, mock_is_enabled, clean_env):
 
 @patch("src.notifier._is_enabled", return_value=True)
 @patch("src.notifier.send_notification")
+def test_notify_run_report_nested_retry_counts(mock_send, mock_is_enabled, clean_env):
+    """Regresión: retry_store.counts_by_entity devuelve {entity: {status: count}}.
+
+    El reporte debe sumar los estados a un entero y no romper con dict - int.
+    """
+    with patch.dict(os.environ, {"NOTIFY_RUN_REPORT": "true", "NOTIFY_SMTP_HOST": "localhost"}):
+        summary_data = {
+            "hostname": "test-server",
+            "start_time": "2026-07-01 10:00:00",
+            "end_time": "2026-07-01 10:05:00",
+            "duration_formatted": "00:05:00",
+            "success": False,
+            "error_msg": "fallo",
+            "retry_counts_start": {},
+            "retry_counts_end": {"proveedores": {"pending": 3}},
+        }
+        entity_metrics = [
+            {
+                "entity": "proveedores",
+                "mode": "FULL LOAD",
+                "success": False,
+                "records_ok": 10,
+                "batches_ok": 1,
+                "batches_failed": 1,
+                "duration_secs": 2.0,
+                "batch_times": [2.0],
+            }
+        ]
+        mock_send.return_value = True
+
+        res = notify_run_report(summary_data, entity_metrics, dry_run=False)
+
+        assert res is True
+        mock_send.assert_called_once()
+        args, _ = mock_send.call_args
+        html_body = args[1]
+        # El conteo pendiente (3) debe aparecer como entero, no como dict.
+        assert "{'pending'" not in html_body
+        assert ">3<" in html_body
+
+
+@patch("src.notifier._is_enabled", return_value=True)
+@patch("src.notifier.send_notification")
 def test_notify_entity_detailed_report(mock_send, mock_is_enabled, clean_env):
     with patch.dict(os.environ, {"NOTIFY_RUN_REPORT": "true", "NOTIFY_SMTP_HOST": "localhost"}):
         metrics = {
