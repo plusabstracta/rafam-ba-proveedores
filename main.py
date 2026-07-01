@@ -465,27 +465,31 @@ def _cmd_run_locked(args) -> None:
             
             if not report_sent:
                 notify_sync_error(entity_errors, dry_run=args.dry_run)
-            sys.exit(1)
+            # Errores de negocio/validación por batch (ej: "factura ya cargada"):
+            # se reportan por mail pero NO cortan la corrida. El run finaliza OK
+            # (exit 0) para que cron/make no falle y las demas entidades/batches
+            # sigan procesandose. Solo los errores de SISTEMA (el `except
+            # Exception` de abajo — ej: crash dict/int, caida de DB) son fatales.
+        else:
+            # Corrida exitosa
+            from src.notifier import notify_run_report, notify_entity_detailed_report
+            if env_bool("NOTIFY_RUN_REPORT", "false"):
+                summary_data = {
+                    "hostname": socket.gethostname(),
+                    "start_time": start_time_str,
+                    "end_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "duration_formatted": duration_formatted,
+                    "success": True,
+                    "error_msg": None,
+                    "retry_counts_start": retry_counts_start,
+                    "retry_counts_end": retry_store.counts_by_entity(entities=targets) if retry_store else {},
+                }
+                notify_run_report(summary_data, entity_metrics, dry_run=args.dry_run)
 
-        # Corrida exitosa
-        from src.notifier import notify_run_report, notify_entity_detailed_report
-        if env_bool("NOTIFY_RUN_REPORT", "false"):
-            summary_data = {
-                "hostname": socket.gethostname(),
-                "start_time": start_time_str,
-                "end_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "duration_formatted": duration_formatted,
-                "success": True,
-                "error_msg": None,
-                "retry_counts_start": retry_counts_start,
-                "retry_counts_end": retry_store.counts_by_entity(entities=targets) if retry_store else {},
-            }
-            notify_run_report(summary_data, entity_metrics, dry_run=args.dry_run)
-            
-            # Reportes individuales detallados para full load
-            for m in entity_metrics:
-                if m["mode"] == "FULL LOAD":
-                    notify_entity_detailed_report(m["entity"], m, dry_run=args.dry_run)
+                # Reportes individuales detallados para full load
+                for m in entity_metrics:
+                    if m["mode"] == "FULL LOAD":
+                        notify_entity_detailed_report(m["entity"], m, dry_run=args.dry_run)
 
     except Exception as exc:
         logger.error("Error en la ejecución de la sincronización: %s", exc, exc_info=True)
