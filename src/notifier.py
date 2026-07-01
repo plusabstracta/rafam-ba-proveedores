@@ -192,3 +192,40 @@ def notify_integrity_result(
 
     body = "\n".join(lines)
     return send_notification(subject, body)
+
+
+def notify_sync_error(
+    errors: dict[str, str] | str,
+    *,
+    dry_run: bool = False,
+) -> bool:
+    """Notifica un error crítico o fallo de sincronización de entidades por email.
+
+    Args:
+        errors: Diccionario de {entidad: error} o un string con el error general.
+        dry_run: Si se estaba ejecutando en modo de prueba (dry-run).
+
+    Returns:
+        True si se envió el email, False en caso contrario.
+    """
+    mode_label = "DRY-RUN" if dry_run else "APPLY"
+    subject = f"❌ ERROR de Sincronización RAFAM [{mode_label}]"
+
+    lines = [
+        f"Se detectaron errores durante la ejecución de la sincronización ({mode_label}).",
+        "",
+        "─" * 60,
+        "",
+    ]
+
+    if isinstance(errors, dict):
+        lines.append("Detalle de errores por entidad:")
+        for entity, err in errors.items():
+            lines.append(f"  • {entity}: {err}")
+    else:
+        lines.append("Detalle del error general / excepción:")
+        lines.append(f"  {errors}")
+
+    body = "\n".join(lines)
+    return send_notification(subject, body)
+

@@ -169,11 +169,11 @@ def _sync_entity(
     batch_size: int,
     limit: int | None,
     dry_run: bool,
-) -> bool:
+) -> tuple[bool, str | None]:
     """Execute the incremental sync for a single entity.
 
-    Returns True si la entidad se sincronizo OK, False si hubo error. El caller
-    usa este flag para devolver exit code != 0 al SO/cron.
+    Returns (True, None) si la entidad se sincronizo OK, (False, error_msg) si hubo error.
+    El caller usa este flag para devolver exit code != 0 al SO/cron y notificar.
     """
     cp  = engine.get_checkpoint(entity)
     cfg = ENTITY_CONFIGS[entity]
@@ -275,16 +275,16 @@ def _sync_entity(
                     "[%-11s] %s — %d registros OK, %d batch(es) con error. Ultimo: %s",
                     mode, entity, total, failed_batches, last_batch_error,
                 )
-                return False
+                return False, msg
             engine.mark_success(entity, last_id, last_ts, total)
             logger.info("[%-11s] %s — %d registros", mode, entity, total)
-        return True
+        return True, None
 
     except Exception as exc:
         if not dry_run:
             engine.mark_error(entity, str(exc))
         logger.error("[%-11s] %s — ERROR: %s", mode, entity, exc, exc_info=True)
-        return False
+        return False, str(exc)
 
 
 def _warn_missing_cursor_fields(cfg, columns: list[str], entity: str) -> None:
@@ -336,38 +336,42 @@ def _cmd_run_locked(args) -> None:
     else:
         logger.info("RAFAM_EJERCICIO_MIN no configurado — se procesarán TODOS los ejercicios")
 
-    exporter = build_exporter(dry_run=args.dry_run)
-    engine   = _build_engine()
-
-    # Determinar las entidades a procesar ANTES de loguear la cola de reintentos,
-    # para filtrar el snapshot por lo que realmente corre esta vez (un run
-    # `--entity retenciones` no debe loguear pendientes de orden_pago/oc_items).
-    # Sin --entity explicito, ejecutar las 5 entidades oficiales en orden de FKs.
-    # Las demas no se migran:
-    #   - orden_compra (header) → reemplazado por oc_items (incluye items embebidos)
-    #   - pedidos / ped_items   → deshabilitados, los pedidos llegan como OCs via oc_items
-    # retenciones corre al final: depende de que la OP (Egreso) ya exista para
-    # resolver el destino; si no, se encola y se reintenta en la proxima corrida.
-    if args.entity:
-        targets = [args.entity]
-    else:
-        official = ["proveedores", "oc_items", "solic_gastos", "orden_pago", "retenciones"]
-        targets = [e for e in official if e in ENTITY_CONFIGS]
-        logger.info("Ejecutando entidades oficiales en orden FK → %s", targets)
-
-    # Cola de reintentos (F1): captura filas rechazadas por el receptor para
-    # reintentarlas en la proxima corrida. Manejo fila-a-fila — el batch no se
-    # cancela por una fila mala; el watermark avanza con seguridad porque lo
-    # pendiente queda registrado aca.
-    retry_store = RetryStore()
-    if hasattr(exporter, "attach_retry_store"):
-        exporter.attach_retry_store(retry_store)
-        pending = retry_store.counts_by_entity(entities=targets)
-        if pending:
-            logger.info("Cola de reintentos al inicio: %s", json.dumps(pending, ensure_ascii=False))
-
-    failed_entities: list[str] = []
+    exporter = None
+    retry_store = None
+    targets = []
     try:
+        exporter = build_exporter(dry_run=args.dry_run)
+        engine   = _build_engine()
+
+        # Determinar las entidades a procesar ANTES de loguear la cola de reintentos,
+        # para filtrar el snapshot por lo que realmente corre esta vez (un run
+        # `--entity retenciones` no debe loguear pendientes de orden_pago/oc_items).
+        # Sin --entity explicito, ejecutar las 5 entidades oficiales en orden de FKs.
+        # Las demas no se migran:
+        #   - orden_compra (header) → reemplazado por oc_items (incluye items embebidos)
+        #   - pedidos / ped_items   → deshabilitados, los pedidos llegan como OCs via oc_items
+        # retenciones corre al final: depende de que la OP (Egreso) ya exista para
+        # resolver el destino; si no, se encola y se reintenta en la proxima corrida.
+        if args.entity:
+            targets = [args.entity]
+        else:
+            official = ["proveedores", "oc_items", "solic_gastos", "orden_pago", "retenciones"]
+            targets = [e for e in official if e in ENTITY_CONFIGS]
+            logger.info("Ejecutando entidades oficiales en orden FK → %s", targets)
+
+        # Cola de reintentos (F1): captura filas rechazadas por el receptor para
+        # reintentarlas en la proxima corrida. Manejo fila-a-fila — el batch no se
+        # cancela por una fila mala; el watermark avanza con seguridad porque lo
+        # pendiente queda registrado aca.
+        retry_store = RetryStore()
+        if hasattr(exporter, "attach_retry_store"):
+            exporter.attach_retry_store(retry_store)
+            pending = retry_store.counts_by_entity(entities=targets)
+            if pending:
+                logger.info("Cola de reintentos al inicio: %s", json.dumps(pending, ensure_ascii=False))
+
+        failed_entities: list[str] = []
+        entity_errors: dict[str, str] = {}
         source_engine = create_source_engine()
         with source_engine.connect() as conn:
             logger.info("Conexión a base origen establecida (%s)", source_engine.url.get_backend_name())
@@ -377,28 +381,39 @@ def _cmd_run_locked(args) -> None:
             if hasattr(exporter, "attach_source"):
                 exporter.attach_source(source_repo)
             for entity in targets:
-                ok = _sync_entity(source_repo, engine, exporter, entity, args.batch_size, args.limit, args.dry_run)
+                ok, err_msg = _sync_entity(source_repo, engine, exporter, entity, args.batch_size, args.limit, args.dry_run)
                 if not ok:
                     failed_entities.append(entity)
-    except (SQLAlchemyError, ValueError) as exc:
-        logger.error("Error en la ejecución: %s", exc)
+                    entity_errors[entity] = err_msg or "Error desconocido"
+
+        if failed_entities:
+            logger.error(
+                "Sincronización con errores en %d/%d entidades: %s",
+                len(failed_entities), len(targets), ", ".join(failed_entities),
+            )
+            from src.notifier import notify_sync_error
+            notify_sync_error(entity_errors, dry_run=args.dry_run)
+            sys.exit(1)
+
+    except Exception as exc:
+        logger.error("Error en la ejecución de la sincronización: %s", exc, exc_info=True)
+        from src.notifier import notify_sync_error
+        notify_sync_error(str(exc), dry_run=args.dry_run)
         sys.exit(1)
     finally:
-        exporter.close()
+        if exporter:
+            exporter.close()
         try:
-            final_pending = retry_store.counts_by_entity(entities=targets)
-            if final_pending:
-                logger.info("Cola de reintentos al finalizar: %s", json.dumps(final_pending, ensure_ascii=False))
+            if retry_store and targets:
+                final_pending = retry_store.counts_by_entity(entities=targets)
+                if final_pending:
+                    logger.info("Cola de reintentos al finalizar: %s", json.dumps(final_pending, ensure_ascii=False))
+        except Exception:
+            pass
         finally:
-            retry_store.close()
+            if retry_store:
+                retry_store.close()
         logger.info("Proceso finalizado.")
-
-    if failed_entities:
-        logger.error(
-            "Sincronización con errores en %d/%d entidades: %s",
-            len(failed_entities), len(targets), ", ".join(failed_entities),
-        )
-        sys.exit(1)
 
 
 def cmd_spec(args) -> None:
