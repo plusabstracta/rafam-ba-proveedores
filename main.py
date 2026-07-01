@@ -169,12 +169,13 @@ def _sync_entity(
     batch_size: int,
     limit: int | None,
     dry_run: bool,
-) -> tuple[bool, str | None]:
+) -> tuple[bool, str | None, dict]:
     """Execute the incremental sync for a single entity.
 
-    Returns (True, None) si la entidad se sincronizo OK, (False, error_msg) si hubo error.
+    Returns (True, None, metrics) si la entidad se sincronizo OK, (False, error_msg, metrics) si hubo error.
     El caller usa este flag para devolver exit code != 0 al SO/cron y notificar.
     """
+    t_start = time.monotonic()
     cp  = engine.get_checkpoint(entity)
     cfg = ENTITY_CONFIGS[entity]
     mode = "FULL LOAD" if (cp.is_fresh or cfg.full_load) else "INCREMENTAL"
@@ -183,22 +184,41 @@ def _sync_entity(
     # de la misma entidad (no cortar la corrida). Acumulamos errores y al
     # final marcamos la entidad como con errores para que el caller decida.
     failed_batches = 0
+    batches_ok = 0
+    batch_times = []
     last_batch_error: str | None = None
+    query_duration = 0.0
+    total = 0
+
+    metrics = {
+        "entity": entity,
+        "mode": mode,
+        "records_ok": 0,
+        "batches_ok": 0,
+        "batches_failed": 0,
+        "query_duration_secs": 0.0,
+        "duration_secs": 0.0,
+        "batch_times": [],
+        "success": False,
+        "error_msg": None,
+    }
 
     try:
+        t_query_start = time.monotonic()
         stmt = source_repo.build_statement(entity, cp)
-        total   = 0
-        last_id = None
-        last_ts = None
-
         result = source_repo.execute(stmt)
+        query_duration = time.monotonic() - t_query_start
+        metrics["query_duration_secs"] = query_duration
+
         columns = list(result.keys())
         _warn_missing_cursor_fields(cfg, columns, entity)
 
         batch_count = 0
+        last_id = None
+        last_ts = None
 
         def process_batch(batch: list[tuple]) -> None:
-            nonlocal last_id, last_ts, total, batch_count, failed_batches, last_batch_error
+            nonlocal last_id, last_ts, total, batch_count, failed_batches, last_batch_error, batches_ok
             bid, bts = engine.extract_cursor_values(columns, batch, entity)
             if bid is not None:
                 last_id = max(last_id, bid) if last_id is not None else bid
@@ -208,14 +228,13 @@ def _sync_entity(
             if batch_delay > 0 and batch_count > 0:
                 time.sleep(batch_delay)
 
+            t_batch_start = time.monotonic()
             try:
                 exporter.write_batch(entity, columns, batch)
+                batch_times.append(time.monotonic() - t_batch_start)
+                batches_ok += 1
             except Exception as exc:
-                # Aislamiento por batch: si el POST falla (HTTP 5xx, validacion
-                # del backend, JSON parse, etc.) NO cortamos la entidad. Logueamos
-                # el error con stack trace y seguimos con el proximo batch. El
-                # watermark NO se avanza para este batch (esta logica ya esta abajo:
-                # solo se avanza despues del write exitoso).
+                batch_times.append(time.monotonic() - t_batch_start)
                 failed_batches += 1
                 last_batch_error = str(exc)
                 logger.error(
@@ -261,6 +280,10 @@ def _sync_entity(
 
                 process_batch([tuple(row) for row in raw_rows])
 
+        metrics["records_ok"] = total
+        metrics["batches_ok"] = batches_ok
+        metrics["batches_failed"] = failed_batches
+        metrics["batch_times"] = batch_times
 
         if dry_run:
             logger.info("[DRY RUN   ] %s — %d registros (sin avanzar checkpoint)", entity, total)
@@ -275,16 +298,25 @@ def _sync_entity(
                     "[%-11s] %s — %d registros OK, %d batch(es) con error. Ultimo: %s",
                     mode, entity, total, failed_batches, last_batch_error,
                 )
-                return False, msg
+                metrics["success"] = False
+                metrics["error_msg"] = msg
+                metrics["duration_secs"] = time.monotonic() - t_start
+                return False, msg, metrics
             engine.mark_success(entity, last_id, last_ts, total)
             logger.info("[%-11s] %s — %d registros", mode, entity, total)
-        return True, None
+        
+        metrics["success"] = True
+        metrics["duration_secs"] = time.monotonic() - t_start
+        return True, None, metrics
 
     except Exception as exc:
         if not dry_run:
             engine.mark_error(entity, str(exc))
         logger.error("[%-11s] %s — ERROR: %s", mode, entity, exc, exc_info=True)
-        return False, str(exc)
+        metrics["success"] = False
+        metrics["error_msg"] = str(exc)
+        metrics["duration_secs"] = time.monotonic() - t_start
+        return False, str(exc), metrics
 
 
 def _warn_missing_cursor_fields(cfg, columns: list[str], entity: str) -> None:
@@ -316,6 +348,16 @@ def cmd_run(args) -> None:
 
 def _cmd_run_locked(args) -> None:
     from src.config import _EJERCICIO_MIN, _EJERCICIO_MIN_ENTITIES
+    from src.utils import env_bool
+    import socket
+    from datetime import datetime
+
+    run_t0 = time.monotonic()
+    run_start_dt = datetime.now()
+    start_time_str = run_start_dt.strftime("%Y-%m-%d %H:%M:%S")
+    retry_counts_start = {}
+    entity_metrics = []
+
     if _EJERCICIO_MIN:
         if args.entity:
             # Run de una sola entidad: el log habla solo de esa entidad.
@@ -339,6 +381,9 @@ def _cmd_run_locked(args) -> None:
     exporter = None
     retry_store = None
     targets = []
+    failed_entities: list[str] = []
+    entity_errors: dict[str, str] = {}
+
     try:
         exporter = build_exporter(dry_run=args.dry_run)
         engine   = _build_engine()
@@ -369,9 +414,8 @@ def _cmd_run_locked(args) -> None:
             pending = retry_store.counts_by_entity(entities=targets)
             if pending:
                 logger.info("Cola de reintentos al inicio: %s", json.dumps(pending, ensure_ascii=False))
+                retry_counts_start = dict(pending)
 
-        failed_entities: list[str] = []
-        entity_errors: dict[str, str] = {}
         source_engine = create_source_engine()
         with source_engine.connect() as conn:
             logger.info("Conexión a base origen establecida (%s)", source_engine.url.get_backend_name())
@@ -381,24 +425,94 @@ def _cmd_run_locked(args) -> None:
             if hasattr(exporter, "attach_source"):
                 exporter.attach_source(source_repo)
             for entity in targets:
-                ok, err_msg = _sync_entity(source_repo, engine, exporter, entity, args.batch_size, args.limit, args.dry_run)
+                ok, err_msg, metrics = _sync_entity(source_repo, engine, exporter, entity, args.batch_size, args.limit, args.dry_run)
+                entity_metrics.append(metrics)
                 if not ok:
                     failed_entities.append(entity)
                     entity_errors[entity] = err_msg or "Error desconocido"
+
+        # Calcular duración total
+        run_duration_secs = time.monotonic() - run_t0
+        hours, rem = divmod(int(run_duration_secs), 3600)
+        minutes, seconds = divmod(rem, 60)
+        duration_formatted = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
         if failed_entities:
             logger.error(
                 "Sincronización con errores en %d/%d entidades: %s",
                 len(failed_entities), len(targets), ", ".join(failed_entities),
             )
-            from src.notifier import notify_sync_error
-            notify_sync_error(entity_errors, dry_run=args.dry_run)
+            from src.notifier import notify_sync_error, notify_run_report, notify_entity_detailed_report
+            
+            report_sent = False
+            if env_bool("NOTIFY_RUN_REPORT", "false"):
+                summary_data = {
+                    "hostname": socket.gethostname(),
+                    "start_time": start_time_str,
+                    "end_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "duration_formatted": duration_formatted,
+                    "success": False,
+                    "error_msg": f"Las siguientes entidades fallaron: {', '.join(failed_entities)}",
+                    "retry_counts_start": retry_counts_start,
+                    "retry_counts_end": retry_store.counts_by_entity(entities=targets) if retry_store else {},
+                }
+                report_sent = notify_run_report(summary_data, entity_metrics, dry_run=args.dry_run)
+                
+                # Reportes individuales detallados para full load
+                for m in entity_metrics:
+                    if m["mode"] == "FULL LOAD":
+                        notify_entity_detailed_report(m["entity"], m, dry_run=args.dry_run)
+            
+            if not report_sent:
+                notify_sync_error(entity_errors, dry_run=args.dry_run)
             sys.exit(1)
+
+        # Corrida exitosa
+        from src.notifier import notify_run_report, notify_entity_detailed_report
+        if env_bool("NOTIFY_RUN_REPORT", "false"):
+            summary_data = {
+                "hostname": socket.gethostname(),
+                "start_time": start_time_str,
+                "end_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "duration_formatted": duration_formatted,
+                "success": True,
+                "error_msg": None,
+                "retry_counts_start": retry_counts_start,
+                "retry_counts_end": retry_store.counts_by_entity(entities=targets) if retry_store else {},
+            }
+            notify_run_report(summary_data, entity_metrics, dry_run=args.dry_run)
+            
+            # Reportes individuales detallados para full load
+            for m in entity_metrics:
+                if m["mode"] == "FULL LOAD":
+                    notify_entity_detailed_report(m["entity"], m, dry_run=args.dry_run)
 
     except Exception as exc:
         logger.error("Error en la ejecución de la sincronización: %s", exc, exc_info=True)
-        from src.notifier import notify_sync_error
-        notify_sync_error(str(exc), dry_run=args.dry_run)
+        from src.notifier import notify_sync_error, notify_run_report
+        
+        # Calcular duración total
+        run_duration_secs = time.monotonic() - run_t0
+        hours, rem = divmod(int(run_duration_secs), 3600)
+        minutes, seconds = divmod(rem, 60)
+        duration_formatted = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+        report_sent = False
+        if env_bool("NOTIFY_RUN_REPORT", "false"):
+            summary_data = {
+                "hostname": socket.gethostname(),
+                "start_time": start_time_str,
+                "end_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "duration_formatted": duration_formatted,
+                "success": False,
+                "error_msg": f"Excepción general de ejecución: {exc}",
+                "retry_counts_start": retry_counts_start,
+                "retry_counts_end": {},
+            }
+            report_sent = notify_run_report(summary_data, entity_metrics, dry_run=args.dry_run)
+            
+        if not report_sent:
+            notify_sync_error(str(exc), dry_run=args.dry_run)
         sys.exit(1)
     finally:
         if exporter:
