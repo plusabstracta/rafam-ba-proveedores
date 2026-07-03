@@ -1,0 +1,22 @@
+--- TestWeek/logs/forensics_20260703_182631/run1.log	2026-07-03 18:27:03.359011667 -0300
++++ TestWeek/logs/forensics_20260703_182631/run2.log	2026-07-03 18:27:33.266276163 -0300
+@@ -1,6 +1,6 @@
+-=== RUN1 START 2026-07-03 18:26:31 ===
++=== RUN2 START 2026-07-03 18:27:03 ===
+ >>> [proveedores] Iniciando: make migrate-proveedores
+->>> [proveedores] Terminado en 2s (exit: 0)
++>>> [proveedores] Terminado en 0s (exit: 0)
+ >>> [oc] Iniciando: make migrate-oc
+ >>> [oc] Terminado en 28s (exit: 0)
+ >>> [facturas] Iniciando: make migrate-facturas
+@@ -9,8 +9,8 @@
+ >>> [op] Terminado en 0s (exit: 0)
+ >>> [retenciones] Iniciando: make migrate-retenciones
+ >>> [retenciones] Terminado en 1s (exit: 0)
+->>> Reporte guardado en: /mnt/datos/repos/core/packages/rafam-ba-proveedores/TestWeek/logs/report_20260703_182703.txt
++>>> Reporte guardado en: /mnt/datos/repos/core/packages/rafam-ba-proveedores/TestWeek/logs/report_20260703_182733.txt
+ ⚠ No se pudo enviar email (verificar NOTIFY_* en .env)
+ ⚠ Falló el envío de email
+ >>> Ejecución completa.
+-=== RUN1 END 2026-07-03 18:27:03 ===
++=== RUN2 END 2026-07-03 18:27:33 ===

@@ -282,6 +282,96 @@ def list_counts(counter):
     return ", ".join(f"{key}={value}" for key, value in sorted(counter.items()))
 
 
+def _compact(value, max_len=160):
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if len(text) <= max_len:
+        return text
+    return text[: max_len - 3] + "..."
+
+
+def _json_compact(value, max_len=220):
+    try:
+        text = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    except Exception:
+        text = str(value)
+    return _compact(text, max_len=max_len)
+
+
+def _extract_record_summary(section, item):
+    if not isinstance(item, dict):
+        return _json_compact(item)
+
+    if section == "proveedores":
+        ext = item.get("external_id") or {}
+        prov = item.get("Proveedor") or {}
+        return (
+            f"cod_prov={ext.get('cod_prov', dash)}; "
+            f"razon_social={_compact(prov.get('razon_social') or prov.get('name') or dash, 120)}; "
+            f"cuit={prov.get('cuit', dash)}; "
+            f"mail={_compact(prov.get('mail') or dash, 80)}"
+        )
+
+    if section == "ordenes_compra":
+        ext = item.get("external_id") or {}
+        pedido = item.get("Pedido") or {}
+        items = item.get("items") or []
+        return (
+            f"oc={ext.get('ejercicio', dash)}-{ext.get('uni_compra', dash)}-{ext.get('nro_oc', dash)}; "
+            f"internal_id={pedido.get('internal_id', dash)}; "
+            f"proveedor_id={pedido.get('proveedor_id', dash)}; "
+            f"deleted={pedido.get('deleted', 0)}; "
+            f"items={len(items)}"
+        )
+
+    if section == "gastos":
+        ext = item.get("external_id") or {}
+        gasto = item.get("Gasto") or {}
+        return (
+            f"sg={ext.get('ejercicio', dash)}-{ext.get('deleg_solic', dash)}-{ext.get('nro_solic', dash)}; "
+            f"proveedor_id={gasto.get('proveedor_id', dash)}; "
+            f"factura={_compact(gasto.get('factura_nro') or dash, 80)}; "
+            f"pv={_compact(gasto.get('punto_de_venta') or dash, 20)}; "
+            f"importe_total={gasto.get('importe_total', dash)}; "
+            f"fecha={gasto.get('fecha', dash)}"
+        )
+
+    if section == "ordenes_pago":
+        ext = item.get("external_id") or {}
+        egreso = item.get("Egreso") or {}
+        retenciones = item.get("retenciones") or []
+        return (
+            f"op={ext.get('ejercicio', dash)}-{ext.get('nro_op', dash)}; "
+            f"identificador={_compact(egreso.get('identificador_pago') or dash, 80)}; "
+            f"total={egreso.get('total', dash)}; "
+            f"fecha={egreso.get('fecha', dash)}; "
+            f"pedido_id={item.get('pedido_id', dash)}; "
+            f"comprobante={_compact(item.get('gasto_nro_comprobante') or dash, 80)}; "
+            f"retenciones={len(retenciones)}"
+        )
+
+    if section == "retenciones":
+        ext = item.get("external_id") or {}
+        retenciones = item.get("retenciones") or []
+        detail = []
+        for ret in retenciones:
+            if not isinstance(ret, dict):
+                continue
+            rid = ret.get("external_id") or {}
+            detail.append(
+                f"cod={rid.get('codigo_deduc', dash)} monto={ret.get('monto_retenido', dash)}"
+            )
+        detail_text = "; ".join(detail) if detail else dash
+        return (
+            f"op={ext.get('ejercicio', dash)}-{ext.get('nro_op', dash)}; "
+            f"retenciones_count={len(retenciones)}; "
+            f"detalle={_compact(detail_text, 200)}"
+        )
+
+    return _json_compact(item)
+
+
 def stats_text(stats):
     chunks = []
     for section in payload_sections:
@@ -307,13 +397,24 @@ for entity in entities:
     output = parse_run_output(tmp_dir / f"{entity}.out", entity)
 
     request_counts = Counter()
-    for request in requests:
+    record_details = []
+    for request_index, request in enumerate(requests, start=1):
         if not isinstance(request, dict):
             continue
         for section in payload_sections:
             items = request.get(section)
             if isinstance(items, list):
                 request_counts[section] += len(items)
+                for item_index, item in enumerate(items, start=1):
+                    summary = _extract_record_summary(section, item)
+                    record_details.append(
+                        {
+                            "request_index": request_index,
+                            "item_index": item_index,
+                            "section": section,
+                            "summary": summary,
+                        }
+                    )
 
     stats = defaultdict(lambda: {"total": 0, "ok": 0, "error": 0})
     modes = Counter()
@@ -372,6 +473,7 @@ for entity in entities:
         "responses": len(responses),
         "request_counts": request_counts,
         "payload_count": payload_count,
+        "record_details": record_details,
         "stats": dict(stats),
         "modes": modes,
         "errors": errors,
@@ -409,6 +511,14 @@ for entity in entities:
     lines.append(f"        Backend stats: {stats_text(summary['stats'])}")
     lines.append(f"        Modes: {list_counts(summary['modes'])}")
     lines.append(f"        Lectura: {summary['conclusion']}")
+    if summary["record_details"]:
+        lines.append(f"        Registros enviados (detalle completo): {len(summary['record_details'])}")
+        for detail in summary["record_details"]:
+            lines.append(
+                "          "
+                f"[req#{detail['request_index']} item#{detail['item_index']} {detail['section']}] "
+                f"{detail['summary']}"
+            )
     if summary["errors"]:
         sample = summary["errors"][:3]
         lines.append(f"        Errores muestra: {json.dumps(sample, ensure_ascii=False)}")

@@ -1,0 +1,102 @@
+═══════════════════════════════════════════════════════════
+ REPORTE DIARIO - make migrate-all
+ Fecha: 2026-07-03 18:26:31
+ Estado: ✅ OK
+═══════════════════════════════════════════════════════════
+
+─── TIEMPO TOTAL ───
+  Duración: 32s (0.53 min)
+
+─── DETALLE POR ENTIDAD ───
+  ✅ proveedores
+     Tiempo: 2s (0.03 min)
+     Exit code: 0
+  ✅ oc
+     Tiempo: 28s (0.47 min)
+     Exit code: 0
+  ✅ facturas
+     Tiempo: 1s (0.02 min)
+     Exit code: 0
+  ✅ op
+     Tiempo: 0s (0.00 min)
+     Exit code: 0
+  ✅ retenciones
+     Tiempo: 1s (0.02 min)
+     Exit code: 0
+
+─── PAYLOADS Y ALTAS EN PAXAPOS ───
+  Payloads generados/enviados: NO (0 item(s) en 0 request(s))
+  Respuestas recibidas: 0
+  Registros nuevos confirmados por Paxapos (mode=create): 0
+  Actualizaciones confirmadas (mode=update): 0
+  Reemplazos/idempotencia confirmados (mode=replace): 0
+  Errores reportados por backend: 0
+  Nota: payload enviado significa actividad hacia Paxapos; alta nueva se confirma solo con mode=create.
+
+  Detalle por entidad:
+    - proveedores
+        Filas procesadas por el migrador: 0 (INCREMENTAL)
+        Payloads enviados: 0 item(s)
+        Respuestas: 0
+        Backend stats: sin stats de backend
+        Modes: sin resultados
+        Lectura: No se genero ni envio payload hacia Paxapos. No hay altas nuevas por esta entidad.
+        Lineas relevantes del log:
+          18:26:32 [WARNING] PaxaposHttpClient: SSL certificate verification deshabilitada (PAXAPOS_VERIFY_SSL=false)
+    - oc
+        Filas procesadas por el migrador: 6521 (FULL LOAD)
+        Payloads enviados: 0 item(s)
+        Respuestas: 0
+        Backend stats: sin stats de backend
+        Modes: sin resultados
+        Lectura: No se genero ni envio payload hacia Paxapos. No hay altas nuevas por esta entidad.
+        Lineas relevantes del log:
+          18:26:47 [INFO] Migrator [oc_items]: nada que enviar (skip_estado=17, mismo_estado=131, skip_has_op=0, sin_items=0)
+          18:26:49 [INFO] Migrator [oc_items]: nada que enviar (skip_estado=8, mismo_estado=141, skip_has_op=0, sin_items=0)
+          18:26:51 [INFO] Migrator [oc_items]: nada que enviar (skip_estado=4, mismo_estado=150, skip_has_op=0, sin_items=0)
+          18:26:53 [INFO] Migrator [oc_items]: nada que enviar (skip_estado=3, mismo_estado=140, skip_has_op=0, sin_items=0)
+          18:26:55 [INFO] Migrator [oc_items]: nada que enviar (skip_estado=6, mismo_estado=139, skip_has_op=0, sin_items=0)
+          18:26:57 [INFO] Migrator [oc_items]: nada que enviar (skip_estado=7, mismo_estado=160, skip_has_op=0, sin_items=0)
+          18:26:59 [INFO] Migrator [oc_items]: nada que enviar (skip_estado=6, mismo_estado=115, skip_has_op=0, sin_items=0)
+          18:27:01 [INFO] Migrator [oc_items]: nada que enviar (skip_estado=0, mismo_estado=13, skip_has_op=0, sin_items=0)
+    - facturas
+        Filas procesadas por el migrador: 0 (INCREMENTAL)
+        Payloads enviados: 0 item(s)
+        Respuestas: 0
+        Backend stats: sin stats de backend
+        Modes: sin resultados
+        Lectura: No se genero ni envio payload hacia Paxapos. No hay altas nuevas por esta entidad.
+        Lineas relevantes del log:
+          18:27:01 [WARNING] PaxaposHttpClient: SSL certificate verification deshabilitada (PAXAPOS_VERIFY_SSL=false)
+    - op
+        Filas procesadas por el migrador: 0 (INCREMENTAL)
+        Payloads enviados: 0 item(s)
+        Respuestas: 0
+        Backend stats: sin stats de backend
+        Modes: sin resultados
+        Lectura: No se genero ni envio payload hacia Paxapos. No hay altas nuevas por esta entidad.
+        Lineas relevantes del log:
+          18:27:02 [WARNING] PaxaposHttpClient: SSL certificate verification deshabilitada (PAXAPOS_VERIFY_SSL=false)
+    - retenciones
+        Filas procesadas por el migrador: 0 (INCREMENTAL)
+        Payloads enviados: 0 item(s)
+        Respuestas: 0
+        Backend stats: sin stats de backend
+        Modes: sin resultados
+        Lectura: No se genero ni envio payload hacia Paxapos. No hay altas nuevas por esta entidad.
+        Lineas relevantes del log:
+          18:27:02 [WARNING] PaxaposHttpClient: SSL certificate verification deshabilitada (PAXAPOS_VERIFY_SSL=false)
+          18:27:03 [INFO] Cola de reintentos al inicio: {"retenciones": {"pending": 274}}
+          18:27:03 [INFO] Cola de reintentos al finalizar: {"retenciones": {"pending": 274}}
+
+─── COLA DE REINTENTOS ───
+
+
+─── OVERHEAD DEL SERVIDOR ───
+  Load Average ANTES:  2.14 2.53 2.34 4/2960 333330
+  Load Average DESPUÉS: 2.18 2.49 2.33 5/2903 334165
+  Memoria ANTES:  12048/15906MB (76%)
+  Memoria DESPUÉS: 12020/15906MB (76%)
+
+═══════════════════════════════════════════════════════════
+
