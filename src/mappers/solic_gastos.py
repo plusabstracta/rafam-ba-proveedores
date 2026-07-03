@@ -38,6 +38,7 @@ class SolicGastosMapper:
         gastos: list[dict] = []
         raw_by_source_key: dict[str, dict] = {}
         skipped_no_oc = 0
+        skipped_already_linked = 0
 
         for row in rows:
             raw = dict(zip(columns, row))
@@ -52,15 +53,35 @@ class SolicGastosMapper:
                 skipped_no_oc += 1
                 continue
 
+            sk = json.dumps(ext, sort_keys=True) if ext else None
+
+            # Solucion B: no reenviar gastos que ya tienen link local.
+            # La ventana de reproceso de 30 dias vuelve a escanear gastos ya
+            # confirmados; sin este filtro, cada corrida reenvia gastos ya
+            # migrados y el receptor los rechaza ("factura ya cargada"),
+            # engordando la cola de reintentos. La source_key consultada aca es
+            # exactamente la que persiste persist_links (json de external_id),
+            # asi que el match es 1:1. La divergencia de estado/importe de un
+            # gasto ya vinculado la concilia check_integrity aparte, no esta
+            # ventana incremental.
+            if sk is not None and self._link_store.get_remote_id("gasto", sk):
+                skipped_already_linked += 1
+                continue
+
             gastos.append(gasto)
-            if ext:
-                sk = json.dumps(ext, sort_keys=True)
+            if sk is not None:
                 raw_by_source_key[sk] = raw
 
         if skipped_no_oc:
             logger.info(
                 "Migrator [solic_gastos]: %d gastos omitidos (sin OC enviada vinculada)",
                 skipped_no_oc,
+            )
+
+        if skipped_already_linked:
+            logger.info(
+                "Migrator [solic_gastos]: %d gastos omitidos (ya vinculados; evita reenvio)",
+                skipped_already_linked,
             )
 
         if not gastos:

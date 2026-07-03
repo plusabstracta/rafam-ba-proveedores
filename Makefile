@@ -21,6 +21,7 @@ LIMIT ?=
 	migrate-all migrate-all-dry \
 	reset-all reset-proveedores reset-oc_items reset-solic_gastos reset-orden_pago reset-retenciones \
 	check-integrity-dry check-integrity install-cron show-cron uninstall-cron \
+	backfill-gastos backfill-gastos-dry \
 	test coverage
 
 help:
@@ -53,6 +54,8 @@ help:
 	@echo "  make reset-all          Resetea todos los checkpoints"
 	@echo "  make check-integrity-dry  Ejecuta verificador de integridad en modo lectura (dry-run)"
 	@echo "  make check-integrity      Aplica correcciones de integridad (anulaciones + reenvio de proveedores)"
+	@echo "  make backfill-gastos      Recupera links faltantes de gastos ya migrados (escaneo completo, no toca checkpoint)"
+	@echo "  make backfill-gastos-dry  Preview del backfill (no persiste, solo muestra cuantos gastos se reenviarian)"
 	@echo "  make install-cron         Instala/actualiza los cron jobs basados en cron.conf con flock"
 	@echo "  make show-cron            Muestra los cron jobs activos de este proyecto"
 	@echo "  make uninstall-cron       Elimina todos los cron jobs de este proyecto en el crontab"
@@ -191,6 +194,15 @@ check-integrity-dry:
 
 check-integrity:
 	$(PY) scripts/check_integrity.py --apply
+
+# Backfill unico: recupera links locales faltantes de gastos ya migrados.
+# Fuerza un escaneo COMPLETO de solic_gastos (ignora la ventana de 30 dias) sin
+# tocar el checkpoint incremental; solo reenvia gastos aun sin link (Solucion B).
+backfill-gastos:
+	$(PY) main.py backfill-gastos --batch-size $(BATCH) $(if $(LIMIT),--limit $(LIMIT),)
+
+backfill-gastos-dry:
+	$(PY) main.py backfill-gastos --batch-size $(BATCH) $(if $(LIMIT),--limit $(LIMIT),) --dry-run
 
 install-cron:
 	bash scripts/install_crons.sh

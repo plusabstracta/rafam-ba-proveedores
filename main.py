@@ -626,6 +626,130 @@ def cmd_reconcile(args) -> None:
     logger.info("Reconciliacion OK: sin drift.")
 
 
+# ─── backfill-gastos ──────────────────────────────────────────────────────────
+
+
+def cmd_backfill_gastos(args) -> None:
+    """Backfill unico: recupera links locales faltantes de gastos ya migrados.
+
+    La ventana incremental solo re-escanea los ultimos 30 dias. Los gastos ya
+    presentes en Paxapos pero SIN link local siguen reenviandose en cada corrida
+    y el receptor los rechaza como duplicados, engordando la cola de reintentos.
+
+    Este comando fuerza un escaneo COMPLETO de solic_gastos (ignora la ventana
+    de 30 dias y NO toca el checkpoint incremental persistido) y reenvia solo los
+    gastos aun sin link — la Solucion B del mapper omite los ya vinculados. Cada
+    respuesta con exito + id persiste el link via upsert, con lo que el gasto deja
+    de reenviarse en las proximas corridas.
+
+    Los gastos que el receptor no logra reconocer por upsert (divergencia entre la
+    busqueda del upsert y la validacion de duplicado) quedan sin link: esos
+    dependen de la Solucion A (idempotencia garantizada en el receptor) y quedan
+    encolados para reintento.
+    """
+    with _exclusive_run_lock():
+        _cmd_backfill_gastos_locked(args)
+
+
+def _cmd_backfill_gastos_locked(args) -> None:
+    from src.models import Checkpoint
+
+    entity = "solic_gastos"
+    dry_run = bool(getattr(args, "dry_run", False))
+    batch_size = getattr(args, "batch_size", 500) or 500
+    limit = getattr(args, "limit", None)
+
+    if dry_run:
+        logger.warning(
+            "Backfill en dry-run: el receptor NO persiste, por lo que NO se "
+            "recuperan links. Sirve solo para ver cuantos gastos se reenviarian."
+        )
+
+    link_store = EntityLinkStore()
+    links_before = link_store.count("gasto")
+    link_store.close()
+
+    exporter = None
+    retry_store = None
+    total_scanned = 0
+    try:
+        exporter = build_exporter(dry_run=dry_run)
+        retry_store = RetryStore()
+        if hasattr(exporter, "attach_retry_store"):
+            exporter.attach_retry_store(retry_store)
+
+        source_engine = create_source_engine()
+        with source_engine.connect() as conn:
+            logger.info(
+                "Backfill gastos: conexion origen (%s), escaneo COMPLETO de %s",
+                source_engine.url.get_backend_name(), entity,
+            )
+            source_repo = SourceRepository(conn)
+            if hasattr(exporter, "attach_source"):
+                exporter.attach_source(source_repo)
+
+            # Checkpoint sintetico "fresco" (todo None) -> fuerza full scan sin
+            # tocar el checkpoint incremental persistido en state/checkpoint.db.
+            fresh_cp = Checkpoint(entity=entity)
+            stmt = source_repo.build_statement(entity, fresh_cp)
+            result = source_repo.execute(stmt)
+            columns = list(result.keys())
+
+            def process_batch(batch: list[tuple]) -> None:
+                nonlocal total_scanned
+                try:
+                    exporter.write_batch(entity, columns, batch)
+                except Exception as exc:  # noqa: BLE001 - seguir con el proximo batch
+                    logger.error(
+                        "Backfill: batch de %d filas FALLO: %s. Continuando.",
+                        len(batch), exc, exc_info=True,
+                    )
+                    return
+                total_scanned += len(batch)
+
+            group_fields = GROUPED_BATCH_FIELDS.get(entity)
+            if group_fields:
+                for batch in iter_grouped_batches(result, columns, group_fields, batch_size):
+                    if limit is not None and total_scanned >= limit:
+                        break
+                    process_batch(batch)
+            else:
+                while True:
+                    remaining = None if limit is None else limit - total_scanned
+                    if remaining is not None and remaining <= 0:
+                        break
+                    fetch_n = batch_size if remaining is None else min(batch_size, remaining)
+                    raw_rows = result.fetchmany(fetch_n)
+                    if not raw_rows:
+                        break
+                    process_batch([tuple(row) for row in raw_rows])
+
+        link_store = EntityLinkStore()
+        links_after = link_store.count("gasto")
+        link_store.close()
+        recovered = links_after - links_before
+
+        logger.info(
+            "Backfill gastos finalizado: filas escaneadas=%d, links antes=%d, "
+            "links despues=%d, recuperados=%d.",
+            total_scanned, links_before, links_after, recovered,
+        )
+        if not dry_run and total_scanned > 0 and recovered <= 0:
+            logger.warning(
+                "No se recuperaron links nuevos: los gastos que siguen sin "
+                "vinculo dependen de la Solucion A (idempotencia en el receptor)."
+            )
+    except Exception as exc:
+        logger.error("Backfill gastos: error general: %s", exc, exc_info=True)
+        sys.exit(1)
+    finally:
+        if exporter:
+            exporter.close()
+        if retry_store:
+            retry_store.close()
+        logger.info("Backfill gastos: proceso finalizado.")
+
+
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 
@@ -687,9 +811,21 @@ def main() -> None:
         help="Preview: no avanza checkpoints; envia el payload con dry_run=true (el receptor no persiste)",
     )
 
+    backfill_p = sub.add_parser(
+        "backfill-gastos",
+        help="Backfill unico: recupera links faltantes de gastos ya migrados (escaneo completo, no toca el checkpoint)",
+    )
+    backfill_p.add_argument("--limit", type=int, metavar="N", help="Máximo de filas a escanear (útil para testear)")
+    backfill_p.add_argument("--batch-size", type=int, default=500, metavar="N", help="Filas por lote (default: 500)")
+    backfill_p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview: envia con dry_run=true; el receptor NO persiste, no recupera links",
+    )
+
     args = parser.parse_args()
     setup_file_logging(args)
-    {"status": cmd_status, "reset": cmd_reset, "run": cmd_run, "spec": cmd_spec, "lookups": cmd_lookups, "reconcile": cmd_reconcile}[args.command](args)
+    {"status": cmd_status, "reset": cmd_reset, "run": cmd_run, "spec": cmd_spec, "lookups": cmd_lookups, "reconcile": cmd_reconcile, "backfill-gastos": cmd_backfill_gastos}[args.command](args)
 
 
 if __name__ == "__main__":
