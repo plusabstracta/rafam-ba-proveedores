@@ -15,8 +15,15 @@ LOG_DIR="$SCRIPT_DIR/logs"
 CRON_TAG="TESTWEEK_MIGRATE_ALL"
 TODAY_YYYYMMDD="$(date +%Y%m%d)"
 MORNING_STATUS_FILE="$LOG_DIR/${TODAY_YYYYMMDD}_morning.status"
+TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/rafam_migrate_report.XXXXXX")"
+REPORT_DUMP_PAYLOAD_FORCE="${REPORT_DUMP_PAYLOAD_FORCE:-1}"
 
 mkdir -p "$LOG_DIR"
+
+cleanup() {
+    rm -rf "$TMP_DIR"
+}
+trap cleanup EXIT
 
 # --- Parseo de argumentos -----------------------------------------------------
 INSTALL_CRON=false
@@ -114,11 +121,18 @@ for i in "${!ENTITIES[@]}"; do
 
     echo ">>> [$entity] Iniciando: make $target"
     ENT_START=$(date +%s)
+    OUTPUT_FILE="$TMP_DIR/${entity}.out"
+    DUMP_FILE="$TMP_DIR/${entity}.payload.dump"
+    : > "$DUMP_FILE"
 
     set +e
-    OUTPUT=$(make "$target" 2>&1)
+    OUTPUT=$(env \
+        DUMP_PAYLOAD="$DUMP_FILE" \
+        DUMP_PAYLOAD_FORCE="$REPORT_DUMP_PAYLOAD_FORCE" \
+        make "$target" 2>&1)
     EXIT_CODE=$?
     set -e
+    printf '%s\n' "$OUTPUT" > "$OUTPUT_FILE"
 
     ENT_END=$(date +%s)
     ENT_ELAPSED=$(( ENT_END - ENT_START ))
@@ -167,6 +181,255 @@ else:
 " 2>&1 || echo "No se pudo leer la cola de reintentos")
 fi
 
+# --- Payloads generados/enviados y respuesta Paxapos -------------------------
+set +e
+PAYLOAD_REPORT=$(.venv/bin/python - "$TMP_DIR" "${ENTITIES[@]}" <<'PY'
+import json
+import re
+import sys
+from collections import Counter, defaultdict
+from pathlib import Path
+
+tmp_dir = Path(sys.argv[1])
+entities = list(sys.argv[2:])
+
+official_entity = {
+    "proveedores": "proveedores",
+    "oc": "oc_items",
+    "facturas": "solic_gastos",
+    "op": "orden_pago",
+    "retenciones": "retenciones",
+}
+
+section_labels = {
+    "proveedores": "proveedores",
+    "ordenes_compra": "ordenes de compra",
+    "gastos": "gastos/facturas",
+    "ordenes_pago": "ordenes de pago",
+    "retenciones": "retenciones",
+    "pedidos": "pedidos",
+}
+payload_sections = tuple(section_labels.keys())
+dash = "—"
+
+
+def parse_json_blocks(path: Path):
+    requests = []
+    responses = []
+    if not path.exists() or path.stat().st_size == 0:
+        return requests, responses
+
+    current_kind = None
+    current_lines = []
+
+    def flush_kind(kind, lines):
+        raw = "\n".join(lines).strip()
+        if not kind or not raw:
+            return
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return
+        if kind == "request":
+            requests.append(parsed)
+        elif kind == "response":
+            responses.append(parsed)
+
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        if line.startswith("=== POST "):
+            flush_kind(current_kind, current_lines)
+            current_kind = "request"
+            current_lines = []
+            continue
+        if line.startswith("--- RESPONSE"):
+            flush_kind(current_kind, current_lines)
+            current_kind = "response"
+            current_lines = []
+            continue
+        if current_kind:
+            current_lines.append(line)
+    flush_kind(current_kind, current_lines)
+    return requests, responses
+
+
+def parse_run_output(path: Path, label: str):
+    if not path.exists():
+        return {"mode": None, "records": None, "lines": []}
+    text = path.read_text(encoding="utf-8", errors="replace")
+    official = official_entity.get(label, label)
+    pattern = re.compile(
+        r"\[(DRY RUN|FULL LOAD|INCREMENTAL)\s*\]\s+([A-Za-z_]+)\s+" + dash + r"\s+(\d+)\s+registros"
+    )
+    found = None
+    for match in pattern.finditer(text):
+        if match.group(2) == official:
+            found = {"mode": match.group(1), "records": int(match.group(3))}
+    interesting = []
+    for line in text.splitlines():
+        lower = line.lower()
+        if any(token in lower for token in ("paxapos", "mismo_estado", "skip", "cola de reintentos", "error", "warning", "payload")):
+            interesting.append(line)
+    return {
+        "mode": found["mode"] if found else None,
+        "records": found["records"] if found else None,
+        "lines": interesting[-8:],
+    }
+
+
+def list_counts(counter):
+    if not counter:
+        return "sin resultados"
+    return ", ".join(f"{key}={value}" for key, value in sorted(counter.items()))
+
+
+def stats_text(stats):
+    chunks = []
+    for section in payload_sections:
+        values = stats.get(section)
+        if not values:
+            continue
+        total = values.get("total", 0)
+        ok = values.get("ok", 0)
+        error = values.get("error", 0)
+        chunks.append(f"{section_labels.get(section, section)}: total={total}, ok={ok}, error={error}")
+    return "; ".join(chunks) if chunks else "sin stats de backend"
+
+
+summaries = {}
+global_payloads = 0
+global_requests = 0
+global_responses = 0
+global_backend_errors = 0
+global_modes = Counter()
+
+for entity in entities:
+    requests, responses = parse_json_blocks(tmp_dir / f"{entity}.payload.dump")
+    output = parse_run_output(tmp_dir / f"{entity}.out", entity)
+
+    request_counts = Counter()
+    for request in requests:
+        if not isinstance(request, dict):
+            continue
+        for section in payload_sections:
+            items = request.get(section)
+            if isinstance(items, list):
+                request_counts[section] += len(items)
+
+    stats = defaultdict(lambda: {"total": 0, "ok": 0, "error": 0})
+    modes = Counter()
+    errors = []
+    for response in responses:
+        if not isinstance(response, dict):
+            continue
+        response_stats = response.get("stats") or {}
+        if isinstance(response_stats, dict):
+            for section, values in response_stats.items():
+                if not isinstance(values, dict):
+                    continue
+                stats[section]["total"] += int(values.get("total") or 0)
+                stats[section]["ok"] += int(values.get("ok") or 0)
+                stats[section]["error"] += int(values.get("error") or 0)
+        results = response.get("results") or {}
+        if isinstance(results, dict):
+            for section, rows in results.items():
+                if not isinstance(rows, list):
+                    continue
+                for row in rows:
+                    if isinstance(row, dict) and row.get("mode"):
+                        modes[f"{section}:{row['mode']}"] += 1
+        response_errors = response.get("errors") or []
+        if isinstance(response_errors, list):
+            errors.extend(response_errors)
+
+    payload_count = sum(request_counts.values())
+    backend_error_count = max(len(errors), sum(values.get("error", 0) for values in stats.values()))
+
+    global_payloads += payload_count
+    global_requests += len(requests)
+    global_responses += len(responses)
+    global_backend_errors += backend_error_count
+    global_modes.update(modes)
+
+    created_count = sum(value for key, value in modes.items() if key.endswith(":create"))
+    update_count = sum(value for key, value in modes.items() if key.endswith(":update"))
+    replace_count = sum(value for key, value in modes.items() if key.endswith(":replace"))
+
+    if payload_count == 0:
+        conclusion = "No se genero ni envio payload hacia Paxapos. No hay altas nuevas por esta entidad."
+    elif created_count > 0:
+        conclusion = f"Se envio payload y Paxapos informo {created_count} alta(s) nueva(s) con mode=create."
+    elif update_count or replace_count:
+        conclusion = (
+            "Se envio payload, pero Paxapos no informo altas nuevas; "
+            f"respondio update={update_count}, replace={replace_count}."
+        )
+    else:
+        conclusion = "Se envio payload, pero la respuesta no trajo mode=create/update/replace para confirmar altas."
+
+    summaries[entity] = {
+        "output": output,
+        "requests": len(requests),
+        "responses": len(responses),
+        "request_counts": request_counts,
+        "payload_count": payload_count,
+        "stats": dict(stats),
+        "modes": modes,
+        "errors": errors,
+        "backend_error_count": backend_error_count,
+        "conclusion": conclusion,
+    }
+
+global_created = sum(value for key, value in global_modes.items() if key.endswith(":create"))
+global_updated = sum(value for key, value in global_modes.items() if key.endswith(":update"))
+global_replaced = sum(value for key, value in global_modes.items() if key.endswith(":replace"))
+
+lines = []
+lines.append("─── PAYLOADS Y ALTAS EN PAXAPOS ───")
+lines.append(f"  Payloads generados/enviados: {'SI' if global_payloads else 'NO'} ({global_payloads} item(s) en {global_requests} request(s))")
+lines.append(f"  Respuestas recibidas: {global_responses}")
+lines.append(f"  Registros nuevos confirmados por Paxapos (mode=create): {global_created}")
+lines.append(f"  Actualizaciones confirmadas (mode=update): {global_updated}")
+lines.append(f"  Reemplazos/idempotencia confirmados (mode=replace): {global_replaced}")
+lines.append(f"  Errores reportados por backend: {global_backend_errors}")
+lines.append("  Nota: payload enviado significa actividad hacia Paxapos; alta nueva se confirma solo con mode=create.")
+lines.append("")
+lines.append("  Detalle por entidad:")
+
+for entity in entities:
+    summary = summaries[entity]
+    output = summary["output"]
+    records = output["records"]
+    mode = output["mode"] or "sin modo detectado"
+    records_text = str(records) if records is not None else "no detectado"
+
+    lines.append(f"    - {entity}")
+    lines.append(f"        Filas procesadas por el migrador: {records_text} ({mode})")
+    lines.append(f"        Payloads enviados: {summary['payload_count']} item(s)")
+    lines.append(f"        Respuestas: {summary['responses']}")
+    lines.append(f"        Backend stats: {stats_text(summary['stats'])}")
+    lines.append(f"        Modes: {list_counts(summary['modes'])}")
+    lines.append(f"        Lectura: {summary['conclusion']}")
+    if summary["errors"]:
+        sample = summary["errors"][:3]
+        lines.append(f"        Errores muestra: {json.dumps(sample, ensure_ascii=False)}")
+    if output["lines"]:
+        lines.append("        Lineas relevantes del log:")
+        for log_line in output["lines"]:
+            lines.append(f"          {log_line}")
+
+print("\n".join(lines))
+PY
+)
+PAYLOAD_REPORT_EXIT=$?
+set -e
+
+if [[ $PAYLOAD_REPORT_EXIT -ne 0 ]]; then
+    PAYLOAD_REPORT="─── PAYLOADS Y ALTAS EN PAXAPOS ───
+  No se pudo generar el resumen de payloads.
+  Error del parser:
+$PAYLOAD_REPORT"
+fi
+
 # --- Construir reporte --------------------------------------------------------
 REPORT="═══════════════════════════════════════════════════════════
  REPORTE DIARIO - make migrate-all
@@ -201,6 +464,8 @@ $ERROR_TAIL
 done
 
 REPORT+="
+
+$PAYLOAD_REPORT
 
 ─── COLA DE REINTENTOS ───
 $RETRY_QUEUE
