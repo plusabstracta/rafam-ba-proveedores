@@ -261,6 +261,92 @@ class SourceRepository:
             )
         return out
 
+    def fetch_proveedores_by_keys(self, cod_provs: list[int]) -> tuple[list[str], list[tuple]]:
+        """Fetch specific proveedores by COD_PROV for change detection."""
+        if not cod_provs:
+            return [], []
+        table = self._reflect_table("PROVEEDORES")
+        stmt = select(table).where(table.c.COD_PROV.in_(cod_provs))
+        result = self._conn.execute(stmt)
+        columns = list(result.keys())
+        rows = [tuple(row) for row in result.fetchall()]
+        return columns, rows
+
+    def fetch_oc_items_by_keys(self, oc_keys: list[dict]) -> tuple[list[str], list[tuple]]:
+        """Fetch specific oc_items joined with orden_compra by composite keys for change detection."""
+        if not oc_keys:
+            return [], []
+
+        oc_items = self._reflect_table("OC_ITEMS")
+        orden_compra = self._reflect_table("ORDEN_COMPRA")
+        solic_gastos = self._reflect_table("SOLIC_GASTOS")
+        reg_comp = self._reflect_optional_table("REG_COMP")
+        cta_comprob = self._reflect_optional_table("CTA_COMPROB")
+
+        select_cols = [
+            oc_items,
+            orden_compra.c.COD_PROV,
+            orden_compra.c.FECH_OC.label("OC_FECH_OC"),
+            orden_compra.c.OBSERVACIONES.label("OC_OBSERVACIONES"),
+            orden_compra.c.ESTADO_OC.label("OC_ESTADO_OC"),
+            orden_compra.c.FECH_CONFIRM.label("OC_FECH_CONFIRM"),
+            orden_compra.c.IMPORTE_TOT.label("OC_IMPORTE_TOT"),
+            solic_gastos.c.JURISDICCION.label("SG_JURISDICCION"),
+        ]
+
+        from_clause = (
+            oc_items.join(
+                orden_compra,
+                and_(
+                    oc_items.c.EJERCICIO == orden_compra.c.EJERCICIO,
+                    oc_items.c.UNI_COMPRA == orden_compra.c.UNI_COMPRA,
+                    oc_items.c.NRO_OC == orden_compra.c.NRO_OC,
+                ),
+            ).outerjoin(
+                solic_gastos,
+                and_(
+                    oc_items.c.EJERCICIO == solic_gastos.c.EJERCICIO,
+                    oc_items.c.DELEG_SOLIC == solic_gastos.c.DELEG_SOLIC,
+                    oc_items.c.NRO_SOLIC == solic_gastos.c.NRO_SOLIC,
+                ),
+            )
+        )
+
+        oc_cc = self._build_oc_to_cc_subquery(reg_comp, cta_comprob)
+        if oc_cc is not None:
+            from_clause = from_clause.outerjoin(
+                oc_cc,
+                and_(
+                    orden_compra.c.EJERCICIO == oc_cc.c.OC_EJERCICIO,
+                    orden_compra.c.UNI_COMPRA == oc_cc.c.OC_UNI_COMPRA,
+                    orden_compra.c.NRO_OC == oc_cc.c.OC_NRO,
+                ),
+            )
+            select_cols.extend([
+                oc_cc.c.OC_CC_NRO,
+                oc_cc.c.OC_CC_TIPO_COMPROB,
+                oc_cc.c.OC_CC_COD_PROV,
+            ])
+
+        stmt = select(*select_cols).select_from(from_clause)
+
+        key_filters = []
+        for k in oc_keys:
+            key_filters.append(
+                and_(
+                    oc_items.c.EJERCICIO == k["ejercicio"],
+                    oc_items.c.UNI_COMPRA == k["uni_compra"],
+                    oc_items.c.NRO_OC == k["nro_oc"]
+                )
+            )
+        stmt = stmt.where(or_(*key_filters))
+        stmt = stmt.order_by(oc_items.c.EJERCICIO, oc_items.c.UNI_COMPRA, oc_items.c.NRO_OC, oc_items.c.ITEM_OC)
+
+        result = self._conn.execute(stmt)
+        columns = list(result.keys())
+        rows = [tuple(row) for row in result.fetchall()]
+        return columns, rows
+
     def _build_simple_table_statement(
         self,
         cfg: EntityConfig,

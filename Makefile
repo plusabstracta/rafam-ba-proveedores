@@ -15,14 +15,11 @@ LIMIT ?=
 	extract-cat-uni-med rafam-context status migrator-spec migrator-lookups \
 	migrate-proveedores migrate-proveedores-dry \
 	migrate-oc migrate-oc-dry \
-	migrate-facturas migrate-facturas-dry \
-	migrate-op migrate-op-dry \
-	migrate-retenciones migrate-retenciones-dry \
-	migrate-all migrate-all-dry \
-	reset-all reset-proveedores reset-oc_items reset-solic_gastos reset-orden_pago reset-retenciones \
-	check-integrity-dry check-integrity install-cron show-cron uninstall-cron \
-	backfill-gastos backfill-gastos-dry \
-	test coverage
+	migrate-op migrate-op-dry migrate-all migrate-all-dry \
+	sync-proveedores sync-oc sync-all \
+	migrator-spec migrator-lookups \
+	reset-proveedores reset-pedidos reset-ped_items reset-solic_gastos \
+	reset-orden_compra reset-oc_items reset-orden_pago
 
 help:
 	@echo "RAFAM BA Proveedores - comandos rapidos"
@@ -157,8 +154,17 @@ migrate-retenciones:
 migrate-retenciones-dry:
 	$(PY) main.py run --entity retenciones --batch-size $(BATCH) $(if $(LIMIT),--limit $(LIMIT),) --dry-run
 
-# Pipeline completo: respeta orden de FKs (proveedores -> OC -> facturas -> OP -> retenciones)
-migrate-all: migrate-proveedores migrate-oc migrate-facturas migrate-op migrate-retenciones
+# Detección de cambios (Updates por Hash)
+sync-proveedores:
+	$(PY) main.py sync-changes --entity proveedores --export migrator $(if $(BACKFILL),--backfill-only,) $(if $(DRY),--dry-run,)
+
+sync-oc:
+	$(PY) main.py sync-changes --entity oc_items --export migrator $(if $(BACKFILL),--backfill-only,) $(if $(DRY),--dry-run,)
+
+sync-all: sync-proveedores sync-oc
+
+run-pedidos:
+	$(PY) main.py run --entity pedidos --batch-size $(BATCH) $(if $(LIMIT),--limit $(LIMIT),) --export $(EXPORT)
 
 migrate-all-dry: migrate-proveedores-dry migrate-oc-dry migrate-facturas-dry migrate-op-dry migrate-retenciones-dry
 
