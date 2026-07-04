@@ -675,6 +675,7 @@ class MigratorExporter(BaseExporter):
     def _write_batch_proveedores(self, columns: list[str], rows: list[tuple]) -> None:
         proveedores = []
         raw_by_source_key: dict[str, dict] = {}
+        self._temp_proveedor_payload_hashes = {}
         for row in rows:
             raw = dict(zip(columns, row))
             payload_row = self._map_row("proveedores", raw)
@@ -683,6 +684,8 @@ class MigratorExporter(BaseExporter):
             source_key = self._source_key("proveedores", raw)
             if source_key is not None:
                 raw_by_source_key[source_key] = raw
+                from .change_detection import compute_payload_hash
+                self._temp_proveedor_payload_hashes[str(source_key)] = compute_payload_hash(payload_row.get("Proveedor", {}))
             proveedores.append(payload_row)
 
         if not proveedores:
@@ -1059,28 +1062,11 @@ class MigratorExporter(BaseExporter):
         )
         self._log_unresolved_summary("oc_items")
 
-    def _write_batch_orden_compra(self, columns: list[str], rows: list[tuple]) -> None:
-        """Sync incremental de ORDEN_COMPRA con items.
-
-        La query trae filas a nivel de ítem (ORDEN_COMPRA → OC_ITEMS → SOLIC_GASTOS),
-        con cursor incremental sobre FECH_OC / ESTADO_OC.
-        Reutiliza la misma lógica de agrupación/mapeo que _write_batch_oc_items.
-
-        Casos:
-        - estado R sin link previo → crear en Paxapos (con items)
-        - estado R ya enviada sin gastos nuevos → skip
-        - estado R ya enviada con gastos nuevos → re-enviar para vincular
-        - estado R→A con remote_id → anular en Paxapos
-        - estado N/A sin link R previo → solo registrar localmente
-        """
-        # ── 1. Agrupar filas por OC (cabecera + items) ────────────────────
+    def _group_oc_rows(self, columns: list[str], rows: list[tuple]) -> tuple[dict, dict, dict, int]:
+        """Agrupa las filas de OC en payloads completos de OC (cabecera + items)."""
         grouped: dict[tuple[int, int, int], dict] = {}
         grouped_raw: dict[tuple[int, int, int], dict] = {}
         grouped_gasto_refs: dict[tuple[int, int, int], list[str]] = {}
-        # seen_items_per_oc: dedup por ITEM_OC porque el LEFT JOIN a
-        # SOLIC_GASTOS y oc_to_cc (REG_COMP→CTA_COMPROB) puede multiplicar filas (44% multi-
-        # match en SG, 8% en CC). Sin esto, los totales en Paxapos se inflan
-        # porque sum(item.precio) cuenta cada item N veces.
         seen_items_per_oc: dict[tuple[int, int, int], set[int]] = {}
         skipped_no_prov: set[tuple[int, int, int]] = set()
         unresolved_items = 0
@@ -1140,6 +1126,10 @@ class MigratorExporter(BaseExporter):
                     },
                     "Pedido": pedido,
                     "items": [],
+                    # Campo shadow solo para hash: no se envía a Paxapos, pero
+                    # permite que sync-changes detecte anulaciones (R→A) como
+                    # un cambio de hash sin lógica de deletes separada.
+                    "_rafam_estado_oc": str(raw.get("OC_ESTADO_OC", "")).strip().upper(),
                 }
 
                 # centro_costo_id desde la primera JURISDICCION disponible
@@ -1176,6 +1166,34 @@ class MigratorExporter(BaseExporter):
             if item_oc is not None:
                 seen_items.add(item_oc)
             grouped[key]["items"].append(item)
+
+        return grouped, grouped_raw, grouped_gasto_refs, unresolved_items
+
+    def _write_batch_orden_compra(self, columns: list[str], rows: list[tuple]) -> None:
+        """Sync incremental de ORDEN_COMPRA con items.
+
+        La query trae filas a nivel de ítem (ORDEN_COMPRA → OC_ITEMS → SOLIC_GASTOS),
+        con cursor incremental sobre FECH_OC / ESTADO_OC.
+        Reutiliza la misma lógica de agrupación/mapeo que _write_batch_oc_items.
+
+        Casos:
+        - estado R sin link previo → crear en Paxapos (con items)
+        - estado R ya enviada sin gastos nuevos → skip
+        - estado R ya enviada con gastos nuevos → re-enviar para vincular
+        - estado R→A con remote_id → anular en Paxapos
+        - estado N/A sin link R previo → solo registrar localmente
+        """
+        grouped, grouped_raw, grouped_gasto_refs, unresolved_items = self._group_oc_rows(columns, rows)
+
+        # Calcular hashes para todas las OCs agrupadas
+        self._temp_oc_payload_hashes = {}
+        from .change_detection import compute_payload_hash
+        for key, oc_data in grouped.items():
+            source_key = json.dumps(
+                {"ejercicio": key[0], "nro_oc": key[2], "uni_compra": key[1]},
+                sort_keys=True,
+            )
+            self._temp_oc_payload_hashes[source_key] = compute_payload_hash(oc_data)
 
         # ── 2. Clasificar OCs por acción según estado y link previo ───────
         ocs_to_create: list[dict] = []
@@ -1238,6 +1256,7 @@ class MigratorExporter(BaseExporter):
             remote_id = existing.get("remote_id", "") if existing else ""
             gasto_linked_refs = existing.get("gasto_linked_refs", "") if existing else ""
 
+            payload_hash = self._temp_oc_payload_hashes.get(source_key)
             self._link_store.save_link(
                 entity="orden_compra",
                 source_key=source_key,
@@ -1248,6 +1267,7 @@ class MigratorExporter(BaseExporter):
                 importe_tot=importe_tot,
                 gasto_refs=gasto_refs,
                 gasto_linked_refs=gasto_linked_refs,
+                payload_hash=payload_hash,
             )
 
         # ── 4. Enviar OCs a crear + OCs a anular ─────────────────────────
@@ -3008,12 +3028,21 @@ class MigratorExporter(BaseExporter):
             raw = raw_by_source_key.get(str(source_key))
             cuit = self._normalize_cuit(raw.get("CUIT")) if raw else None
             cod_estado = str(raw.get("COD_ESTADO")) if raw and raw.get("COD_ESTADO") is not None else None
+
+            payload_hash = getattr(self, "_temp_proveedor_payload_hashes", {}).get(str(source_key))
+            if not payload_hash and raw:
+                from .change_detection import compute_payload_hash
+                mapped = map_proveedor_migrator_row(raw)
+                if mapped:
+                    payload_hash = compute_payload_hash(mapped.get("Proveedor", {}))
+
             self._link_store.save_link(
                 entity="proveedores",
                 source_key=str(source_key),
                 remote_id=str(remote_id),
                 cuit=cuit,
                 cod_estado=cod_estado,
+                payload_hash=payload_hash,
             )
 
     def _persist_links_orden_compra(self, results: dict, raw_by_source_key: dict[str, dict]) -> None:
@@ -3052,6 +3081,8 @@ class MigratorExporter(BaseExporter):
             paxapos_gasto_ids_list = result.get("gasto_ids") or []
             paxapos_gasto_ids = ",".join(str(g) for g in paxapos_gasto_ids_list) if paxapos_gasto_ids_list else ""
 
+            payload_hash = getattr(self, "_temp_oc_payload_hashes", {}).get(source_key)
+
             self._link_store.save_link(
                 entity="orden_compra",
                 source_key=source_key,
@@ -3063,6 +3094,7 @@ class MigratorExporter(BaseExporter):
                 gasto_refs=gasto_refs,
                 gasto_linked_refs=gasto_linked_refs,
                 paxapos_gasto_ids=paxapos_gasto_ids,
+                payload_hash=payload_hash,
             )
 
     def _persist_links_solic_gastos(self, results: dict, raw_by_source_key: dict[str, dict]) -> None:

@@ -8,14 +8,14 @@ _TABLE_PREFIX = "link_"
 # Extra columns per entity (beyond the base source_key, remote_id, updated_at).
 # Override via the ``schemas`` parameter in EntityLinkStore.__init__().
 DEFAULT_LINK_SCHEMAS: dict[str, list[str]] = {
-    "proveedores": ["cuit", "cod_estado"],
+    "proveedores": ["cuit", "cod_estado", "payload_hash"],
     "unidad_medida": ["name", "codigo"],
     "tipo_factura": ["name", "codigo"],
     "tipo_pago": ["name", "codigo"],
     "tipo_retencion": ["name", "codigo"],
     "mercaderia": ["barcode", "nombre_compra"],
     "pedido": [],
-    "orden_compra": ["fech_confirm", "estado_oc", "cod_prov", "importe_tot", "gasto_refs", "gasto_linked_refs", "paxapos_gasto_ids", "has_op"],
+    "orden_compra": ["fech_confirm", "estado_oc", "cod_prov", "importe_tot", "gasto_refs", "gasto_linked_refs", "paxapos_gasto_ids", "has_op", "payload_hash"],
     "gasto": ["estado_solic", "importe_tot", "cod_prov"],
     "orden_pago": ["estado_op", "confirmado", "fech_confirm", "importe_total"],
 }
@@ -181,3 +181,11 @@ class EntityLinkStore:
                 if ref:
                     refs.add(ref)
         return refs
+
+    def get_all_links(self, entity: str) -> list[dict]:
+        """Return all links for an entity as a list of dicts."""
+        if entity not in self._schemas:
+            return []
+        table = self._ensure_table(entity)
+        rows = self._conn.execute(f"SELECT * FROM [{table}]").fetchall()
+        return [dict(row) for row in rows]

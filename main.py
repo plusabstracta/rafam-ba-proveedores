@@ -418,6 +418,45 @@ def _cmd_run_locked(args) -> None:
         sys.exit(1)
 
 
+def cmd_sync_changes(args) -> None:
+    if args.entity and args.entity not in ["proveedores", "oc_items"]:
+        logger.error("Entidad para sync-changes debe ser 'proveedores' o 'oc_items'.")
+        sys.exit(1)
+
+    with _exclusive_run_lock():
+        _cmd_sync_changes_locked(args)
+
+
+def _cmd_sync_changes_locked(args) -> None:
+    from src.change_sync import ChangeSyncService
+
+    entities = [args.entity] if args.entity else ["proveedores", "oc_items"]
+    link_store = EntityLinkStore()
+    exporter = build_exporter(args.export, dry_run=args.dry_run)
+
+    failed = False
+    try:
+        source_engine = create_source_engine()
+        with source_engine.connect() as conn:
+            source_repo = SourceRepository(conn)
+            if hasattr(exporter, "attach_source"):
+                exporter.attach_source(source_repo)
+
+            service = ChangeSyncService(source_repo, exporter, link_store)
+            for entity in entities:
+                if not service.sync_entity(entity, backfill_only=args.backfill_only, dry_run=args.dry_run):
+                    failed = True
+    except Exception as exc:
+        logger.error("Error en sync-changes: %s", exc, exc_info=True)
+        sys.exit(1)
+    finally:
+        exporter.close()
+        link_store.close()
+
+    if failed:
+        sys.exit(1)
+
+
 def cmd_spec(args) -> None:
     if args.target != "migrator":
         logger.error("Target de spec no soportado: %s", args.target)
@@ -568,9 +607,28 @@ def main() -> None:
         ),
     )
 
+    sync_p = sub.add_parser("sync-changes", help="Detecta y re-envía registros modificados en RAFAM")
+    sync_p.add_argument("--entity", choices=["proveedores", "oc_items"], help="Filtrar por entidad")
+    sync_p.add_argument(
+        "--export",
+        choices=["csv", "noop", "gateway", "migrator"],
+        default="migrator",
+        help="Destino de salida (default: migrator)",
+    )
+    sync_p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview sin re-enviar ni actualizar hashes locales",
+    )
+    sync_p.add_argument(
+        "--backfill-only",
+        action="store_true",
+        help="Calcula y guarda los hashes de registros ya vinculados sin enviarlos a Paxapos",
+    )
+
     args = parser.parse_args()
     _setup_file_logging(args)
-    {"status": cmd_status, "reset": cmd_reset, "run": cmd_run, "spec": cmd_spec, "lookups": cmd_lookups}[args.command](args)
+    {"status": cmd_status, "reset": cmd_reset, "run": cmd_run, "spec": cmd_spec, "lookups": cmd_lookups, "sync-changes": cmd_sync_changes}[args.command](args)
 
 
 if __name__ == "__main__":

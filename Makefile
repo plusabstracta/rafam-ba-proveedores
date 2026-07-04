@@ -21,6 +21,7 @@ EXPORT ?= csv
 	migrate-proveedores migrate-proveedores-dry \
 	migrate-oc migrate-oc-dry \
 	migrate-op migrate-op-dry migrate-all migrate-all-dry \
+	sync-proveedores sync-oc sync-all \
 	migrator-spec migrator-lookups \
 	reset-proveedores reset-pedidos reset-ped_items reset-solic_gastos \
 	reset-orden_compra reset-oc_items reset-orden_pago
@@ -163,6 +164,15 @@ migrate-op-dry:
 migrate-all: migrate-proveedores migrate-oc migrate-op
 
 migrate-all-dry: migrate-proveedores-dry migrate-oc-dry migrate-op-dry
+
+# Detección de cambios (Updates por Hash)
+sync-proveedores:
+	$(PY) main.py sync-changes --entity proveedores --export migrator $(if $(BACKFILL),--backfill-only,) $(if $(DRY),--dry-run,)
+
+sync-oc:
+	$(PY) main.py sync-changes --entity oc_items --export migrator $(if $(BACKFILL),--backfill-only,) $(if $(DRY),--dry-run,)
+
+sync-all: sync-proveedores sync-oc
 
 run-pedidos:
 	$(PY) main.py run --entity pedidos --batch-size $(BATCH) $(if $(LIMIT),--limit $(LIMIT),) --export $(EXPORT)
