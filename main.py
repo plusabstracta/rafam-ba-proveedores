@@ -27,6 +27,7 @@ from src.checkpoint_store import CheckpointStore
 from src.config import ENTITY_CONFIGS
 from src.db import create_source_engine
 from src.entity_link_store import EntityLinkStore
+from src.error_formatting import describe_exception, format_exception_context
 from src.exporter import BaseExporter, build_exporter, fetch_migrator_lookups, fetch_migrator_spec
 from src.logging_config import setup_file_logging
 from src.retry_store import RetryStore
@@ -169,12 +170,13 @@ def _sync_entity(
     batch_size: int,
     limit: int | None,
     dry_run: bool,
-) -> bool:
+) -> tuple[bool, str | None, dict]:
     """Execute the incremental sync for a single entity.
 
-    Returns True si la entidad se sincronizo OK, False si hubo error. El caller
-    usa este flag para devolver exit code != 0 al SO/cron.
+    Returns (True, None, metrics) si la entidad se sincronizo OK, (False, error_msg, metrics) si hubo error.
+    El caller usa este flag para devolver exit code != 0 al SO/cron y notificar.
     """
+    t_start = time.monotonic()
     cp  = engine.get_checkpoint(entity)
     cfg = ENTITY_CONFIGS[entity]
     mode = "FULL LOAD" if (cp.is_fresh or cfg.full_load) else "INCREMENTAL"
@@ -183,22 +185,47 @@ def _sync_entity(
     # de la misma entidad (no cortar la corrida). Acumulamos errores y al
     # final marcamos la entidad como con errores para que el caller decida.
     failed_batches = 0
+    batches_ok = 0
+    batch_times = []
     last_batch_error: str | None = None
+    last_batch_error_detail: str | None = None
+    query_duration = 0.0
+    total = 0
+
+    metrics = {
+        "entity": entity,
+        "mode": mode,
+        "records_ok": 0,
+        "batches_ok": 0,
+        "batches_failed": 0,
+        "query_duration_secs": 0.0,
+        "duration_secs": 0.0,
+        "batch_times": [],
+        "success": False,
+        "error_msg": None,
+        # Detalle de diagnóstico para el reporte por email (soporte/dev).
+        "error_type": None,        # clase de la excepción (ej: RuntimeError)
+        "error_location": None,    # archivo, línea y función de origen
+        "error_trace": None,       # traceback completo + contexto
+        "migrator_error": None,    # mensaje crudo devuelto por el migrator
+    }
 
     try:
+        t_query_start = time.monotonic()
         stmt = source_repo.build_statement(entity, cp)
-        total   = 0
-        last_id = None
-        last_ts = None
-
         result = source_repo.execute(stmt)
+        query_duration = time.monotonic() - t_query_start
+        metrics["query_duration_secs"] = query_duration
+
         columns = list(result.keys())
         _warn_missing_cursor_fields(cfg, columns, entity)
 
         batch_count = 0
+        last_id = None
+        last_ts = None
 
         def process_batch(batch: list[tuple]) -> None:
-            nonlocal last_id, last_ts, total, batch_count, failed_batches, last_batch_error
+            nonlocal last_id, last_ts, total, batch_count, failed_batches, last_batch_error, last_batch_error_detail, batches_ok
             bid, bts = engine.extract_cursor_values(columns, batch, entity)
             if bid is not None:
                 last_id = max(last_id, bid) if last_id is not None else bid
@@ -208,16 +235,26 @@ def _sync_entity(
             if batch_delay > 0 and batch_count > 0:
                 time.sleep(batch_delay)
 
+            t_batch_start = time.monotonic()
             try:
                 exporter.write_batch(entity, columns, batch)
+                batch_times.append(time.monotonic() - t_batch_start)
+                batches_ok += 1
             except Exception as exc:
-                # Aislamiento por batch: si el POST falla (HTTP 5xx, validacion
-                # del backend, JSON parse, etc.) NO cortamos la entidad. Logueamos
-                # el error con stack trace y seguimos con el proximo batch. El
-                # watermark NO se avanza para este batch (esta logica ya esta abajo:
-                # solo se avanza despues del write exitoso).
+                batch_times.append(time.monotonic() - t_batch_start)
                 failed_batches += 1
                 last_batch_error = str(exc)
+                # Capturar contexto detallado (clase, archivo/línea, traceback,
+                # y respuesta cruda del migrator) para el reporte por email.
+                last_batch_error_detail = format_exception_context(
+                    exc, entity, None,
+                    f"exporter.write_batch — batch #{batch_count + 1} ({len(batch)} filas)",
+                )
+                _info = describe_exception(exc)
+                metrics["error_type"] = _info["error_type"]
+                metrics["error_location"] = _info["error_location"]
+                metrics["error_trace"] = last_batch_error_detail
+                metrics["migrator_error"] = _info["error_message"]
                 logger.error(
                     "[%-11s] %s — batch #%d (%d filas) FALLO: %s. Continuando con el siguiente batch.",
                     mode, entity, batch_count + 1, len(batch), exc,
@@ -261,6 +298,10 @@ def _sync_entity(
 
                 process_batch([tuple(row) for row in raw_rows])
 
+        metrics["records_ok"] = total
+        metrics["batches_ok"] = batches_ok
+        metrics["batches_failed"] = failed_batches
+        metrics["batch_times"] = batch_times
 
         if dry_run:
             logger.info("[DRY RUN   ] %s — %d registros (sin avanzar checkpoint)", entity, total)
@@ -275,16 +316,32 @@ def _sync_entity(
                     "[%-11s] %s — %d registros OK, %d batch(es) con error. Ultimo: %s",
                     mode, entity, total, failed_batches, last_batch_error,
                 )
-                return False
+                metrics["success"] = False
+                metrics["error_msg"] = msg
+                metrics["duration_secs"] = time.monotonic() - t_start
+                return False, msg, metrics
             engine.mark_success(entity, last_id, last_ts, total)
             logger.info("[%-11s] %s — %d registros", mode, entity, total)
-        return True
+        
+        metrics["success"] = True
+        metrics["duration_secs"] = time.monotonic() - t_start
+        return True, None, metrics
 
     except Exception as exc:
         if not dry_run:
             engine.mark_error(entity, str(exc))
         logger.error("[%-11s] %s — ERROR: %s", mode, entity, exc, exc_info=True)
-        return False
+        _info = describe_exception(exc)
+        metrics["success"] = False
+        metrics["error_msg"] = str(exc)
+        metrics["error_type"] = _info["error_type"]
+        metrics["error_location"] = _info["error_location"]
+        metrics["error_trace"] = format_exception_context(
+            exc, entity, None, "sincronización de entidad (nivel superior)",
+        )
+        metrics["migrator_error"] = _info["error_message"]
+        metrics["duration_secs"] = time.monotonic() - t_start
+        return False, str(exc), metrics
 
 
 def _warn_missing_cursor_fields(cfg, columns: list[str], entity: str) -> None:
@@ -316,6 +373,16 @@ def cmd_run(args) -> None:
 
 def _cmd_run_locked(args) -> None:
     from src.config import _EJERCICIO_MIN, _EJERCICIO_MIN_ENTITIES
+    from src.utils import env_bool
+    import socket
+    from datetime import datetime
+
+    run_t0 = time.monotonic()
+    run_start_dt = datetime.now()
+    start_time_str = run_start_dt.strftime("%Y-%m-%d %H:%M:%S")
+    retry_counts_start = {}
+    entity_metrics = []
+
     if _EJERCICIO_MIN:
         if args.entity:
             # Run de una sola entidad: el log habla solo de esa entidad.
@@ -336,38 +403,44 @@ def _cmd_run_locked(args) -> None:
     else:
         logger.info("RAFAM_EJERCICIO_MIN no configurado — se procesarán TODOS los ejercicios")
 
-    exporter = build_exporter(dry_run=args.dry_run)
-    engine   = _build_engine()
-
-    # Determinar las entidades a procesar ANTES de loguear la cola de reintentos,
-    # para filtrar el snapshot por lo que realmente corre esta vez (un run
-    # `--entity retenciones` no debe loguear pendientes de orden_pago/oc_items).
-    # Sin --entity explicito, ejecutar las 5 entidades oficiales en orden de FKs.
-    # Las demas no se migran:
-    #   - orden_compra (header) → reemplazado por oc_items (incluye items embebidos)
-    #   - pedidos / ped_items   → deshabilitados, los pedidos llegan como OCs via oc_items
-    # retenciones corre al final: depende de que la OP (Egreso) ya exista para
-    # resolver el destino; si no, se encola y se reintenta en la proxima corrida.
-    if args.entity:
-        targets = [args.entity]
-    else:
-        official = ["proveedores", "oc_items", "solic_gastos", "orden_pago", "retenciones"]
-        targets = [e for e in official if e in ENTITY_CONFIGS]
-        logger.info("Ejecutando entidades oficiales en orden FK → %s", targets)
-
-    # Cola de reintentos (F1): captura filas rechazadas por el receptor para
-    # reintentarlas en la proxima corrida. Manejo fila-a-fila — el batch no se
-    # cancela por una fila mala; el watermark avanza con seguridad porque lo
-    # pendiente queda registrado aca.
-    retry_store = RetryStore()
-    if hasattr(exporter, "attach_retry_store"):
-        exporter.attach_retry_store(retry_store)
-        pending = retry_store.counts_by_entity(entities=targets)
-        if pending:
-            logger.info("Cola de reintentos al inicio: %s", json.dumps(pending, ensure_ascii=False))
-
+    exporter = None
+    retry_store = None
+    targets = []
     failed_entities: list[str] = []
+    entity_errors: dict[str, str] = {}
+
     try:
+        exporter = build_exporter(dry_run=args.dry_run)
+        engine   = _build_engine()
+
+        # Determinar las entidades a procesar ANTES de loguear la cola de reintentos,
+        # para filtrar el snapshot por lo que realmente corre esta vez (un run
+        # `--entity retenciones` no debe loguear pendientes de orden_pago/oc_items).
+        # Sin --entity explicito, ejecutar las 5 entidades oficiales en orden de FKs.
+        # Las demas no se migran:
+        #   - orden_compra (header) → reemplazado por oc_items (incluye items embebidos)
+        #   - pedidos / ped_items   → deshabilitados, los pedidos llegan como OCs via oc_items
+        # retenciones corre al final: depende de que la OP (Egreso) ya exista para
+        # resolver el destino; si no, se encola y se reintenta en la proxima corrida.
+        if args.entity:
+            targets = [args.entity]
+        else:
+            official = ["proveedores", "oc_items", "solic_gastos", "orden_pago", "retenciones"]
+            targets = [e for e in official if e in ENTITY_CONFIGS]
+            logger.info("Ejecutando entidades oficiales en orden FK → %s", targets)
+
+        # Cola de reintentos (F1): captura filas rechazadas por el receptor para
+        # reintentarlas en la proxima corrida. Manejo fila-a-fila — el batch no se
+        # cancela por una fila mala; el watermark avanza con seguridad porque lo
+        # pendiente queda registrado aca.
+        retry_store = RetryStore()
+        if hasattr(exporter, "attach_retry_store"):
+            exporter.attach_retry_store(retry_store)
+            pending = retry_store.counts_by_entity(entities=targets)
+            if pending:
+                logger.info("Cola de reintentos al inicio: %s", json.dumps(pending, ensure_ascii=False))
+                retry_counts_start = dict(pending)
+
         source_engine = create_source_engine()
         with source_engine.connect() as conn:
             logger.info("Conexión a base origen establecida (%s)", source_engine.url.get_backend_name())
@@ -377,27 +450,158 @@ def _cmd_run_locked(args) -> None:
             if hasattr(exporter, "attach_source"):
                 exporter.attach_source(source_repo)
             for entity in targets:
-                ok = _sync_entity(source_repo, engine, exporter, entity, args.batch_size, args.limit, args.dry_run)
+                ok, err_msg, metrics = _sync_entity(source_repo, engine, exporter, entity, args.batch_size, args.limit, args.dry_run)
+                entity_metrics.append(metrics)
                 if not ok:
                     failed_entities.append(entity)
-    except (SQLAlchemyError, ValueError) as exc:
-        logger.error("Error en la ejecución: %s", exc)
+                    entity_errors[entity] = err_msg or "Error desconocido"
+
+        # Calcular duración total
+        run_duration_secs = time.monotonic() - run_t0
+        hours, rem = divmod(int(run_duration_secs), 3600)
+        minutes, seconds = divmod(rem, 60)
+        duration_formatted = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+        if failed_entities:
+            logger.error(
+                "Sincronización con errores en %d/%d entidades: %s",
+                len(failed_entities), len(targets), ", ".join(failed_entities),
+            )
+            from src.notifier import notify_sync_error, notify_run_report, notify_entity_detailed_report
+            
+            report_sent = False
+            if env_bool("NOTIFY_RUN_REPORT", "false"):
+                summary_data = {
+                    "hostname": socket.gethostname(),
+                    "start_time": start_time_str,
+                    "end_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "duration_formatted": duration_formatted,
+                    "success": False,
+                    "error_msg": f"Las siguientes entidades fallaron: {', '.join(failed_entities)}",
+                    "retry_counts_start": retry_counts_start,
+                    "retry_counts_end": retry_store.counts_by_entity(entities=targets) if retry_store else {},
+                }
+                report_sent = notify_run_report(summary_data, entity_metrics, dry_run=args.dry_run)
+                
+                # Reportes individuales detallados para full load
+                for m in entity_metrics:
+                    if m["mode"] == "FULL LOAD":
+                        notify_entity_detailed_report(m["entity"], m, dry_run=args.dry_run)
+            
+            if not report_sent:
+                notify_sync_error(entity_errors, dry_run=args.dry_run)
+            # Errores de negocio/validación por batch (ej: "factura ya cargada"):
+            # se reportan por mail pero NO cortan la corrida. El run finaliza OK
+            # (exit 0) para que cron/make no falle y las demas entidades/batches
+            # sigan procesandose. Solo los errores de SISTEMA (el `except
+            # Exception` de abajo — ej: crash dict/int, caida de DB) son fatales.
+        else:
+            # Corrida exitosa
+            from src.notifier import notify_run_report, notify_entity_detailed_report
+            if env_bool("NOTIFY_RUN_REPORT", "false"):
+                summary_data = {
+                    "hostname": socket.gethostname(),
+                    "start_time": start_time_str,
+                    "end_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "duration_formatted": duration_formatted,
+                    "success": True,
+                    "error_msg": None,
+                    "retry_counts_start": retry_counts_start,
+                    "retry_counts_end": retry_store.counts_by_entity(entities=targets) if retry_store else {},
+                }
+                notify_run_report(summary_data, entity_metrics, dry_run=args.dry_run)
+
+                # Reportes individuales detallados para full load
+                for m in entity_metrics:
+                    if m["mode"] == "FULL LOAD":
+                        notify_entity_detailed_report(m["entity"], m, dry_run=args.dry_run)
+
+    except Exception as exc:
+        logger.error("Error en la ejecución de la sincronización: %s", exc, exc_info=True)
+        from src.notifier import notify_sync_error, notify_run_report
+        
+        # Calcular duración total
+        run_duration_secs = time.monotonic() - run_t0
+        hours, rem = divmod(int(run_duration_secs), 3600)
+        minutes, seconds = divmod(rem, 60)
+        duration_formatted = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+        report_sent = False
+        if env_bool("NOTIFY_RUN_REPORT", "false"):
+            summary_data = {
+                "hostname": socket.gethostname(),
+                "start_time": start_time_str,
+                "end_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "duration_formatted": duration_formatted,
+                "success": False,
+                "error_msg": f"Excepción general de ejecución: {exc}",
+                "retry_counts_start": retry_counts_start,
+                "retry_counts_end": {},
+            }
+            report_sent = notify_run_report(summary_data, entity_metrics, dry_run=args.dry_run)
+            
+        if not report_sent:
+            notify_sync_error(str(exc), dry_run=args.dry_run)
+        sys.exit(1)
+    finally:
+        if exporter:
+            exporter.close()
+        try:
+            if retry_store and targets:
+                final_pending = retry_store.counts_by_entity(entities=targets)
+                if final_pending:
+                    logger.info("Cola de reintentos al finalizar: %s", json.dumps(final_pending, ensure_ascii=False))
+        except Exception:
+            pass
+        finally:
+            if retry_store:
+                retry_store.close()
+        logger.info("Proceso finalizado.")
+
+
+def cmd_sync_changes(args) -> None:
+    if args.entity and args.entity not in ["proveedores", "oc_items"]:
+        logger.error("Entidad para sync-changes debe ser 'proveedores' o 'oc_items'.")
+        sys.exit(1)
+
+    with _exclusive_run_lock():
+        _cmd_sync_changes_locked(args)
+
+
+def _cmd_sync_changes_locked(args) -> None:
+    from src.change_sync import ChangeSyncService
+
+    entities = [args.entity] if args.entity else ["proveedores", "oc_items"]
+    link_store = EntityLinkStore()
+    exporter = build_exporter(dry_run=args.dry_run)
+
+    retry_store = None
+    failed = False
+    try:
+        retry_store = RetryStore()
+        if hasattr(exporter, "attach_retry_store"):
+            exporter.attach_retry_store(retry_store)
+
+        source_engine = create_source_engine()
+        with source_engine.connect() as conn:
+            source_repo = SourceRepository(conn)
+            if hasattr(exporter, "attach_source"):
+                exporter.attach_source(source_repo)
+
+            service = ChangeSyncService(source_repo, exporter, link_store)
+            for entity in entities:
+                if not service.sync_entity(entity, backfill_only=args.backfill_only, dry_run=args.dry_run):
+                    failed = True
+    except Exception as exc:
+        logger.error("Error en sync-changes: %s", exc, exc_info=True)
         sys.exit(1)
     finally:
         exporter.close()
-        try:
-            final_pending = retry_store.counts_by_entity(entities=targets)
-            if final_pending:
-                logger.info("Cola de reintentos al finalizar: %s", json.dumps(final_pending, ensure_ascii=False))
-        finally:
+        link_store.close()
+        if retry_store:
             retry_store.close()
-        logger.info("Proceso finalizado.")
 
-    if failed_entities:
-        logger.error(
-            "Sincronización con errores en %d/%d entidades: %s",
-            len(failed_entities), len(targets), ", ".join(failed_entities),
-        )
+    if failed:
         sys.exit(1)
 
 
@@ -468,6 +672,130 @@ def cmd_reconcile(args) -> None:
     logger.info("Reconciliacion OK: sin drift.")
 
 
+# ─── backfill-gastos ──────────────────────────────────────────────────────────
+
+
+def cmd_backfill_gastos(args) -> None:
+    """Backfill unico: recupera links locales faltantes de gastos ya migrados.
+
+    La ventana incremental solo re-escanea los ultimos 30 dias. Los gastos ya
+    presentes en Paxapos pero SIN link local siguen reenviandose en cada corrida
+    y el receptor los rechaza como duplicados, engordando la cola de reintentos.
+
+    Este comando fuerza un escaneo COMPLETO de solic_gastos (ignora la ventana
+    de 30 dias y NO toca el checkpoint incremental persistido) y reenvia solo los
+    gastos aun sin link — la Solucion B del mapper omite los ya vinculados. Cada
+    respuesta con exito + id persiste el link via upsert, con lo que el gasto deja
+    de reenviarse en las proximas corridas.
+
+    Los gastos que el receptor no logra reconocer por upsert (divergencia entre la
+    busqueda del upsert y la validacion de duplicado) quedan sin link: esos
+    dependen de la Solucion A (idempotencia garantizada en el receptor) y quedan
+    encolados para reintento.
+    """
+    with _exclusive_run_lock():
+        _cmd_backfill_gastos_locked(args)
+
+
+def _cmd_backfill_gastos_locked(args) -> None:
+    from src.models import Checkpoint
+
+    entity = "solic_gastos"
+    dry_run = bool(getattr(args, "dry_run", False))
+    batch_size = getattr(args, "batch_size", 500) or 500
+    limit = getattr(args, "limit", None)
+
+    if dry_run:
+        logger.warning(
+            "Backfill en dry-run: el receptor NO persiste, por lo que NO se "
+            "recuperan links. Sirve solo para ver cuantos gastos se reenviarian."
+        )
+
+    link_store = EntityLinkStore()
+    links_before = link_store.count("gasto")
+    link_store.close()
+
+    exporter = None
+    retry_store = None
+    total_scanned = 0
+    try:
+        exporter = build_exporter(dry_run=dry_run)
+        retry_store = RetryStore()
+        if hasattr(exporter, "attach_retry_store"):
+            exporter.attach_retry_store(retry_store)
+
+        source_engine = create_source_engine()
+        with source_engine.connect() as conn:
+            logger.info(
+                "Backfill gastos: conexion origen (%s), escaneo COMPLETO de %s",
+                source_engine.url.get_backend_name(), entity,
+            )
+            source_repo = SourceRepository(conn)
+            if hasattr(exporter, "attach_source"):
+                exporter.attach_source(source_repo)
+
+            # Checkpoint sintetico "fresco" (todo None) -> fuerza full scan sin
+            # tocar el checkpoint incremental persistido en state/checkpoint.db.
+            fresh_cp = Checkpoint(entity=entity)
+            stmt = source_repo.build_statement(entity, fresh_cp)
+            result = source_repo.execute(stmt)
+            columns = list(result.keys())
+
+            def process_batch(batch: list[tuple]) -> None:
+                nonlocal total_scanned
+                try:
+                    exporter.write_batch(entity, columns, batch)
+                except Exception as exc:  # noqa: BLE001 - seguir con el proximo batch
+                    logger.error(
+                        "Backfill: batch de %d filas FALLO: %s. Continuando.",
+                        len(batch), exc, exc_info=True,
+                    )
+                    return
+                total_scanned += len(batch)
+
+            group_fields = GROUPED_BATCH_FIELDS.get(entity)
+            if group_fields:
+                for batch in iter_grouped_batches(result, columns, group_fields, batch_size):
+                    if limit is not None and total_scanned >= limit:
+                        break
+                    process_batch(batch)
+            else:
+                while True:
+                    remaining = None if limit is None else limit - total_scanned
+                    if remaining is not None and remaining <= 0:
+                        break
+                    fetch_n = batch_size if remaining is None else min(batch_size, remaining)
+                    raw_rows = result.fetchmany(fetch_n)
+                    if not raw_rows:
+                        break
+                    process_batch([tuple(row) for row in raw_rows])
+
+        link_store = EntityLinkStore()
+        links_after = link_store.count("gasto")
+        link_store.close()
+        recovered = links_after - links_before
+
+        logger.info(
+            "Backfill gastos finalizado: filas escaneadas=%d, links antes=%d, "
+            "links despues=%d, recuperados=%d.",
+            total_scanned, links_before, links_after, recovered,
+        )
+        if not dry_run and total_scanned > 0 and recovered <= 0:
+            logger.warning(
+                "No se recuperaron links nuevos: los gastos que siguen sin "
+                "vinculo dependen de la Solucion A (idempotencia en el receptor)."
+            )
+    except Exception as exc:
+        logger.error("Backfill gastos: error general: %s", exc, exc_info=True)
+        sys.exit(1)
+    finally:
+        if exporter:
+            exporter.close()
+        if retry_store:
+            retry_store.close()
+        logger.info("Backfill gastos: proceso finalizado.")
+
+
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 
@@ -529,9 +857,34 @@ def main() -> None:
         help="Preview: no avanza checkpoints; envia el payload con dry_run=true (el receptor no persiste)",
     )
 
+    backfill_p = sub.add_parser(
+        "backfill-gastos",
+        help="Backfill unico: recupera links faltantes de gastos ya migrados (escaneo completo, no toca el checkpoint)",
+    )
+    backfill_p.add_argument("--limit", type=int, metavar="N", help="Máximo de filas a escanear (útil para testear)")
+    backfill_p.add_argument("--batch-size", type=int, default=500, metavar="N", help="Filas por lote (default: 500)")
+    backfill_p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview: envia con dry_run=true; el receptor NO persiste, no recupera links",
+    )
+
+    sync_p = sub.add_parser("sync-changes", help="Detecta y re-envía registros modificados en RAFAM")
+    sync_p.add_argument("--entity", choices=["proveedores", "oc_items"], help="Filtrar por entidad")
+    sync_p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview sin re-enviar ni actualizar hashes locales",
+    )
+    sync_p.add_argument(
+        "--backfill-only",
+        action="store_true",
+        help="Calcula y guarda los hashes de registros ya vinculados sin enviarlos a Paxapos",
+    )
+
     args = parser.parse_args()
-    setup_file_logging(args)
-    {"status": cmd_status, "reset": cmd_reset, "run": cmd_run, "spec": cmd_spec, "lookups": cmd_lookups, "reconcile": cmd_reconcile}[args.command](args)
+    _setup_file_logging(args)
+    {"status": cmd_status, "reset": cmd_reset, "run": cmd_run, "spec": cmd_spec, "lookups": cmd_lookups, "sync-changes": cmd_sync_changes}[args.command](args)
 
 
 if __name__ == "__main__":

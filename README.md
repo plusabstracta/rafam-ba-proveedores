@@ -447,6 +447,89 @@ make migrate-all BATCH=500
 
 `reset` borra tambien vinculos locales RAFAM -> Paxapos para la entidad afectada. Usarlo con cuidado en produccion.
 
+## Detección de Cambios y Sincronización de Modificaciones (Updates)
+
+Para mantener actualizados los registros que sufren modificaciones en RAFAM (por ejemplo, cambios de razón social, CUIT, importes o ítems de órdenes de compra), se implementó un subcomando `sync-changes` que utiliza detección de cambios basada en un hash SHA-256 determinista del payload.
+
+### Entidades soportadas
+* **Proveedores** (`proveedores`)
+* **Órdenes de compra** (`oc_items` / `orden_compra`)
+
+*Nota: Por diseño del sistema, no se procesan eliminaciones o bajas (deletes). Solo se detectan y sincronizan actualizaciones/ediciones (updates).*
+
+### Funcionamiento básico
+1. El script lee todos los vínculos guardados localmente en `state/checkpoint.db`.
+2. Realiza consultas rápidas a RAFAM utilizando únicamente las claves de los registros vinculados.
+3. Mapea el registro actual y calcula el hash de su payload normalizado.
+4. Si el hash local no coincide (o es nulo), detecta que hubo un cambio, re-envía el payload al migrator de Paxapos (con `upsert=true`) y actualiza el hash local.
+
+### Ejecución manual (Makefile)
+Se dispone de los siguientes targets simplificados:
+```bash
+# Detectar y re-enviar proveedores modificados
+make sync-proveedores
+
+# Detectar y re-enviar órdenes de compra modificadas
+make sync-oc
+
+# Sincronizar ambas entidades
+make sync-all
+```
+
+#### Opciones útiles:
+* **Previsualización (Dry Run):** Muestra cuántos registros se hubieran enviado sin despachar las peticiones reales ni alterar la base de datos local:
+  ```bash
+  make sync-all DRY=1
+  ```
+* **Inicialización de hashes (Backfill):** Útil para la primera ejecución en un entorno donde ya se hayan migrado registros. Calcula y guarda los hashes de los registros ya vinculados en la SQLite local sin enviar peticiones HTTP a Paxapos:
+  ```bash
+  make sync-all BACKFILL=1
+  ```
+
+  > **Importante (bootstrap):** en un entorno con registros ya migrados *antes* de existir el `payload_hash`, ejecutá **primero** el backfill. De lo contrario, la primera corrida normal detectaría todos los registros como "nuevos" (hash nulo) y los re-enviaría en masa. Tras el backfill, las corridas siguientes solo re-envían cambios reales.
+
+### Crontab para ejecución periódica semanal
+Se recomienda integrar esta sincronización una vez por semana (por ejemplo, el domingo a la madrugada) para no sobrecargar los servidores durante días hábiles.
+
+La forma recomendada es usar el instalador de crons, que toma las frecuencias `SYNC_PROVEEDORES_SCHEDULE` y `SYNC_OC_SCHEDULE` de `cron.conf` y agrega las entradas con `flock` automáticamente:
+```bash
+bash scripts/install_crons.sh
+```
+
+Alternativamente, para agregarlas manualmente al crontab (`crontab -e`):
+```cron
+# Detección de cambios y sincronización semanal (Todos los domingos a las 03:00 y 04:00 AM)
+0 3 * * 0 cd "$RAFAM_DIR" && /usr/bin/flock -n state/locks/sync_changes_prov.lock .venv/bin/python main.py sync-changes --entity proveedores
+0 4 * * 0 cd "$RAFAM_DIR" && /usr/bin/flock -n state/locks/sync_changes_oc.lock .venv/bin/python main.py sync-changes --entity oc_items
+```
+
+## Modo gateway directo legacy
+
+El exporter `gateway` existe para proveedores y usa endpoints JSON directos de Paxapos. Es util para
+mantenimiento puntual, pero el flujo productivo recomendado es `--export migrator`.
+
+Variables necesarias:
+
+```dotenv
+PAXAPOS_URL=https://proveedores.madariaga.gob.ar
+PAXAPOS_TENANT=madariaga
+PAXAPOS_JWT=<jwt>
+PAXAPOS_PROVEEDORES_ENDPOINT=account/proveedores.json
+PAXAPOS_PROVEEDORES_UPDATE_ENDPOINT=account/proveedores/edit/{id}.json
+```
+
+Crear solo proveedores nuevos:
+
+```bash
+.venv/bin/python main.py run --entity proveedores --export gateway
+```
+
+Actualizar proveedores ya vinculados localmente:
+
+```bash
+.venv/bin/python main.py run --entity proveedores --export gateway --force-update
+```
+
 ## Referencia rapida de comandos
 
 | Comando | Uso |
@@ -469,6 +552,9 @@ make migrate-all BATCH=500
 | `make migrate-all-dry` | Dry-run del pipeline oficial completo. |
 | `make migrate-all` | Import real del pipeline oficial completo. |
 | `make reset-all` | Resetea checkpoints y links locales. |
+| `make sync-proveedores` | Detecta y re-envía proveedores modificados en RAFAM. |
+| `make sync-oc` | Detecta y re-envía OCs modificadas en RAFAM. |
+| `make sync-all` | Ejecuta la detección de cambios para proveedores y OCs. |
 | `make test` | Corre pytest. |
 
 Variables Make utiles:

@@ -15,12 +15,11 @@ LIMIT ?=
 	extract-cat-uni-med rafam-context status migrator-spec migrator-lookups \
 	migrate-proveedores migrate-proveedores-dry \
 	migrate-oc migrate-oc-dry \
-	migrate-facturas migrate-facturas-dry \
-	migrate-op migrate-op-dry \
-	migrate-retenciones migrate-retenciones-dry \
-	migrate-all migrate-all-dry \
-	reset-all reset-proveedores reset-oc_items reset-solic_gastos reset-orden_pago reset-retenciones \
-	test coverage
+	migrate-op migrate-op-dry migrate-all migrate-all-dry \
+	sync-proveedores sync-oc sync-all \
+	migrator-spec migrator-lookups \
+	reset-proveedores reset-pedidos reset-ped_items reset-solic_gastos \
+	reset-orden_compra reset-oc_items reset-orden_pago
 
 help:
 	@echo "RAFAM BA Proveedores - comandos rapidos"
@@ -50,6 +49,13 @@ help:
 	@echo "  make reset-orden_pago   Resetea checkpoint de orden_pago"
 	@echo "  make reset-retenciones  Resetea checkpoint de retenciones"
 	@echo "  make reset-all          Resetea todos los checkpoints"
+	@echo "  make check-integrity-dry  Ejecuta verificador de integridad en modo lectura (dry-run)"
+	@echo "  make check-integrity      Aplica correcciones de integridad (anulaciones + reenvio de proveedores)"
+	@echo "  make backfill-gastos      Recupera links faltantes de gastos ya migrados (escaneo completo, no toca checkpoint)"
+	@echo "  make backfill-gastos-dry  Preview del backfill (no persiste, solo muestra cuantos gastos se reenviarian)"
+	@echo "  make install-cron         Instala/actualiza los cron jobs basados en cron.conf con flock"
+	@echo "  make show-cron            Muestra los cron jobs activos de este proyecto"
+	@echo "  make uninstall-cron       Elimina todos los cron jobs de este proyecto en el crontab"
 	@echo "  make test               Corre tests"
 	@echo "  make coverage           Corre tests y exige 80%+ de cobertura en src/"
 	@echo ""
@@ -148,8 +154,17 @@ migrate-retenciones:
 migrate-retenciones-dry:
 	$(PY) main.py run --entity retenciones --batch-size $(BATCH) $(if $(LIMIT),--limit $(LIMIT),) --dry-run
 
-# Pipeline completo: respeta orden de FKs (proveedores -> OC -> facturas -> OP -> retenciones)
-migrate-all: migrate-proveedores migrate-oc migrate-facturas migrate-op migrate-retenciones
+# Detección de cambios (Updates por Hash)
+sync-proveedores:
+	$(PY) main.py sync-changes --entity proveedores $(if $(BACKFILL),--backfill-only,) $(if $(DRY),--dry-run,)
+
+sync-oc:
+	$(PY) main.py sync-changes --entity oc_items $(if $(BACKFILL),--backfill-only,) $(if $(DRY),--dry-run,)
+
+sync-all: sync-proveedores sync-oc
+
+run-pedidos:
+	$(PY) main.py run --entity pedidos --batch-size $(BATCH) $(if $(LIMIT),--limit $(LIMIT),) --export $(EXPORT)
 
 migrate-all-dry: migrate-proveedores-dry migrate-oc-dry migrate-facturas-dry migrate-op-dry migrate-retenciones-dry
 
@@ -177,3 +192,30 @@ test:
 coverage:
 	$(COVERAGE) run --source=src -m pytest -q
 	$(COVERAGE) report --fail-under=80 -m
+
+# ─── Integridad y Cron ────────────────────────────────────────────────────────
+
+check-integrity-dry:
+	$(PY) scripts/check_integrity.py --dry-run
+
+check-integrity:
+	$(PY) scripts/check_integrity.py --apply
+
+# Backfill unico: recupera links locales faltantes de gastos ya migrados.
+# Fuerza un escaneo COMPLETO de solic_gastos (ignora la ventana de 30 dias) sin
+# tocar el checkpoint incremental; solo reenvia gastos aun sin link (Solucion B).
+backfill-gastos:
+	$(PY) main.py backfill-gastos --batch-size $(BATCH) $(if $(LIMIT),--limit $(LIMIT),)
+
+backfill-gastos-dry:
+	$(PY) main.py backfill-gastos --batch-size $(BATCH) $(if $(LIMIT),--limit $(LIMIT),) --dry-run
+
+install-cron:
+	bash scripts/install_crons.sh
+
+show-cron:
+	@crontab -l 2>/dev/null | grep "$(shell pwd)" || echo "Sin cron jobs instalados para este proyecto."
+
+uninstall-cron:
+	@( crontab -l 2>/dev/null | grep -v "$(shell pwd)" ) | crontab - && echo "Cron jobs de este proyecto eliminados."
+

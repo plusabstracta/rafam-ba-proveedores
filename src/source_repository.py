@@ -261,6 +261,98 @@ class SourceRepository:
             )
         return out
 
+    def fetch_proveedores_by_keys(self, cod_provs: list[int]) -> tuple[list[str], list[tuple]]:
+        """Fetch specific proveedores by COD_PROV for change detection."""
+        if not cod_provs:
+            return [], []
+        table = self._reflect_table("PROVEEDORES")
+        stmt = select(table).where(table.c.COD_PROV.in_(cod_provs))
+        result = self._conn.execute(stmt)
+        columns = list(result.keys())
+        rows = [tuple(row) for row in result.fetchall()]
+        return columns, rows
+
+    def fetch_oc_items_by_keys(
+        self, oc_keys: list[dict], *, ejercicio_min: int | None = None
+    ) -> tuple[list[str], list[tuple]]:
+        """Fetch specific oc_items joined with orden_compra by composite keys for change detection."""
+        if not oc_keys:
+            return [], []
+
+        oc_items = self._reflect_table("OC_ITEMS")
+        orden_compra = self._reflect_table("ORDEN_COMPRA")
+        solic_gastos = self._reflect_table("SOLIC_GASTOS")
+        reg_comp = self._reflect_optional_table("REG_COMP")
+        cta_comprob = self._reflect_optional_table("CTA_COMPROB")
+
+        select_cols = [
+            oc_items,
+            orden_compra.c.COD_PROV,
+            orden_compra.c.FECH_OC.label("OC_FECH_OC"),
+            orden_compra.c.OBSERVACIONES.label("OC_OBSERVACIONES"),
+            orden_compra.c.ESTADO_OC.label("OC_ESTADO_OC"),
+            orden_compra.c.FECH_CONFIRM.label("OC_FECH_CONFIRM"),
+            orden_compra.c.IMPORTE_TOT.label("OC_IMPORTE_TOT"),
+            solic_gastos.c.JURISDICCION.label("SG_JURISDICCION"),
+        ]
+
+        from_clause = (
+            oc_items.join(
+                orden_compra,
+                and_(
+                    oc_items.c.EJERCICIO == orden_compra.c.EJERCICIO,
+                    oc_items.c.UNI_COMPRA == orden_compra.c.UNI_COMPRA,
+                    oc_items.c.NRO_OC == orden_compra.c.NRO_OC,
+                ),
+            ).outerjoin(
+                solic_gastos,
+                and_(
+                    oc_items.c.EJERCICIO == solic_gastos.c.EJERCICIO,
+                    oc_items.c.DELEG_SOLIC == solic_gastos.c.DELEG_SOLIC,
+                    oc_items.c.NRO_SOLIC == solic_gastos.c.NRO_SOLIC,
+                ),
+            )
+        )
+
+        oc_cc = self._build_oc_to_cc_subquery(reg_comp, cta_comprob)
+        if oc_cc is not None:
+            from_clause = from_clause.outerjoin(
+                oc_cc,
+                and_(
+                    orden_compra.c.EJERCICIO == oc_cc.c.OC_EJERCICIO,
+                    orden_compra.c.UNI_COMPRA == oc_cc.c.OC_UNI_COMPRA,
+                    orden_compra.c.NRO_OC == oc_cc.c.OC_NRO,
+                ),
+            )
+            select_cols.extend([
+                oc_cc.c.OC_CC_NRO,
+                oc_cc.c.OC_CC_TIPO_COMPROB,
+                oc_cc.c.OC_CC_COD_PROV,
+            ])
+
+        stmt = select(*select_cols).select_from(from_clause)
+
+        key_filters = []
+        for k in oc_keys:
+            key_filters.append(
+                and_(
+                    oc_items.c.EJERCICIO == k["ejercicio"],
+                    oc_items.c.UNI_COMPRA == k["uni_compra"],
+                    oc_items.c.NRO_OC == k["nro_oc"]
+                )
+            )
+        stmt = stmt.where(or_(*key_filters))
+        # Cota de seguridad: nunca traer OCs anteriores al ejercicio mínimo
+        # migrado, aunque un link viejo persista una clave fuera de rango.
+        if ejercicio_min is not None:
+            stmt = stmt.where(oc_items.c.EJERCICIO >= ejercicio_min)
+        stmt = stmt.order_by(oc_items.c.EJERCICIO, oc_items.c.UNI_COMPRA, oc_items.c.NRO_OC, oc_items.c.ITEM_OC)
+
+        result = self._conn.execute(stmt)
+        columns = list(result.keys())
+        rows = [tuple(row) for row in result.fetchall()]
+        return columns, rows
+
     def _build_simple_table_statement(
         self,
         cfg: EntityConfig,
@@ -795,6 +887,7 @@ class SourceRepository:
             return stmt
 
         base_filter = key_cols["ejercicio"] >= cfg.ejercicio_min
+
         required_ocs = self._build_op_required_oc_subquery(cfg.ejercicio_min)
         if required_ocs is None:
             return stmt.where(base_filter)
@@ -883,8 +976,6 @@ class SourceRepository:
         extra_filters: list | None = None,
         apply_ejercicio_min: bool = True,
     ) -> Select:
-        # Apply ejercicio_min only for entities whose config explicitly enables it.
-        # It is independent from full_load/fresh checkpoint behavior.
         if apply_ejercicio_min and cfg.ejercicio_min is not None:
             ej_col = self._safe_column(table, "EJERCICIO")
             if ej_col is not None:
@@ -941,3 +1032,207 @@ class SourceRepository:
         if not column_name:
             return None
         return table.c.get(column_name)
+
+    # ── Integridad: lookups puntuales por clave de negocio ────────────────
+
+    # Configuración por entidad: tabla RAFAM, campos de estado y PK de negocio.
+    _INTEGRIDAD_CONFIG: dict[str, dict] = {
+        "proveedores": {
+            "table": "PROVEEDORES",
+            "pk": [("COD_PROV", "cod_prov")],          # (columna_rafam, campo_source_key)
+            "estado_col": "COD_ESTADO",
+            "anulado_valor": None,                      # para proveedores: any change, no fixed value
+            "fech_anul_col": None,
+        },
+        "orden_compra": {
+            "table": "ORDEN_COMPRA",
+            "pk": [
+                ("EJERCICIO", "ejercicio"),
+                ("UNI_COMPRA", "uni_compra"),
+                ("NRO_OC", "nro_oc"),
+            ],
+            "estado_col": "ESTADO_OC",
+            "anulado_valor": "A",
+            "fech_anul_col": "FECH_ANUL",
+        },
+        "gasto": {
+            "table": "SOLIC_GASTOS",
+            "pk": [
+                ("EJERCICIO", "ejercicio"),
+                ("DELEG_SOLIC", "deleg_solic"),
+                ("NRO_SOLIC", "nro_solic"),
+            ],
+            "estado_col": "ESTADO_SOLIC",
+            "anulado_valor": "A",
+            "fech_anul_col": "FECH_ANUL",
+        },
+        "orden_pago": {
+            "table": "ORDEN_PAGO",
+            "pk": [
+                ("EJERCICIO", "ejercicio"),
+                ("NRO_OP", "nro_op"),
+            ],
+            "estado_col": "ESTADO_OP",
+            "anulado_valor": "A",
+            "fech_anul_col": "FECH_ANUL",
+        },
+        # retenciones comparte tabla con orden_pago; la anulación se detecta
+        # verificando que la OP padre esté anulada.
+        "retenciones": {
+            "table": "ORDEN_PAGO",
+            "pk": [
+                ("EJERCICIO", "ejercicio"),
+                ("NRO_OP", "nro_op"),
+            ],
+            "estado_col": "ESTADO_OP",
+            "anulado_valor": "A",
+            "fech_anul_col": "FECH_ANUL",
+        },
+    }
+
+    def fetch_estado_by_key(
+        self,
+        entity: str,
+        source_key: str,
+    ) -> dict | None:
+        """Consulta puntual del estado de anulación de un registro por su clave de negocio.
+
+        Devuelve un dict con los campos de estado/anulación del registro, o None
+        si el registro no existe físicamente en RAFAM (eliminación física, raro).
+
+        El dict incluye siempre:
+          - ``estado``: valor del campo de estado (ej. 'A', 'C', 'R', '0', ...)
+          - ``anulado``: bool — True si estado == anulado_valor del config
+          - ``fech_anul``: valor de FECH_ANUL si existe, o None
+          - ``source_key``: echo del source_key recibido
+
+        Uso típico en el script de integridad::
+
+            info = repo.fetch_estado_by_key("orden_compra", source_key)
+            if info is None:
+                # registro eliminado físicamente
+            elif info["anulado"]:
+                # fue anulado en RAFAM → marcar deleted_at en link store
+        """
+        import json as _json
+
+        cfg = self._INTEGRIDAD_CONFIG.get(entity)
+        if cfg is None:
+            raise ValueError(f"fetch_estado_by_key: entidad no soportada: {entity!r}")
+
+        table = self._reflect_table(cfg["table"])
+
+        # Parsear source_key: puede ser un entero directo (proveedores) o JSON
+        pk_values: dict[str, object] = {}
+        if len(cfg["pk"]) == 1:
+            # Caso simple: source_key es el valor directo de la PK
+            col_rafam, _ = cfg["pk"][0]
+            try:
+                pk_values[col_rafam] = int(source_key)
+            except (ValueError, TypeError):
+                pk_values[col_rafam] = source_key
+        else:
+            # Caso compuesto: source_key es JSON {"ejercicio": X, "nro_op": Y, ...}
+            try:
+                parsed = _json.loads(source_key)
+            except (ValueError, TypeError):
+                logger.error(
+                    "fetch_estado_by_key: source_key no es JSON válido para %s: %r",
+                    entity, source_key,
+                )
+                return None
+            for col_rafam, key_name in cfg["pk"]:
+                value = parsed.get(key_name)
+                if value is not None:
+                    try:
+                        pk_values[col_rafam] = int(value)
+                    except (ValueError, TypeError):
+                        pk_values[col_rafam] = value
+
+        # Construir los campos a seleccionar
+        estado_col_name = cfg["estado_col"]
+        fech_col_name = cfg.get("fech_anul_col")
+
+        select_cols = []
+        estado_col = self._safe_column(table, estado_col_name)
+        if estado_col is not None:
+            select_cols.append(estado_col.label("estado"))
+
+        fech_col = self._safe_column(table, fech_col_name) if fech_col_name else None
+        if fech_col is not None:
+            select_cols.append(fech_col.label("fech_anul"))
+
+        if not select_cols:
+            # Fallback: al menos traemos algo para saber si existe
+            select_cols.append(literal_column("1").label("exists_flag"))
+
+        # Construir filtros de PK
+        pk_filters = []
+        for col_rafam, _ in cfg["pk"]:
+            col = self._safe_column(table, col_rafam)
+            if col is not None and col_rafam in pk_values:
+                pk_filters.append(col == pk_values[col_rafam])
+
+        if not pk_filters:
+            logger.error(
+                "fetch_estado_by_key: no se pudieron construir filtros PK para %s key=%r",
+                entity, source_key,
+            )
+            return None
+
+        stmt = select(*select_cols).select_from(table).where(and_(*pk_filters))
+
+        try:
+            row = self._conn.execute(stmt).fetchone()
+        except SQLAlchemyError as exc:
+            logger.error(
+                "fetch_estado_by_key: error al consultar %s key=%r: %s",
+                entity, source_key, exc,
+            )
+            return None
+
+        if row is None:
+            return None  # registro no existe físicamente
+
+        mapping = row._mapping
+        estado = mapping.get("estado")
+        fech_anul = mapping.get("fech_anul") if fech_col is not None else None
+        anulado_valor = cfg.get("anulado_valor")
+        anulado = (str(estado) == anulado_valor) if (estado is not None and anulado_valor is not None) else False
+
+        return {
+            "source_key": source_key,
+            "estado": estado,
+            "anulado": anulado,
+            "fech_anul": fech_anul,
+        }
+
+    def fetch_proveedor_row(self, cod_prov: int) -> dict | None:
+        """Trae la fila completa de PROVEEDORES para recalcular el hash de contenido.
+
+        Devuelve un dict con todos los campos del registro, o None si no existe.
+        Usado exclusivamente por el script de integridad para detectar cambios de
+        contenido en proveedores ya migrados a Paxapos.
+        """
+        try:
+            table = self._reflect_table("PROVEEDORES")
+        except Exception as exc:
+            logger.error("fetch_proveedor_row: no se pudo reflejar PROVEEDORES: %s", exc)
+            return None
+
+        cod_col = self._safe_column(table, "COD_PROV")
+        if cod_col is None:
+            logger.error("fetch_proveedor_row: columna COD_PROV no encontrada en PROVEEDORES")
+            return None
+
+        stmt = select(table).where(cod_col == cod_prov)
+        try:
+            row = self._conn.execute(stmt).fetchone()
+        except SQLAlchemyError as exc:
+            logger.error("fetch_proveedor_row: error al consultar COD_PROV=%s: %s", cod_prov, exc)
+            return None
+
+        if row is None:
+            return None
+        return dict(row._mapping)
+

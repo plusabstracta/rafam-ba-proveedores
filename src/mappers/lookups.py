@@ -48,6 +48,9 @@ class LookupResolver:
         self._tipos_retencion_by_codename = build_single_index(self._tipos_retencion, "codename")
         self._tipos_retencion_by_name = build_single_index(self._tipos_retencion, "name")
 
+        # MercaderÃ­as: catÃ¡logo remoto para resoluciÃ³n offline por nombre.
+        self._mercaderias = lookup_list(lookup_payload, "mercaderias")
+
     # ââ Tipo Factura ââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 
     def resolve_tipo_factura_id(self, tipo_doc) -> int | None:
@@ -95,6 +98,11 @@ class LookupResolver:
     def tipos_retencion(self) -> list[dict]:
         """Catalogo de tipos de retenciÃ³n para contadores de skip."""
         return self._tipos_retencion
+
+    @property
+    def mercaderias(self) -> list[dict]:
+        """Catalogo de mercaderÃ­as del tenant para resoluciÃ³n por nombre."""
+        return self._mercaderias
 
     def resolve_tipo_retencion_id(self, cod_ret, descripcion) -> int | None:
         """Resuelve tipo_impuesto_id por codigo y/o descripcion."""

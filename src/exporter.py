@@ -137,11 +137,21 @@ class MigratorExporter(BaseExporter):
         self._timeout = self._http._timeout
         self._verify_ssl = self._http._verify_ssl
 
+        # URL del resolvedor de mercaderias para compatibilidad retroactiva
+        # con tests y para inyectarla en OcItemsMapper.
+        self._resolver_endpoint = _resolve_endpoint(
+            "PAXAPOS_RAFAM_RESOLVER_PATH", "rafam/migracion/resolver_mercaderia.json"
+        )
+        self._resolver_url = _build_migrator_url_impl(
+            self._base_url, self._tenant, self._resolver_endpoint
+        )
+
         self._lookup_payload = fetch_migrator_lookups([
             "unidades_de_medida",
             "tipos_factura",
             "tipos_de_pago",
             "tipos_retencion",
+            "mercaderias",
         ])
         self._lookup = LookupResolver(self._lookup_payload)
         self._source_repo = None
@@ -150,7 +160,11 @@ class MigratorExporter(BaseExporter):
         self._last_parsed = None
 
         # ââ Mapper instances âââââââââââââââââââââââââââââââââââââââââââââ
-        self._oc_mapper = OcItemsMapper(link_store=self._link_store, lookup_resolver=self._lookup)
+        self._oc_mapper = OcItemsMapper(
+            link_store=self._link_store,
+            lookup_resolver=self._lookup,
+            resolver_url=self._resolver_url,
+        )
         self._sg_mapper = SolicGastosMapper(link_store=self._link_store, lookup_resolver=self._lookup)
         self._op_mapper = OrdenPagoMapper(link_store=self._link_store, lookup_resolver=self._lookup)
         self._ret_mapper = RetencionesMapper(link_store=self._link_store, lookup_resolver=self._lookup)
@@ -554,7 +568,17 @@ class MigratorExporter(BaseExporter):
         return self._sg_mapper._map_solic_gasto(raw)
 
     def _map_oc_item(self, raw):
-        return self._oc_mapper._map_oc_item(raw)
+        return self._oc_mapper._map_oc_item(
+            raw, post_fn=self._post_json, allow_api=not self._dry_run
+        )
+
+    def _mercaderia_description_source_key(self, normalized):
+        return self._oc_mapper._mercaderia_description_source_key(normalized)
+
+    @property
+    def _mercaderia_resolved(self):
+        """Cache de resoluciones de mercaderia (delegado al mapper de OC)."""
+        return self._oc_mapper._mercaderia_resolved
 
     def _map_deduccion_dict(self, ded, ejercicio, nro_op):
         return self._op_mapper._map_deduccion_dict(ded, ejercicio, nro_op)

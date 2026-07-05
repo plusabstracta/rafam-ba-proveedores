@@ -462,7 +462,9 @@ class TestWriteBatchOrdenPago:
         assert op["gasto_nro_comprobante"] == "0001-00012345"
         assert op["pedido_id"] == 789
         assert op["importe_total"] == 12100.00
-        assert op["importe_neto"] == 315814.05
+        # importe_neto se calcula por comprobante (nivel Gasto), no a nivel OP
+        # (refactor c15ad89: se removio la asignacion global de importe_neto).
+        assert "importe_neto" not in op
         assert "neto_transferido" not in op["Egreso"]
         # Gasto enviado con todos los datos fiscales reales
         assert len(payload["gastos"]) == 1

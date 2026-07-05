@@ -193,7 +193,8 @@ class TestOcIntegration:
         for oc in all_ocs:
             assert len(oc["items"]) > 0, f"OC {oc['external_id']} sin items"
             for item in oc["items"]:
-                assert "name" in item
+                # Resueltos por link: llevan mercaderia_id, no el nombre redundante.
+                assert isinstance(item.get("mercaderia_id"), int)
                 assert "mercaderia_external_ref" not in item
                 assert "cantidad" in item
                 assert "unidad_de_medida_id" in item

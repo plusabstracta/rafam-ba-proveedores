@@ -1,4 +1,4 @@
-"""proveedores.py â Mapper para entidad PROVEEDORES.
+"""proveedores.py â€” Mapper para entidad PROVEEDORES.
 
 Transforma filas crudas de RAFAM PROVEEDORES al formato del migrator
 Paxapos y persiste entity links a partir de la respuesta del API.
@@ -9,12 +9,17 @@ from __future__ import annotations
 import logging
 
 from ..gateway_mapper import map_proveedor_migrator_row
+from ..change_detection import compute_payload_hash
 from ..utils import normalize_cuit
 
 logger = logging.getLogger(__name__)
 
 
-def map_rows(columns: list[str], rows: list[tuple]) -> tuple[list[dict], dict[str, dict]]:
+def map_rows(
+    columns: list[str],
+    rows: list[tuple],
+    link_store: Any | None = None,
+) -> tuple[list[dict], dict[str, dict]]:
     """Transforma filas RAFAM PROVEEDORES al formato migrator.
 
     Returns:
@@ -31,6 +36,11 @@ def map_rows(columns: list[str], rows: list[tuple]) -> tuple[list[dict], dict[st
         source_key = _source_key(raw)
         if source_key is not None:
             raw_by_source_key[source_key] = raw
+            if link_store:
+                remote_id = link_store.get_remote_id("proveedores", source_key)
+                if remote_id:
+                    # Inyectar el ID de Paxapos existente para actualizarlo
+                    payload_row["Proveedor"]["id"] = int(remote_id)
         proveedores.append(payload_row)
 
     return proveedores, raw_by_source_key
@@ -42,13 +52,15 @@ def build_payload(
     *,
     dry_run: bool,
     payload_options: dict,
+    link_store: Any | None = None,
 ) -> tuple[dict | None, dict[str, dict]]:
     """Construye el payload completo para POST al migrator.
 
     Returns:
         (payload, raw_by_source_key) o (None, {}) si no hay datos.
     """
-    proveedores, raw_by_source_key = map_rows(columns, rows)
+    from typing import Any
+    proveedores, raw_by_source_key = map_rows(columns, rows, link_store=link_store)
 
     if not proveedores:
         logger.info("Migrator [proveedores]: lote vacio luego del mapeo")
@@ -92,12 +104,18 @@ def persist_links(parsed: dict, raw_by_source_key: dict[str, dict], link_store) 
         raw = raw_by_source_key.get(str(source_key))
         cuit = normalize_cuit(raw.get("CUIT")) if raw else None
         cod_estado = str(raw.get("COD_ESTADO")) if raw and raw.get("COD_ESTADO") is not None else None
+        payload_hash = None
+        if raw:
+            mapped = map_proveedor_migrator_row(raw)
+            if mapped:
+                payload_hash = compute_payload_hash(mapped.get("Proveedor", {}))
         link_store.save_link(
             entity="proveedores",
             source_key=str(source_key),
             remote_id=str(remote_id),
             cuit=cuit,
             cod_estado=cod_estado,
+            payload_hash=payload_hash,
         )
 
 
@@ -113,7 +131,7 @@ def log_stats(parsed: dict, dry_run: bool) -> None:
     )
 
 
-# ââ Helpers ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _source_key(raw: dict) -> str | None:
     """Extrae la clave de negocio de un row de proveedores."""
@@ -121,5 +139,5 @@ def _source_key(raw: dict) -> str | None:
     return str(value) if value is not None else None
 
 
-# SecciÃ³n de resultado en la respuesta del API
+# Sección de resultado en la respuesta del API
 RESULT_SECTION = "proveedores"
