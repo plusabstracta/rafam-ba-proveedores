@@ -44,7 +44,11 @@ from .http_client import (
 )
 from .mappers.lookups import LookupResolver
 from .mappers import proveedores as prov_mapper
-from .mappers.oc_items import OcItemsMapper, persist_links as oc_persist_links
+from .mappers.oc_items import (
+    OcItemsMapper,
+    persist_links as oc_persist_links,
+    _compose_oc_observacion as oc_compose_oc_observacion,
+)
 from .mappers.solic_gastos import (
     SolicGastosMapper,
     persist_links as sg_persist_links,
@@ -108,6 +112,13 @@ class BaseExporter(ABC):
     @abstractmethod
     def write_batch(self, entity: str, columns: list[str], rows: list[tuple]) -> None:
         """Procesa un lote de filas para la entidad dada."""
+
+    def set_payload_hashes(self, entity: str, payload_hashes: dict[str, str]) -> None:
+        """Inyecta hashes precomputados para persistir links despues del envio."""
+        if entity == "proveedores":
+            self._temp_proveedor_payload_hashes = dict(payload_hashes)
+        elif entity == "oc_items":
+            self._temp_oc_payload_hashes = dict(payload_hashes)
 
     def attach_source(self, source_repo) -> None:
         """Inyecta SourceRepository para fetch secundarios. Default: no-op."""
@@ -814,6 +825,10 @@ class MigratorExporter(BaseExporter):
             grouped[key]["items"].append(item)
 
         return grouped, grouped_raw, grouped_gasto_refs, unresolved_items
+
+    @staticmethod
+    def _compose_oc_observacion(raw: dict) -> str | None:
+        return oc_compose_oc_observacion(raw)
 
     def _write_batch_orden_compra(self, columns: list[str], rows: list[tuple]) -> None:
         """Sync incremental de ORDEN_COMPRA con items.

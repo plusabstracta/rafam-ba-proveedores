@@ -598,6 +598,20 @@ def _cmd_sync_changes_locked(args) -> None:
         sys.exit(1)
 
 
+def _sync_entity_changes(
+    source_repo: SourceRepository,
+    exporter: BaseExporter,
+    link_store: EntityLinkStore,
+    entity: str,
+    backfill_only: bool = False,
+    dry_run: bool = False,
+) -> bool:
+    from src.change_sync import ChangeSyncService
+
+    service = ChangeSyncService(source_repo, exporter, link_store)
+    return service.sync_entity(entity, backfill_only=backfill_only, dry_run=dry_run)
+
+
 def cmd_spec(args) -> None:
     if args.target != "migrator":
         logger.error("Target de spec no soportado: %s", args.target)
@@ -882,8 +896,17 @@ def main() -> None:
     )
 
     args = parser.parse_args()
-    _setup_file_logging(args)
-    {"status": cmd_status, "reset": cmd_reset, "run": cmd_run, "spec": cmd_spec, "lookups": cmd_lookups, "sync-changes": cmd_sync_changes}[args.command](args)
+    setup_file_logging(args)
+    {
+        "status": cmd_status,
+        "reset": cmd_reset,
+        "run": cmd_run,
+        "spec": cmd_spec,
+        "lookups": cmd_lookups,
+        "reconcile": cmd_reconcile,
+        "backfill-gastos": cmd_backfill_gastos,
+        "sync-changes": cmd_sync_changes,
+    }[args.command](args)
 
 
 if __name__ == "__main__":

@@ -71,6 +71,13 @@ class ChangeSyncService:
             logger.error("Entidad no soportada para sync-changes: %s", entity)
             return False
 
+    def _set_payload_hashes(self, entity: str, payload_hashes: dict[str, str]) -> None:
+        self._exporter.set_payload_hashes(entity, payload_hashes)
+        if entity == "proveedores":
+            setattr(self._exporter, "_temp_proveedor_payload_hashes", dict(payload_hashes))
+        elif entity == "oc_items":
+            setattr(self._exporter, "_temp_oc_payload_hashes", dict(payload_hashes))
+
     # ── Proveedores ──────────────────────────────────────────────────────
 
     def _sync_proveedores(self, *, backfill_only: bool, dry_run: bool) -> bool:
@@ -169,7 +176,7 @@ class ChangeSyncService:
             return True
 
         try:
-            self._exporter.set_payload_hashes("proveedores", payload_hashes)
+            self._set_payload_hashes("proveedores", payload_hashes)
             self._exporter.write_batch("proveedores", columns, to_send)
         except Exception as exc:
             logger.error("[SYNC-CHANGES] Falló el re-envío de proveedores: %s", exc)
@@ -300,7 +307,7 @@ class ChangeSyncService:
             return True
 
         try:
-            self._exporter.set_payload_hashes("oc_items", payload_hashes)
+            self._set_payload_hashes("oc_items", payload_hashes)
             self._exporter.write_batch("oc_items", columns, to_send)
         except Exception as exc:
             logger.error("[SYNC-CHANGES] Falló el re-envío de oc_items: %s", exc)
