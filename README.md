@@ -330,6 +330,9 @@ make migrate-all BATCH=500
 
 ### 5. Crontab Debian sin sudo para las 5 entidades oficiales
 
+Resumen rapido de operacion (produccion vs desarrollo, scripts con email y crons):
+`docs/scripts_crons_resumen.md`
+
 Si no hay acceso `sudo` al servidor, configurar el cron del usuario que tiene el proyecto y la
 `.env` productiva. El ejemplo usa `flock` para evitar corridas superpuestas si una importacion
 tarda mas que el intervalo.

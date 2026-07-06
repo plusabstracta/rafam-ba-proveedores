@@ -37,57 +37,25 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     fi
 done < "$PROJECT_DIR/cron.conf"
 
-# Verificar que las variables necesarias existan
-for var in PROV_LABORAL PROV_FUERA OC_LABORAL OC_FUERA SG_LABORAL SG_FUERA OP_LABORAL OP_FUERA RET_LABORAL RET_FUERA INTEGRITY_SCHEDULE; do
-    if [[ -z "${!var:-}" ]]; then
-        echo "❌ Error: Variable $var no definida en cron.conf"
-        exit 1
-    fi
-done
-
-# Función helper para soportar intervalos de 30s usando sleep
-append_cron_entry() {
-    local schedule="$1"
-    local entity="$2"
-    if [[ "$schedule" == "30s" ]]; then
-        echo "* * * * * $RUN $entity" >> "$TMP"
-        echo "* * * * * sleep 30 && $RUN $entity" >> "$TMP"
-    else
-        echo "$schedule $RUN $entity" >> "$TMP"
-    fi
-}
+# Defaults de cron.conf (una sola corrida del pipeline completo):
+# PIPELINE_SCHEDULE ejecuta TODAS las entidades en orden de FK en un mismo
+# proceso (proveedores -> oc_items -> solic_gastos -> orden_pago -> retenciones)
+# y al terminar envia UN unico mail con la duracion total y, si hubo errores,
+# el detalle por entidad y la respuesta del migrator.
+: "${PIPELINE_SCHEDULE:=*/10 * * * *}"
+: "${INTEGRITY_SCHEDULE:=0 2 * * *}"
 
 # Quitar entradas previas de este proyecto (por PROJECT_DIR) y registrar
 TMP=$(mktemp)
 ( crontab -l 2>/dev/null | grep -v "$PROJECT_DIR" || true ) > "$TMP"
 
-# ── proveedores ──
-append_cron_entry "$PROV_LABORAL" proveedores
-append_cron_entry "$PROV_FUERA" proveedores
-
-# ── oc_items ──
-append_cron_entry "$OC_LABORAL" oc_items
-append_cron_entry "$OC_FUERA" oc_items
-
-# ── solic_gastos ──
-append_cron_entry "$SG_LABORAL" solic_gastos
-append_cron_entry "$SG_FUERA" solic_gastos
-
-# ── orden_pago ──
-append_cron_entry "$OP_LABORAL" orden_pago
-append_cron_entry "$OP_FUERA" orden_pago
-
-# ── retenciones ──
-append_cron_entry "$RET_LABORAL" retenciones
-append_cron_entry "$RET_FUERA" retenciones
+# ── Pipeline completo: todas las entidades en orden, un unico mail final ──
+# run_entity.sh all -> main.py run (proveedores -> oc_items -> solic_gastos
+# -> orden_pago -> retenciones) con NOTIFY_RUN_REPORT=true.
+echo "$PIPELINE_SCHEDULE $RUN all" >> "$TMP"
 
 # ── check_integrity (diario off-hours con lock) ──
-if [[ "$INTEGRITY_SCHEDULE" == "30s" ]]; then
-    echo "* * * * * flock -n $PROJECT_DIR/state/locks/integrity.lock $PY $INTEGRITY --apply >> $INTEGRITY_LOG 2>&1" >> "$TMP"
-    echo "* * * * * sleep 30 && flock -n $PROJECT_DIR/state/locks/integrity.lock $PY $INTEGRITY --apply >> $INTEGRITY_LOG 2>&1" >> "$TMP"
-else
-    echo "$INTEGRITY_SCHEDULE  flock -n $PROJECT_DIR/state/locks/integrity.lock $PY $INTEGRITY --apply >> $INTEGRITY_LOG 2>&1" >> "$TMP"
-fi
+echo "$INTEGRITY_SCHEDULE flock -n $PROJECT_DIR/state/locks/integrity.lock $PY $INTEGRITY --apply >> $INTEGRITY_LOG 2>&1" >> "$TMP"
 
 crontab "$TMP"
 rm -f "$TMP"
