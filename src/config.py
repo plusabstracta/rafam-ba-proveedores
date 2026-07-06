@@ -21,17 +21,7 @@ load_dotenv(_PROJECT_ROOT / ".env")
 
 SCHEMA = "OWNER_RAFAM"
 
-_EJERCICIO_MIN = 2026
-_EJERCICIO_MIN_ENTITIES = {
-    "oc_items",
-    "solic_gastos",
-    "orden_pago",
-    "retenciones",
-}
-
-
-def _ejercicio_min_for(entity: str) -> int | None:
-    return _EJERCICIO_MIN if entity in _EJERCICIO_MIN_ENTITIES else None
+_EJERCICIO_MIN = int(os.getenv("RAFAM_EJERCICIO_MIN", "0")) or None
 
 ENTITY_CONFIGS: dict[str, EntityConfig] = {
     "proveedores": EntityConfig(
@@ -39,11 +29,33 @@ ENTITY_CONFIGS: dict[str, EntityConfig] = {
         table_name="PROVEEDORES",
         ts_field="FECHA_ULT_COMP",
     ),
+    "pedidos": EntityConfig(
+        name="pedidos",
+        table_name="PEDIDOS",
+        ts_field="FECH_EMI",
+        ejercicio_min=_EJERCICIO_MIN,
+    ),
+    "ped_items": EntityConfig(
+        name="ped_items",
+        table_name="PED_ITEMS",
+        full_load=True,  # no reliable cursor column yet — confirm with explore_schema.py
+        ejercicio_min=_EJERCICIO_MIN,
+    ),
+    "orden_compra": EntityConfig(
+        name="orden_compra",
+        table_name="ORDEN_COMPRA",
+        ts_field="FECH_OC",
+        # Re-process OCs with estado N from recent days to detect N→A transitions.
+        pending_state_field="ESTADO_OC",
+        pending_state_value="N",
+        pending_reprocess_days=30,
+        ejercicio_min=_EJERCICIO_MIN,
+    ),
     "oc_items": EntityConfig(
         name="oc_items",
         table_name="OC_ITEMS",
         full_load=True,  # no date/timestamp column in table
-        ejercicio_min=_ejercicio_min_for("oc_items"),
+        ejercicio_min=_EJERCICIO_MIN,
     ),
     "solic_gastos": EntityConfig(
         name="solic_gastos",
@@ -54,7 +66,7 @@ ENTITY_CONFIGS: dict[str, EntityConfig] = {
         pending_state_field="ESTADO_SOLIC",
         pending_state_value="C",
         pending_reprocess_days=30,
-        ejercicio_min=_ejercicio_min_for("solic_gastos"),
+        ejercicio_min=_EJERCICIO_MIN,
     ),
     "orden_pago": EntityConfig(
         name="orden_pago",
@@ -63,22 +75,8 @@ ENTITY_CONFIGS: dict[str, EntityConfig] = {
         # Re-process confirmed normal payments from recent days in case their
         # linked gastos became available after the first attempt.
         pending_state_field="ESTADO_OP",
-        pending_state_value="C",
+        pending_state_value="N",
         pending_reprocess_days=30,
-        ejercicio_min=_ejercicio_min_for("orden_pago"),
-    ),
-    # Retenciones como pasada independiente (F3). Escanea ORDEN_PAGO (misma
-    # tabla/cursor que orden_pago) y por cada OP confirmada trae sus deducciones
-    # desde ORDEN_PAGO_DEDUC (clave 1:1 (EJERCICIO, NRO_OP)). NO usa la tabla
-    # RETENCIONES, cuya clave (EJERCICIO, NRO_CANCE) es N:1 con la OP y
-    # asignaria las retenciones a la orden de pago equivocada.
-    "retenciones": EntityConfig(
-        name="retenciones",
-        table_name="ORDEN_PAGO",
-        ts_field="FECH_CONFIRM",
-        pending_state_field="ESTADO_OP",
-        pending_state_value="C",
-        pending_reprocess_days=30,
-        ejercicio_min=_ejercicio_min_for("retenciones"),
+        ejercicio_min=_EJERCICIO_MIN,
     ),
 }
