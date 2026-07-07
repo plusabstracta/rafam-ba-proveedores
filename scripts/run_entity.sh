@@ -3,7 +3,7 @@
 # Wrapper seguro con flock: evita que dos corridas se pisen.
 #   <entity>  corre una sola entidad:     main.py run --entity <entity>
 #   all       corre el pipeline completo:  main.py run  (todas en orden de FK)
-#             y al terminar envia UN unico mail (NOTIFY_RUN_REPORT=true).
+#             y registra la corrida para el resumen diario (sin mail por corrida).
 set -euo pipefail
 
 ENTITY="${1:?Falta entidad (usa 'all' para el pipeline completo)}"
@@ -26,17 +26,18 @@ TS_START=$(date '+%Y-%m-%d %H:%M:%S')
 
 # -n: non-blocking. Si el lock ya está tomado, sale con código 1.
 if ! flock -n "$LOCK_FILE" true; then
-    echo "[$TS_START] [SKIP] ${ENTITY}: corrida anterior aun en curso (lock activo)" >> "$LOG_FILE"
+    echo "[$TS_START] [SKIP] ${ENTITY}: corrida anterior aun en curso (lock activo)" | tee -a "$LOG_FILE"
     exit 0
 fi
 
 # Ejecutar dentro del lock (flock mantiene el fd abierto durante el subproceso)
 exec flock -n "$LOCK_FILE" bash -c "
-    echo '[$TS_START] [START] ${ENTITY}' >> '$LOG_FILE'
+    echo '[$TS_START] [START] ${ENTITY}' | tee -a '$LOG_FILE'
     T0=\$(date +%s)
     cd '$PROJECT_DIR'
     .venv/bin/python main.py ${RUN_ARGS} >> '$LOG_FILE' 2>&1
     RC=\$?
     ELAPSED=\$(( \$(date +%s) - T0 ))
-    echo \"[\$(date '+%Y-%m-%d %H:%M:%S')] [END] ${ENTITY}: rc=\$RC duracion=\${ELAPSED}s\" >> '$LOG_FILE'
+    echo \"[\$(date '+%Y-%m-%d %H:%M:%S')] [END] ${ENTITY}: rc=\$RC duracion=\${ELAPSED}s\" | tee -a '$LOG_FILE'
+    exit \$RC
 "
