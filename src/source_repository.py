@@ -118,12 +118,12 @@ class SourceRepository:
                 return 0
             inner = select(*cols).distinct()
             if ejercicio_min and has_ejercicio:
-                inner = inner.where(table.c.EJERCICIO >= ejercicio_min)
+                inner = inner.where(self._ejercicio_boundary_filter(table, ejercicio_min))
             stmt = select(func.count()).select_from(inner.subquery())
         else:
             stmt = select(func.count()).select_from(table)
             if ejercicio_min and has_ejercicio:
-                stmt = stmt.where(table.c.EJERCICIO >= ejercicio_min)
+                stmt = stmt.where(self._ejercicio_boundary_filter(table, ejercicio_min))
 
         return int(self._conn.execute(stmt).scalar() or 0)
 
@@ -890,7 +890,10 @@ class SourceRepository:
             )
             base_filter = or_(
                 key_cols["ejercicio"] >= cfg.ejercicio_min,
-                fech_confirm_col >= cutoff,
+                and_(
+                    key_cols["ejercicio"] == cfg.ejercicio_min - 1,
+                    fech_confirm_col >= cutoff,
+                ),
             )
         else:
             base_filter = key_cols["ejercicio"] >= cfg.ejercicio_min
@@ -974,6 +977,33 @@ class SourceRepository:
             stmt = stmt.where(and_(*base_filters))
         return stmt.order_by(orden_pago.c.EJERCICIO, orden_pago.c.NRO_OP)
 
+    def _ejercicio_boundary_filter(self, table, ejercicio_min: int, ej_col=None):
+        """Corte por ejercicio con excepcion de cruce fiscal.
+
+        Se incluye la fila si EJERCICIO >= ejercicio_min, O si pertenece al
+        ejercicio inmediatamente anterior (ejercicio_min - 1) pero fue
+        confirmada ya en el ejercicio nuevo (FECH_CONFIRM >= ejercicio_min-01-01).
+        Esto captura OC/OP/SG/retenciones de 2025 confirmadas en 2026, que deben
+        migrarse igual. FECH_CONFIRM solo se setea al confirmar, asi que la fecha
+        actua como senial de confirmacion.
+
+        Si la tabla no tiene FECH_CONFIRM, cae al corte simple EJERCICIO >= min.
+        """
+        if ej_col is None:
+            ej_col = self._safe_column(table, "EJERCICIO")
+        fech_confirm_col = self._safe_column(table, "FECH_CONFIRM")
+        if fech_confirm_col is None:
+            return ej_col >= ejercicio_min
+        cutoff = (
+            f"{ejercicio_min:04d}-01-01"
+            if self._conn.dialect.name == "sqlite"
+            else datetime(ejercicio_min, 1, 1)
+        )
+        return or_(
+            ej_col >= ejercicio_min,
+            and_(ej_col == ejercicio_min - 1, fech_confirm_col >= cutoff),
+        )
+
     def _apply_incremental_filters(
         self,
         stmt: Select,
@@ -986,24 +1016,9 @@ class SourceRepository:
         if apply_ejercicio_min and cfg.ejercicio_min is not None:
             ej_col = self._safe_column(table, "EJERCICIO")
             if ej_col is not None:
-                if cfg.name in ("orden_pago", "retenciones"):
-                    fech_confirm_col = self._safe_column(table, "FECH_CONFIRM")
-                    if fech_confirm_col is not None:
-                        cutoff = (
-                            f"{cfg.ejercicio_min:04d}-01-01"
-                            if self._conn.dialect.name == "sqlite"
-                            else datetime(cfg.ejercicio_min, 1, 1)
-                        )
-                        stmt = stmt.where(
-                            or_(
-                                ej_col >= cfg.ejercicio_min,
-                                fech_confirm_col >= cutoff,
-                            )
-                        )
-                    else:
-                        stmt = stmt.where(ej_col >= cfg.ejercicio_min)
-                else:
-                    stmt = stmt.where(ej_col >= cfg.ejercicio_min)
+                stmt = stmt.where(
+                    self._ejercicio_boundary_filter(table, cfg.ejercicio_min, ej_col)
+                )
 
         if cfg.full_load or cp.is_fresh or (cp.last_id is None and cp.last_ts is None):
             return stmt

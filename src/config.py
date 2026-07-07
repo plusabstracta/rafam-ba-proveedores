@@ -21,7 +21,13 @@ load_dotenv(_PROJECT_ROOT / ".env")
 
 SCHEMA = "OWNER_RAFAM"
 
-_EJERCICIO_MIN = int(os.getenv("RAFAM_EJERCICIO_MIN", "0")) or None
+# Ejercicio minimo a migrar. Por defecto 2026 (hardcodeado) pero se puede
+# sobrescribir por entorno (RAFAM_EJERCICIO_MIN) si hiciera falta.
+# La regla de corte (ver source_repository._ejercicio_boundary_filter) admite
+# ademas una excepcion de cruce fiscal: entidades del ejercicio anterior
+# (min-1) confirmadas ya en el ejercicio nuevo (FECH_CONFIRM >= min-01-01)
+# tambien se migran.
+_EJERCICIO_MIN = int(os.getenv("RAFAM_EJERCICIO_MIN", "2026")) or None
 
 ENTITY_CONFIGS: dict[str, EntityConfig] = {
     "proveedores": EntityConfig(

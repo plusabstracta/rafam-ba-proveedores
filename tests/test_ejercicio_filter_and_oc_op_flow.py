@@ -254,6 +254,68 @@ class TestEjercicioMinFilter:
         oc_keys = {(r[0], r[1], r[2]) for r in rows}
         assert len(oc_keys) == 4, f"Deben ser 4 OCs, encontradas: {oc_keys}"
 
+    def test_orden_compra_incluye_2025_confirmada_en_2026(self, engine_with_data):
+        """Excepción de cruce fiscal: una OC de ejercicio 2025 pero confirmada
+        ya en 2026 (FECH_CONFIRM >= 2026-01-01) SÍ debe migrarse. La OC de 2025
+        confirmada en 2025 sigue excluida."""
+        with engine_with_data.connect() as conn:
+            conn.execute(text("""
+                INSERT INTO ORDEN_COMPRA VALUES
+                (2025, 1, 77, 100, '2025-12-20', '2026-02-15', 'OC 2025 conf 2026', 'R', 12345, NULL)
+            """))
+            conn.commit()
+
+        cfg = EntityConfig(
+            name="orden_compra",
+            table_name="ORDEN_COMPRA",
+            ts_field="FECH_OC",
+            pending_state_field="ESTADO_OC",
+            pending_state_value="N",
+            pending_reprocess_days=30,
+            ejercicio_min=2026,
+        )
+        cp = Checkpoint(entity="orden_compra")
+
+        with engine_with_data.connect() as conn:
+            repo = SourceRepository(conn)
+            with patch.dict("src.config.ENTITY_CONFIGS", {"orden_compra": cfg}):
+                stmt = repo.build_statement("orden_compra", cp)
+                rows = conn.execute(stmt).fetchall()
+
+        oc_keys = {(r[0], r[1], r[2]) for r in rows}
+        assert (2025, 1, 77) in oc_keys, "OC 2025 confirmada en 2026 debe incluirse"
+        assert (2025, 1, 1) not in oc_keys, "OC 2025 confirmada en 2025 sigue excluida"
+
+    def test_orden_pago_incluye_2025_confirmada_en_2026(self, engine_with_data):
+        """Excepción de cruce fiscal para OP: ejercicio 2025 confirmada en 2026."""
+        with engine_with_data.connect() as conn:
+            conn.execute(text("""
+                INSERT INTO ORDEN_PAGO VALUES
+                (2025, 888, 100, 'C', 'S', '2026-02-10', 12345, 100, 'Pago 2025 conf 2026')
+            """))
+            conn.commit()
+
+        cfg = EntityConfig(
+            name="orden_pago",
+            table_name="ORDEN_PAGO",
+            ts_field="FECH_CONFIRM",
+            pending_state_field="ESTADO_OP",
+            pending_state_value="N",
+            pending_reprocess_days=30,
+            ejercicio_min=2026,
+        )
+        cp = Checkpoint(entity="orden_pago")
+
+        with engine_with_data.connect() as conn:
+            repo = SourceRepository(conn)
+            with patch.dict("src.config.ENTITY_CONFIGS", {"orden_pago": cfg}):
+                stmt = repo.build_statement("orden_pago", cp)
+                rows = conn.execute(stmt).fetchall()
+
+        keys = {(r[0], r[1]) for r in rows}  # (EJERCICIO, NRO_OP)
+        assert (2025, 888) in keys, "OP 2025 confirmada en 2026 debe incluirse"
+        assert (2025, 999) not in keys, "OP 2025 confirmada en 2025 sigue excluida"
+
 
 # ─── Tests: Flujo OC → OP ────────────────────────────────────────────────────
 
