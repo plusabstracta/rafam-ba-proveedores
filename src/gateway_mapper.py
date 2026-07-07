@@ -209,6 +209,11 @@ def map_proveedor_migrator_row(raw: dict[str, Any]) -> dict[str, Any] | None:
     if cod_prov is None:
         return None
 
+    # Blocklist: proveedores tecnicos/servicios/caja chica que NO deben migrar.
+    from .config import is_cod_prov_excluded
+    if is_cod_prov_excluded(cod_prov):
+        return None
+
     return {
         "external_id": {"cod_prov": int(cod_prov)},
         "Proveedor": proveedor_payload["Proveedor"],

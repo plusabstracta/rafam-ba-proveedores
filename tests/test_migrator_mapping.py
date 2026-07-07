@@ -96,6 +96,51 @@ def test_proveedor_exen_mapea_a_exento():
     assert result is not None
     assert result["Proveedor"]["iva_condicion_id"] == 2
 
+
+def test_proveedor_excluido_no_se_mapea():
+    """Los COD_PROV de la blocklist no deben generar payload (no migran)."""
+    from src.config import EXCLUDED_COD_PROV
+
+    # Un puñado representativo de la blocklist (telefonia, caja chica, banco).
+    for cod in (50001, 50012, 50087, 50925, 51096):
+        assert cod in EXCLUDED_COD_PROV
+        result = map_proveedor_migrator_row({
+            "COD_PROV": str(cod),
+            "FANTASIA": "Excluido",
+            "RAZON_SOCIAL": "Proveedor Excluido SA",
+            "CUIT": "30-12345678-9",
+            "COD_IVA": "RINS",
+        })
+        assert result is None, f"COD_PROV {cod} deberia estar excluido de la migracion"
+
+
+def test_proveedor_no_excluido_si_se_mapea():
+    """Un COD_PROV fuera de la blocklist sigue migrando normalmente."""
+    from src.config import is_cod_prov_excluded
+
+    assert not is_cod_prov_excluded("12345")
+    result = map_proveedor_migrator_row({
+        "COD_PROV": "12345",
+        "FANTASIA": "Proveedor Real",
+        "RAZON_SOCIAL": "Proveedor Real SA",
+        "CUIT": "30-12345678-9",
+        "COD_IVA": "RINS",
+    })
+    assert result is not None
+    assert result["external_id"]["cod_prov"] == 12345
+
+
+def test_is_cod_prov_excluded_tolera_tipos():
+    """El helper acepta int, str, con espacios, y None sin romper."""
+    from src.config import is_cod_prov_excluded
+
+    assert is_cod_prov_excluded(50001) is True
+    assert is_cod_prov_excluded("50001") is True
+    assert is_cod_prov_excluded(" 50001 ") is True
+    assert is_cod_prov_excluded(None) is False
+    assert is_cod_prov_excluded("no-numerico") is False
+
+
 class TestMapSolicGasto:
 
     def test_mapea_campos_basicos(self, exporter):

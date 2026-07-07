@@ -56,6 +56,15 @@ class OcItemsMapper:
             if key not in grouped:
                 # Resolver proveedor_id via link_store (RAFAM COD_PROV â Paxapos id)
                 cod_prov = raw.get("COD_PROV")
+                # Blocklist: OC de proveedores excluidos no se migran.
+                from ..config import is_cod_prov_excluded
+                if is_cod_prov_excluded(cod_prov):
+                    logger.info(
+                        "Migrator [oc_items] OC %s-%s-%s: omitida â proveedor excluido (COD_PROV=%s)",
+                        ejercicio, uni_compra, nro_oc, cod_prov,
+                    )
+                    skipped_no_prov.add(key)
+                    continue
                 remote_prov_id: int | None = None
                 if cod_prov is not None:
                     remote_prov = self._link_store.get_remote_id("proveedores", str(cod_prov))

@@ -115,3 +115,81 @@ _EJERCICIO_MIN_ENTITIES = frozenset(
         "retenciones",
     }
 )
+
+# ─── Proveedores excluidos de la migracion ──────────────────────────────────
+# COD_PROV de RAFAM que NO deben exportarse ni migrarse a Paxapos. Son cuentas
+# tecnicas / de servicios publicos / caja chica / organismos que no representan
+# proveedores reales en el sistema Paxapos (telefonia, gas, luz, cajas chicas,
+# organismos, indigentes, costas judiciales, etc.).
+#
+# El filtro se aplica en 3 puntos para garantizar exclusion total:
+#   1. gateway_mapper.map_proveedor_migrator_row  -> el Proveedor no se crea/actualiza
+#   2. mappers/oc_items                            -> sus OC no se migran
+#   3. mappers/orden_pago                          -> sus OP (Egresos) no se migran
+#
+# Se puede EXTENDER (nunca reemplazar) via env RAFAM_EXCLUDED_COD_PROV con una
+# lista separada por comas (ej: "50001,50002,51234").
+_EXCLUDED_COD_PROV_DEFAULT: frozenset[int] = frozenset(
+    {
+        50001,  # Telefonica Argentina
+        50002,  # Telefonica Moviles Argentina S.A.
+        50003,  # Viatico
+        50012,  # Caja Chica Compras
+        50014,  # Caja Chica Contaduria
+        50015,  # Caja Chica Accion Social
+        50020,  # Caja Chica Cultura
+        50023,  # Camuzzi Gas Pampeana
+        50031,  # Indigentes
+        50036,  # Telecom
+        50072,  # Costas Judiciales
+        50087,  # Banco Provincia
+        50154,  # Asistencia Social al Personal
+        50209,  # Grupo Teatral "Producciones Independientes"
+        50219,  # Asociacion Civil Comedor Escolar Gral. Madariaga
+        50256,  # Uni-Co
+        50280,  # Caja Chica Direccion Administrativa Hospital
+        50283,  # Caja Chica Delegacion
+        50363,  # Caja Chica Escuela Bellas Artes
+        50410,  # Registro de la Propiedad Inmueble
+        50431,  # Provida Madariaga
+        50448,  # Caja Chica Deportes
+        50449,  # Caja Chica Seguridad
+        50925,  # Edea
+        50929,  # Dattatec.com SRL
+        51021,  # Gustavo Montarce
+        51044,  # Ministerio de las Mujeres, Politicas de Genero y Diversidad Sexual
+        51096,  # Camara de Grabadores de Aut. de Vehiculos Automotores
+    }
+)
+
+
+def _parse_excluded_cod_prov_env() -> frozenset[int]:
+    """Lee COD_PROV extra a excluir desde RAFAM_EXCLUDED_COD_PROV (CSV)."""
+    raw = os.getenv("RAFAM_EXCLUDED_COD_PROV", "")
+    extra: set[int] = set()
+    for token in raw.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        try:
+            extra.add(int(token))
+        except ValueError:
+            continue
+    return frozenset(extra)
+
+
+EXCLUDED_COD_PROV: frozenset[int] = _EXCLUDED_COD_PROV_DEFAULT | _parse_excluded_cod_prov_env()
+
+
+def is_cod_prov_excluded(cod_prov: object) -> bool:
+    """True si el COD_PROV esta en la blocklist de proveedores no migrables.
+
+    Acepta int, str o None (tolerante a valores crudos de RAFAM). Cualquier
+    valor no convertible a int se considera NO excluido.
+    """
+    if cod_prov is None:
+        return False
+    try:
+        return int(str(cod_prov).strip()) in EXCLUDED_COD_PROV
+    except (ValueError, TypeError):
+        return False

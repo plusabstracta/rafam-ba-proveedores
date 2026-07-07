@@ -52,6 +52,7 @@ class OrdenPagoMapper:
         skipped_no_fech_confirm = 0
         skipped_importe_invalido: dict[str, int] = {}
         skipped_existing_keys: set[tuple[int, int]] = set()
+        skipped_excluded_prov = 0
 
         for row in rows:
             raw = dict(zip(columns, row))
@@ -147,6 +148,25 @@ class OrdenPagoMapper:
                 continue
 
             raw_by_source_key[sk] = raw
+
+            # Blocklist: OP cuyo proveedor esta excluido no se migra.
+            from ..config import is_cod_prov_excluded
+            prov_candidate = next(
+                (
+                    c
+                    for c in (raw.get("COD_PROV"), raw.get("OPI_COD_PROV"), raw.get("SG_OC_COD_PROV"))
+                    if c is not None and str(c).strip() != ""
+                ),
+                None,
+            )
+            if is_cod_prov_excluded(prov_candidate):
+                skipped_excluded_prov += 1
+                logger.info(
+                    "Migrator [orden_pago] OP %s-%s: omitida - proveedor excluido (COD_PROV=%s)",
+                    ejercicio, nro_op, prov_candidate,
+                )
+                raw_by_source_key.pop(sk, None)
+                continue
 
             # Resolver proveedor_id
             remote_prov_id: int | None = None
@@ -399,6 +419,8 @@ class OrdenPagoMapper:
             )
         if skipped_existing_keys:
             logger.info("Migrator [orden_pago]: %d OPs omitidas por link local existente", len(skipped_existing_keys))
+        if skipped_excluded_prov:
+            logger.info("Migrator [orden_pago]: %d OPs omitidas por proveedor excluido", skipped_excluded_prov)
         self._flush_retencion_skip_counters("orden_pago")
 
         if not ordenes_pago:
