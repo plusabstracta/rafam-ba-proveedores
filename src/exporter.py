@@ -1357,23 +1357,6 @@ class MigratorExporter(BaseExporter):
     def close(self) -> None:
         self._link_store.close()
 
-        results = parsed.get("results", {})
-        if not isinstance(results, dict):
-            return
-
-        if entity == "proveedores":
-            self._persist_links_proveedores(results, raw_by_source_key)
-        elif entity == "ped_items":
-            self._persist_links_section(results, "pedidos", "pedido", ["ejercicio", "num_ped"])
-        elif entity == "oc_items":
-            self._persist_links_orden_compra(results, raw_by_source_key)
-        elif entity == "orden_compra":
-            self._persist_links_orden_compra(results, raw_by_source_key)
-        elif entity == "solic_gastos":
-            self._persist_links_solic_gastos(results, raw_by_source_key)
-        elif entity == "orden_pago":
-            self._persist_links_orden_pago(results, raw_by_source_key)
-
     def _persist_links_proveedores(self, results: dict, raw_by_source_key: dict[str, dict]) -> None:
         proveedores = results.get("proveedores", [])
         if not isinstance(proveedores, list):
