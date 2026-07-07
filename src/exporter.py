@@ -317,6 +317,9 @@ class MigratorExporter(BaseExporter):
         if entity == "orden_pago":
             return self._write_batch_orden_pago(columns, rows)
 
+        if entity == "retenciones":
+            return self._write_batch_retenciones(columns, rows)
+
         if entity == "pedidos":
             logger.warning(
                 "Migrator [%s]: entidad recibida sin items. Para migrar solicitudes usa 'ped_items' (genera pedidos con items).",

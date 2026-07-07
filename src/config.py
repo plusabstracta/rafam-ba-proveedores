@@ -85,11 +85,33 @@ ENTITY_CONFIGS: dict[str, EntityConfig] = {
         pending_reprocess_days=30,
         ejercicio_min=_EJERCICIO_MIN,
     ),
+    # Retenciones: escanea las MISMAS OP que orden_pago (build_statement
+    # delega en _build_orden_pago_statement) y trae las deducciones por OP via
+    # fetch_deducciones_for_ops. Tiene su propio checkpoint (keyed por nombre)
+    # para no pisar el de orden_pago. Corre al final del pipeline porque
+    # depende de que la OP (Egreso) ya exista en Paxapos.
+    "retenciones": EntityConfig(
+        name="retenciones",
+        table_name="ORDEN_PAGO",
+        ts_field="FECH_CONFIRM",
+        pending_state_field="ESTADO_OP",
+        pending_state_value="N",
+        pending_reprocess_days=30,
+        ejercicio_min=_EJERCICIO_MIN,
+    ),
 }
 
 # Entidades sujetas al filtro RAFAM_EJERCICIO_MIN (todas menos proveedores, que
 # no tiene columna de ejercicio). Se mantiene en sync con los EntityConfig de
 # arriba que reciben ejercicio_min=_EJERCICIO_MIN.
 _EJERCICIO_MIN_ENTITIES = frozenset(
-    {"pedidos", "ped_items", "orden_compra", "oc_items", "solic_gastos", "orden_pago"}
+    {
+        "pedidos",
+        "ped_items",
+        "orden_compra",
+        "oc_items",
+        "solic_gastos",
+        "orden_pago",
+        "retenciones",
+    }
 )
