@@ -1,7 +1,7 @@
 import os
 from unittest.mock import patch, MagicMock
 import pytest
-from src.notifier import notify_run_report, notify_entity_detailed_report
+from src.notifier import notify_run_report
 
 @pytest.fixture
 def clean_env():
@@ -101,42 +101,3 @@ def test_notify_run_report_nested_retry_counts(mock_send, mock_is_enabled, clean
         # El conteo pendiente (3) debe aparecer como entero, no como dict.
         assert "{'pending'" not in body
         assert "(+3)" in body
-
-
-@patch("src.notifier._is_enabled", return_value=True)
-@patch("src.notifier.send_notification")
-def test_notify_entity_detailed_report(mock_send, mock_is_enabled, clean_env):
-    with patch.dict(os.environ, {"NOTIFY_RUN_REPORT": "true", "NOTIFY_SMTP_HOST": "localhost"}):
-        metrics = {
-            "entity": "proveedores",
-            "mode": "FULL LOAD",
-            "success": True,
-            "records_ok": 500,
-            "batches_ok": 5,
-            "batches_failed": 0,
-            "duration_secs": 25.0,
-            "query_duration_secs": 5.0,
-            "batch_times": [3.0, 4.0, 3.0, 5.0, 5.0],
-            "error_msg": None,
-        }
-        
-        mock_send.return_value = True
-        
-        res = notify_entity_detailed_report("proveedores", metrics, dry_run=True)
-        
-        assert res is True
-        mock_send.assert_called_once()
-        
-        args, kwargs = mock_send.call_args
-        subject = args[0]
-        body = args[1]
-        is_html = kwargs.get("is_html")
-        
-        assert "FULL LOAD Detalle: proveedores [DRY-RUN]" in subject
-        assert is_html is False
-        # Verificar cálculos de overhead en texto plano
-        assert "Overhead SQL" in body
-        assert "5.00s" in body  # tiempo query
-        assert "20.00s" in body  # tiempo de red (25.0 - 5.0)
-        assert "5.000s" in body  # max batch latency
-        assert "3.000s" in body  # min batch latency

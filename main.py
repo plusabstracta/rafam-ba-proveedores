@@ -31,6 +31,7 @@ from src.error_formatting import describe_exception, format_exception_context
 from src.exporter import BaseExporter, build_exporter, fetch_migrator_lookups, fetch_migrator_spec
 from src.logging_config import setup_file_logging
 from src.retry_store import RetryStore
+from src.run_history import record_run
 from src.source_repository import SourceRepository
 from src.sync_engine import SyncEngine
 
@@ -373,7 +374,6 @@ def cmd_run(args) -> None:
 
 def _cmd_run_locked(args) -> None:
     from src.config import _EJERCICIO_MIN, _EJERCICIO_MIN_ENTITIES
-    from src.utils import env_bool
     import socket
     from datetime import datetime
 
@@ -467,71 +467,53 @@ def _cmd_run_locked(args) -> None:
                 "Sincronización con errores en %d/%d entidades: %s",
                 len(failed_entities), len(targets), ", ".join(failed_entities),
             )
-            from src.notifier import notify_sync_error, notify_run_report
-
-            report_sent = False
-            if env_bool("NOTIFY_RUN_REPORT", "false"):
-                summary_data = {
-                    "hostname": socket.gethostname(),
-                    "start_time": start_time_str,
-                    "end_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "duration_formatted": duration_formatted,
-                    "success": False,
-                    "error_msg": f"Las siguientes entidades fallaron: {', '.join(failed_entities)}",
-                    "retry_counts_start": retry_counts_start,
-                    "retry_counts_end": retry_store.counts_by_entity(entities=targets) if retry_store else {},
-                }
-                report_sent = notify_run_report(summary_data, entity_metrics, dry_run=args.dry_run)
-
-            if not report_sent:
-                notify_sync_error(entity_errors, dry_run=args.dry_run)
-            # Errores de negocio/validación por batch (ej: "factura ya cargada"):
-            # se reportan por mail pero NO cortan la corrida. El run finaliza OK
-            # (exit 0) para que cron/make no falle y las demas entidades/batches
-            # sigan procesandose. Solo los errores de SISTEMA (el `except
-            # Exception` de abajo — ej: crash dict/int, caida de DB) son fatales.
-        else:
-            # Corrida exitosa
-            from src.notifier import notify_run_report
-            if env_bool("NOTIFY_RUN_REPORT", "false"):
-                summary_data = {
-                    "hostname": socket.gethostname(),
-                    "start_time": start_time_str,
-                    "end_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "duration_formatted": duration_formatted,
-                    "success": True,
-                    "error_msg": None,
-                    "retry_counts_start": retry_counts_start,
-                    "retry_counts_end": retry_store.counts_by_entity(entities=targets) if retry_store else {},
-                }
-                notify_run_report(summary_data, entity_metrics, dry_run=args.dry_run)
-
-    except Exception as exc:
-        logger.error("Error en la ejecución de la sincronización: %s", exc, exc_info=True)
-        from src.notifier import notify_sync_error, notify_run_report
-        
-        # Calcular duración total
-        run_duration_secs = time.monotonic() - run_t0
-        hours, rem = divmod(int(run_duration_secs), 3600)
-        minutes, seconds = divmod(rem, 60)
-        duration_formatted = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-
-        report_sent = False
-        if env_bool("NOTIFY_RUN_REPORT", "false"):
+            # Sin mail por corrida: se registra para el resumen diario
+            # (main.py daily-report). El detalle por entidad y la respuesta del
+            # migrator viajan dentro de entity_metrics. Los errores de negocio
+            # por batch NO cortan la corrida (exit 0) para que cron/make no
+            # falle y las demas entidades sigan; solo el `except Exception` de
+            # abajo (crash de sistema, caida de DB) es fatal.
             summary_data = {
                 "hostname": socket.gethostname(),
                 "start_time": start_time_str,
                 "end_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "duration_formatted": duration_formatted,
                 "success": False,
-                "error_msg": f"Excepción general de ejecución: {exc}",
-                "retry_counts_start": retry_counts_start,
-                "retry_counts_end": {},
+                "error_msg": f"Las siguientes entidades fallaron: {', '.join(failed_entities)}",
             }
-            report_sent = notify_run_report(summary_data, entity_metrics, dry_run=args.dry_run)
-            
-        if not report_sent:
-            notify_sync_error(str(exc), dry_run=args.dry_run)
+            record_run(summary_data, entity_metrics)
+        else:
+            summary_data = {
+                "hostname": socket.gethostname(),
+                "start_time": start_time_str,
+                "end_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "duration_formatted": duration_formatted,
+                "success": True,
+                "error_msg": None,
+            }
+            record_run(summary_data, entity_metrics)
+
+    except Exception as exc:
+        logger.error("Error en la ejecución de la sincronización: %s", exc, exc_info=True)
+
+        # Calcular duración total
+        run_duration_secs = time.monotonic() - run_t0
+        hours, rem = divmod(int(run_duration_secs), 3600)
+        minutes, seconds = divmod(rem, 60)
+        duration_formatted = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+        summary_data = {
+            "hostname": socket.gethostname(),
+            "start_time": start_time_str,
+            "end_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "duration_formatted": duration_formatted,
+            "success": False,
+            "error_msg": f"Excepción general de ejecución: {exc}",
+        }
+        try:
+            record_run(summary_data, entity_metrics)
+        except Exception:
+            logger.warning("No se pudo registrar la corrida para el resumen diario", exc_info=True)
         sys.exit(1)
     finally:
         if exporter:
@@ -793,6 +775,37 @@ def _cmd_backfill_gastos_locked(args) -> None:
         logger.info("Backfill gastos: proceso finalizado.")
 
 
+# ─── daily-report ─────────────────────────────────────────────────────────────
+
+
+def cmd_daily_report(args) -> None:
+    """Envia UN unico mail resumen del dia y purga el historial reportado."""
+    from datetime import date
+
+    from src.notifier import notify_run_report
+    from src.run_history import aggregate_runs, load_runs, prune_reported
+
+    target_date = getattr(args, "date", None) or date.today().isoformat()
+    runs = load_runs(target_date)
+    if not runs:
+        logger.info("Resumen diario: sin corridas registradas para %s.", target_date)
+        return
+
+    summary_data, entity_metrics = aggregate_runs(runs, target_date)
+    sent = notify_run_report(summary_data, entity_metrics, dry_run=False)
+    if sent:
+        remaining = prune_reported(target_date)
+        logger.info(
+            "Resumen diario enviado para %s (%d corridas). Historial restante: %d.",
+            target_date, len(runs), remaining,
+        )
+    else:
+        logger.info(
+            "Resumen diario NO enviado para %s (notificaciones deshabilitadas o sin SMTP).",
+            target_date,
+        )
+
+
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 
@@ -885,6 +898,12 @@ def main() -> None:
         help="Calcula y guarda los hashes de registros ya vinculados sin enviarlos a Paxapos",
     )
 
+    daily_p = sub.add_parser(
+        "daily-report",
+        help="Envia UN mail resumen del dia (total y errores) y purga el historial reportado",
+    )
+    daily_p.add_argument("--date", metavar="YYYY-MM-DD", help="Fecha a reportar (default: hoy)")
+
     args = parser.parse_args()
     setup_file_logging(args)
     {
@@ -896,6 +915,7 @@ def main() -> None:
         "reconcile": cmd_reconcile,
         "backfill-gastos": cmd_backfill_gastos,
         "sync-changes": cmd_sync_changes,
+        "daily-report": cmd_daily_report,
     }[args.command](args)
 
 

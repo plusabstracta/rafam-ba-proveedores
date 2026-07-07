@@ -194,42 +194,6 @@ def notify_integrity_result(
     return send_notification(subject, body)
 
 
-def notify_sync_error(
-    errors: dict[str, str] | str,
-    *,
-    dry_run: bool = False,
-) -> bool:
-    """Notifica un error crítico o fallo de sincronización de entidades por email.
-
-    Args:
-        errors: Diccionario de {entidad: error} o un string con el error general.
-        dry_run: Si se estaba ejecutando en modo de prueba (dry-run).
-
-    Returns:
-        True si se envió el email, False en caso contrario.
-    """
-    mode_label = "DRY-RUN" if dry_run else "APPLY"
-    subject = f"❌ ERROR de Sincronización RAFAM [{mode_label}]"
-
-    lines = [
-        f"Se detectaron errores durante la ejecución de la sincronización ({mode_label}).",
-        "",
-        "─" * 60,
-        "",
-    ]
-
-    if isinstance(errors, dict):
-        lines.append("Detalle de errores por entidad:")
-        for entity, err in errors.items():
-            lines.append(f"  • {entity}: {err}")
-    else:
-        lines.append("Detalle del error general / excepción:")
-        lines.append(f"  {errors}")
-
-    body = "\n".join(lines)
-    return send_notification(subject, body)
-
-
 def _retry_total(value) -> int:
     """Normaliza el conteo de reintentos a un entero.
 
@@ -296,13 +260,13 @@ def notify_run_report(
     (qué falló, por qué, cómo, archivo, hora, tiempos y velocidad en minutos,
     error devuelto por el migrator y traceback) por sobre la estética.
     """
-    if not _is_enabled() or not _env("NOTIFY_RUN_REPORT", "false").lower() == "true":
+    if not _is_enabled():
         return False
 
     mode_label = "DRY-RUN" if dry_run else "APPLY"
     success = summary_data.get("success", False)
     status_label = "OK" if success else "CON ERRORES"
-    subject = f"Reporte Sincronización RAFAM [{mode_label}] — {status_label}"
+    subject = summary_data.get("subject") or f"Reporte Sincronización RAFAM [{mode_label}] — {status_label}"
 
     SEP = "=" * 70
     SUB = "-" * 70
@@ -401,86 +365,6 @@ def notify_run_report(
     lines.append("")
     lines.append(SEP)
     lines.append("Email generado automáticamente por el pipeline de sincronización RAFAM (Madariaga).")
-
-    body = "\n".join(lines)
-    return send_notification(subject, body, is_html=False)
-
-
-def notify_entity_detailed_report(
-    entity: str,
-    metrics: dict,
-    *,
-    dry_run: bool = False,
-) -> bool:
-    """Envía un reporte detallado (texto plano) de performance/diagnóstico de una entidad FULL LOAD."""
-    if not _is_enabled() or not _env("NOTIFY_RUN_REPORT", "false").lower() == "true":
-        return False
-
-    mode_label = "DRY-RUN" if dry_run else "APPLY"
-    status_label = "OK" if metrics.get("success") else "CON ERRORES"
-    subject = f"FULL LOAD Detalle: {entity} [{mode_label}]"
-
-    SEP = "=" * 70
-    SUB = "-" * 70
-
-    batch_times = metrics.get("batch_times") or []
-    num_batches = len(batch_times)
-    if num_batches > 0:
-        avg_batch = sum(batch_times) / num_batches
-        max_batch = max(batch_times)
-        min_batch = min(batch_times)
-    else:
-        avg_batch = max_batch = min_batch = 0.0
-
-    total_duration = metrics.get("duration_secs", 0.0) or 0.0
-    query_duration = metrics.get("query_duration_secs", 0.0) or 0.0
-    net_duration = total_duration - query_duration
-    query_pct = (query_duration / total_duration * 100) if total_duration > 0 else 0.0
-    net_pct = (net_duration / total_duration * 100) if total_duration > 0 else 0.0
-    records = metrics.get("records_ok", 0)
-    dur_min = total_duration / 60.0
-    speed_min = (records / dur_min) if dur_min > 0 else 0.0
-    speed_sec = (records / total_duration) if total_duration > 0 else 0.0
-
-    lines: list[str] = []
-    lines.append(SEP)
-    lines.append(f"DETALLE FULL LOAD — {entity}")
-    lines.append(SEP)
-    lines.append(f"Estado : {status_label}")
-    lines.append(f"Modo   : {mode_label}")
-    lines.append("")
-
-    lines.append("MÉTRICAS GENERALES")
-    lines.append(SUB)
-    lines.append(f"  • Registros procesados  : {records:,}")
-    lines.append(f"  • Batches OK            : {metrics.get('batches_ok', 0)}")
-    lines.append(f"  • Batches fallidos      : {metrics.get('batches_failed', 0)}")
-    lines.append(f"  • Tiempo total de carga : {total_duration:.2f} s   ({dur_min:.2f} min)")
-    lines.append(f"  • Velocidad             : {speed_min:,.1f} reg/min   ({speed_sec:,.1f} reg/s)")
-    lines.append("")
-
-    lines.append("DISTRIBUCIÓN DE OVERHEAD")
-    lines.append(SUB)
-    lines.append(f"  • Overhead SQL (query origen) : {query_duration:.2f}s   ({query_pct:.1f}%)")
-    lines.append(f"  • Envío HTTP & red (Paxapos)  : {net_duration:.2f}s   ({net_pct:.1f}%)")
-    lines.append("")
-
-    lines.append("LATENCIA POR BATCH (POST)")
-    lines.append(SUB)
-    lines.append(f"  • Lotes totales   : {num_batches}")
-    lines.append(f"  • Latencia mínima : {min_batch:.3f}s")
-    lines.append(f"  • Latencia prom.  : {avg_batch:.3f}s")
-    lines.append(f"  • Latencia máxima : {max_batch:.3f}s")
-
-    if metrics.get("error_msg") or metrics.get("error_trace"):
-        lines.append("")
-        lines.append("DIAGNÓSTICO DE ERROR")
-        lines.append(SUB)
-        _emit_error_block(lines, metrics, indent="")
-
-    lines.append("")
-    lines.append(SEP)
-    lines.append("Reporte individual de entidad — Pipeline RAFAM (Madariaga).")
 
     body = "\n".join(lines)
     return send_notification(subject, body, is_html=False)

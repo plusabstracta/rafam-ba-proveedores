@@ -5,14 +5,13 @@ Fecha: 2026-07-06
 ## 1) Scripts que envian email
 
 ### Produccion
-- main.py
-  - Envia reporte de corrida y errores mediante src/notifier.py cuando NOTIFY_RUN_REPORT=true o ante fallos.
+- main.py (comando `daily-report`)
+  - Envia UN unico mail resumen del dia (tiempo total y, si hubo errores, que entidad fallo y que devolvio el migrator) mediante src/notifier.py, y purga el historial reportado.
+  - El comando `run` NO envia mail: registra cada corrida en state/run_history.jsonl.
 - scripts/check_integrity.py
   - Envia alertas de integridad mediante src/notifier.py si detecta anomalias.
 
 ### Desarrollo / pruebas
-- scripts/simulate_report_emails.py
-  - Simula correos en consola para validar formato (no uso productivo).
 - TestWeek/run_migrate_report.sh
   - Script temporal de experimento con reporte por email para una ventana de prueba.
 
@@ -32,11 +31,8 @@ Fecha: 2026-07-06
   - Ejecuta main.py run --entity ...
 
 ### Entidades productivas programadas
-- proveedores
-- oc_items
-- solic_gastos
-- orden_pago
-- retenciones
+- Pipeline completo cada 10 min (proveedores -> oc_items -> solic_gastos -> orden_pago -> retenciones), sin mail.
+- daily-report (resumen diario por email, una vez al dia)
 - check_integrity (diario)
 
 ## 3) Cron jobs de desarrollo / temporales
@@ -66,19 +62,14 @@ Estos cron jobs estan orientados a una prueba acotada ("TestWeek") y no forman p
 - scripts/export_by_oc_2026.py
 - scripts/export_last_3_months.py
 - scripts/trace_oc_flow_dev_rafam.py
-- scripts/simulate_report_emails.py
 - TestWeek/*
 
 ## 6) Simplificacion aplicada
 
-Se redujo complejidad en cron.conf:
-- Antes: OC, SG, OP y RET repetian variables de horario separadas.
-- Ahora: se definio frecuencia comun con CORE_LABORAL y CORE_FUERA.
-- scripts/install_crons.sh ahora soporta:
-  - CORE_* como base para las 4 entidades operativas.
-  - Overrides por entidad (OC_*, SG_*, OP_*, RET_*) cuando se necesite.
-
-Resultado:
-- Menos variables repetidas.
-- Menos riesgo de desalinear horarios entre entidades hermanas.
-- Misma compatibilidad operativa.
+- Cron de produccion reducido a 3 entradas: pipeline (10 min, sin mail),
+  resumen diario por email y check_integrity.
+- El pipeline corre todas las entidades en un unico proceso, en orden de FK,
+  y registra cada corrida en state/run_history.jsonl.
+- El mail pasa de ser por corrida a UN unico resumen diario (main.py daily-report).
+- Codigo legacy eliminado: notify_sync_error y notify_entity_detailed_report en
+  src/notifier.py, la variable NOTIFY_RUN_REPORT y scripts/simulate_report_emails.py.

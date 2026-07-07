@@ -328,31 +328,31 @@ Tambien se puede usar:
 make migrate-all BATCH=500
 ```
 
-### 5. Crontab Debian sin sudo para las 5 entidades oficiales
+### 5. Crontab de produccion (pipeline cada 10 min + resumen diario por email)
 
 Resumen rapido de operacion (produccion vs desarrollo, scripts con email y crons):
 `docs/scripts_crons_resumen.md`
 
-Si no hay acceso `sudo` al servidor, configurar el cron del usuario que tiene el proyecto y la
-`.env` productiva. El ejemplo usa `flock` para evitar corridas superpuestas si una importacion
-tarda mas que el intervalo.
-
-Preparar carpetas una vez, desde el usuario que ejecuta el migrator:
+La forma recomendada es dejar que el instalador arme el crontab desde `cron.conf`:
 
 ```bash
-cd /home/rafam/rafam-ba-proveedores
-mkdir -p logs state
+make install-cron   # o: bash scripts/install_crons.sh
+make show-cron
 ```
 
-Reemplazar `/home/rafam/rafam-ba-proveedores` por la ruta real del proyecto en el servidor.
+Esto instala solo 3 entradas para este proyecto:
 
-Editar el crontab del usuario:
+1. Pipeline completo cada 10 minutos (todas las entidades en orden de FK, sin mail).
+2. Resumen diario por email una vez al dia (un unico mail con el total del dia).
+3. `check_integrity` diario.
 
-```bash
-crontab -e
-```
+Los horarios se editan en `cron.conf` (`PIPELINE_SCHEDULE`, `DAILY_REPORT_SCHEDULE`,
+`INTEGRITY_SCHEDULE`). `make install-cron` es idempotente: borra las entradas previas de
+este proyecto y las reinstala.
 
-Agregar:
+#### Equivalente manual (sin `make`)
+
+Si preferis editar el crontab a mano, `crontab -e` y agregar:
 
 ```cron
 SHELL=/bin/bash
@@ -361,35 +361,26 @@ MAILTO=""
 
 RAFAM_DIR=/home/rafam/rafam-ba-proveedores
 
-# Pipeline oficial cada 15 minutos.
-# Cada entidad corre independiente: si una falla, las otras siguen.
-# Logs rotativos por mes en logs/rafam-{entidad}-YYYY-MM.log (gestionado por main.py).
-# flock con lock separado por entidad evita corridas superpuestas.
+# 1) Pipeline completo cada 10 min, en orden de FK, en un unico proceso:
+#    proveedores -> oc_items -> solic_gastos -> orden_pago -> retenciones.
+#    NO envia mail: registra cada corrida en state/run_history.jsonl.
+*/10 * * * * cd "$RAFAM_DIR" && /usr/bin/flock -n state/locks/pipeline.lock .venv/bin/python main.py run --batch-size 500 >> logs/rafam-pipeline-cron.log 2>&1
 
-# 1) PROVEEDORES -> account_proveedores
-*/15 * * * * cd "$RAFAM_DIR" && /usr/bin/flock -n state/prov.lock .venv/bin/python main.py run --entity proveedores --batch-size 500
+# 2) Resumen diario por email (UN unico mail con el total del dia y, si hubo
+#    errores, que entidad fallo y que devolvio el migrator). Purga lo reportado.
+55 23 * * * cd "$RAFAM_DIR" && /usr/bin/flock -n state/locks/daily_report.lock .venv/bin/python main.py daily-report >> logs/daily_report.log 2>&1
 
-# 2) ORDEN_COMPRA + OC_ITEMS -> compras_pedidos + items
-*/15 * * * * cd "$RAFAM_DIR" && /usr/bin/flock -n state/oc.lock .venv/bin/python main.py run --entity oc_items --batch-size 500
-
-# 3) SOLIC_GASTOS + CTA_COMPROB -> account_gastos
-*/15 * * * * cd "$RAFAM_DIR" && /usr/bin/flock -n state/sg.lock .venv/bin/python main.py run --entity solic_gastos --batch-size 500
-
-# 4) ORDEN_PAGO + CTA_COMPROB + ORDEN_PAGO_DEDUC -> egresos + gastos + retenciones
-*/15 * * * * cd "$RAFAM_DIR" && /usr/bin/flock -n state/op.lock .venv/bin/python main.py run --entity orden_pago --batch-size 500
-
-# 5) ORDEN_PAGO_DEDUC -> account_retenciones (reenvio idempotente)
-*/15 * * * * cd "$RAFAM_DIR" && /usr/bin/flock -n state/ret.lock .venv/bin/python main.py run --entity retenciones --batch-size 500
+# 3) Verificacion de integridad diaria.
+0 2 * * * cd "$RAFAM_DIR" && /usr/bin/flock -n state/locks/integrity.lock .venv/bin/python scripts/check_integrity.py --apply >> logs/check_integrity.log 2>&1
 ```
 
-Notas sobre el crontab:
+Notas:
 
-- No hace falta redirigir stdout/stderr con `>>`: `main.py` escribe automaticamente a
-  `logs/rafam-{entidad}-YYYY-MM.log` (rotacion mensual). Se puede cambiar la carpeta con
-  la variable de entorno `RAFAM_LOG_DIR`.
-- Cada entidad tiene su propio lock (`prov.lock`, `oc.lock`, `sg.lock`, `op.lock`, `ret.lock`).
-  Si una tarda mas de 15 minutos, `flock -n` salta esa entidad sin bloquear las otras.
-- Si una entidad falla (ej: CUIT invalido en proveedores), las demas siguen corriendo.
+- El pipeline corre en un solo proceso: si una entidad falla, se registra y las demas
+  siguen; la corrida no aborta salvo error de sistema (DB caida, etc.).
+- El mail es diario, no por corrida. Requiere `NOTIFY_SMTP_*` y `NOTIFY_TO` en `.env`.
+- `main.py` escribe logs rotativos por mes en `logs/`. La carpeta se puede cambiar con
+  `RAFAM_LOG_DIR`.
 
 Verificar que quedo instalado:
 
@@ -397,26 +388,14 @@ Verificar que quedo instalado:
 crontab -l
 ```
 
-Ver logs en vivo (reemplazar `YYYY-MM` por el mes actual):
-
-```bash
-tail -f logs/rafam-proveedores-2026-05.log
-tail -f logs/rafam-oc_items-2026-05.log
-tail -f logs/rafam-solic_gastos-2026-05.log
-tail -f logs/rafam-orden_pago-2026-05.log
-tail -f logs/rafam-retenciones-2026-05.log
-```
-
-Para probar exactamente lo que ejecuta cron antes de dejarlo activo:
+Para probar antes de dejarlo activo:
 
 ```bash
 cd /home/rafam/rafam-ba-proveedores
-.venv/bin/python main.py run --entity proveedores --batch-size 500 --dry-run
-.venv/bin/python main.py run --entity oc_items --batch-size 500 --dry-run
-.venv/bin/python main.py run --entity solic_gastos --batch-size 500 --dry-run
-.venv/bin/python main.py run --entity orden_pago --batch-size 500 --dry-run
-.venv/bin/python main.py run --entity retenciones --batch-size 500 --dry-run
+.venv/bin/python main.py run --batch-size 500 --dry-run   # pipeline completo, sin escribir
+.venv/bin/python main.py daily-report                     # arma y envia el resumen del dia
 ```
+
 
 ### 6. Verificacion post-importacion
 

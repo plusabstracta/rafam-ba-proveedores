@@ -14,8 +14,6 @@ if [[ "$ENTITY" == "all" ]]; then
     RUN_ARGS="run"
     LOG_FILE="$PROJECT_DIR/logs/rafam-pipeline-cron.log"
     LOCK_FILE="$LOCK_DIR/pipeline.lock"
-    # Garantiza el unico mail final con duracion total y detalle de errores.
-    export NOTIFY_RUN_REPORT=true
 else
     RUN_ARGS="run --entity $ENTITY"
     LOG_FILE="$PROJECT_DIR/logs/rafam-${ENTITY}-cron.log"

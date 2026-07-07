@@ -37,22 +37,26 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     fi
 done < "$PROJECT_DIR/cron.conf"
 
-# Defaults de cron.conf (una sola corrida del pipeline completo):
-# PIPELINE_SCHEDULE ejecuta TODAS las entidades en orden de FK en un mismo
-# proceso (proveedores -> oc_items -> solic_gastos -> orden_pago -> retenciones)
-# y al terminar envia UN unico mail con la duracion total y, si hubo errores,
-# el detalle por entidad y la respuesta del migrator.
+# Defaults de cron.conf:
+# - PIPELINE_SCHEDULE: corrida del pipeline completo cada 10 min (sin mail).
+# - DAILY_REPORT_SCHEDULE: UN unico mail resumen del dia + purga del historial.
+# - INTEGRITY_SCHEDULE: verificacion de integridad diaria.
 : "${PIPELINE_SCHEDULE:=*/10 * * * *}"
+: "${DAILY_REPORT_SCHEDULE:=55 23 * * *}"
 : "${INTEGRITY_SCHEDULE:=0 2 * * *}"
 
 # Quitar entradas previas de este proyecto (por PROJECT_DIR) y registrar
 TMP=$(mktemp)
 ( crontab -l 2>/dev/null | grep -v "$PROJECT_DIR" || true ) > "$TMP"
 
-# ── Pipeline completo: todas las entidades en orden, un unico mail final ──
+# ── Pipeline completo cada 10 min: todas las entidades en orden, sin mail ──
 # run_entity.sh all -> main.py run (proveedores -> oc_items -> solic_gastos
-# -> orden_pago -> retenciones) con NOTIFY_RUN_REPORT=true.
+# -> orden_pago -> retenciones). Registra cada corrida para el resumen diario.
 echo "$PIPELINE_SCHEDULE $RUN all" >> "$TMP"
+
+# ── Resumen diario por email (un unico mail con el total del dia) ──
+DAILY_LOG="$LOG_DIR/daily_report.log"
+echo "$DAILY_REPORT_SCHEDULE flock -n $PROJECT_DIR/state/locks/daily_report.lock bash -c 'cd $PROJECT_DIR && $PY main.py daily-report >> $DAILY_LOG 2>&1'" >> "$TMP"
 
 # ── check_integrity (diario off-hours con lock) ──
 echo "$INTEGRITY_SCHEDULE flock -n $PROJECT_DIR/state/locks/integrity.lock $PY $INTEGRITY --apply >> $INTEGRITY_LOG 2>&1" >> "$TMP"
