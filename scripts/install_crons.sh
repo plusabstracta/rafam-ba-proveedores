@@ -17,23 +17,21 @@ if [[ ! -f "$PROJECT_DIR/cron.conf" ]]; then
     exit 1
 fi
 
-# Cargar frecuencias. Usamos un parser simple ya que bash no soporta 'source' directo
-# con comentarios e igualdades de manera segura sin evaluar. Pero como es formato simple,
-# podemos filtrar las líneas vacías o comentarios y hacer export/eval.
+# Cargar frecuencias desde cron.conf. Solo aceptamos líneas de la forma
+#   KEY="valor"   # comentario inline opcional
+#   KEY=valor
+# El valor entre comillas se toma tal cual; cualquier comentario inline
+# posterior a las comillas se ignora (NO debe filtrarse al schedule del cron).
 while IFS= read -r line || [[ -n "$line" ]]; do
-    # Limpiar espacios
-    line=$(echo "$line" | xargs)
-    # Ignorar vacíos y comentarios
-    if [[ -z "$line" || "$line" =~ ^# ]]; then
-        continue
-    fi
-    # Extraer clave y valor
-    if [[ "$line" =~ ^([^=]+)=(.*)$ ]]; then
-        key="${BASH_REMATCH[1]}"
-        value="${BASH_REMATCH[2]}"
-        # Quitar comillas del valor
-        value=$(echo "$value" | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//")
-        declare "$key=$value"
+    # Ignorar líneas vacías y comentarios de línea completa
+    [[ -z "${line//[[:space:]]/}" ]] && continue
+    [[ "$line" =~ ^[[:space:]]*# ]] && continue
+    # KEY="valor entre comillas"  (el comentario inline queda fuera de la captura)
+    if [[ "$line" =~ ^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*)=\"([^\"]*)\" ]]; then
+        declare "${BASH_REMATCH[1]}=${BASH_REMATCH[2]}"
+    # KEY=valor  (sin comillas: se corta en el primer espacio o '#')
+    elif [[ "$line" =~ ^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*)=([^[:space:]#]+) ]]; then
+        declare "${BASH_REMATCH[1]}=${BASH_REMATCH[2]}"
     fi
 done < "$PROJECT_DIR/cron.conf"
 

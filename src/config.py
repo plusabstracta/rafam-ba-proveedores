@@ -80,3 +80,10 @@ ENTITY_CONFIGS: dict[str, EntityConfig] = {
         ejercicio_min=_EJERCICIO_MIN,
     ),
 }
+
+# Entidades sujetas al filtro RAFAM_EJERCICIO_MIN (todas menos proveedores, que
+# no tiene columna de ejercicio). Se mantiene en sync con los EntityConfig de
+# arriba que reciben ejercicio_min=_EJERCICIO_MIN.
+_EJERCICIO_MIN_ENTITIES = frozenset(
+    {"pedidos", "ped_items", "orden_compra", "oc_items", "solic_gastos", "orden_pago"}
+)
