@@ -94,10 +94,15 @@ RAFAM_TIPO_COMPROB_TO_PAXAPOS_ID: dict[str, int] = {
 }
 RAFAM_TIPO_COMPROB_DEFAULT_ID = 7  # "Otros"
 
-# Mapeo RAFAM ORDEN_PAGO.TIPO_CANCE -> Paxapos tipo_de_pago.id (tabla risto_tenant.tipo_de_pagos)
-# Catalogo Paxapos relevante:
-#   1 = Transferencia bancaria (default)
-#   9 = Cheque
+# Mapeo RAFAM ORDEN_PAGO.TIPO_CANCE -> Paxapos tipo_de_pagos.name.
+# El id es tenant-specific: resolverlo contra /rafam/migracion/lookups.json.
+RAFAM_TIPO_CANCE_TO_PAXAPOS_PAGO_NAME: dict[str, str] = {
+    "CA": "Cheque",                    # Cheque al dia
+    "CM": "Cheque",                    # Cheque diferido
+    "NO": "Transferencia bancaria",
+}
+
+# Fallback legacy cuando el endpoint de lookups no devuelve tipos_de_pago.
 RAFAM_TIPO_CANCE_TO_PAXAPOS_PAGO_ID: dict[str, int] = {
     "CA": 9,   # Cheque al dia
     "CM": 9,   # Cheque diferido

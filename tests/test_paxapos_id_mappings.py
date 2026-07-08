@@ -1,10 +1,10 @@
 """
-Regression tests para los mappings de IDs de Paxapos.
+Regression tests para los mappings de catálogos Paxapos.
 
 Estos tests bloquean el contrato de mapeo entre RAFAM y Paxapos:
 
 - RAFAM CTA_COMPROB.TIPO  -> tipo_factura.id (1=A, 2=B, 5=C, 4=M, 7=Otros, 8..14 NC/ND)
-- RAFAM ORDEN_PAGO.TIPO_CANCE -> tipo_de_pago.id (1=Transferencia, 9=Cheque)
+- RAFAM ORDEN_PAGO.TIPO_CANCE -> tipo_de_pago.id vía lookups por name
 - Default UM = 5 (Unidad)
 - orden_pago solo se envia cuando la OC ya resuelve a pedido_id local
 
@@ -21,6 +21,7 @@ from src.exporter import MigratorExporter
 from src.gateway_mapper import (
     RAFAM_TIPO_CANCE_DEFAULT_PAGO_ID,
     RAFAM_TIPO_CANCE_TO_PAXAPOS_PAGO_ID,
+    RAFAM_TIPO_CANCE_TO_PAXAPOS_PAGO_NAME,
     RAFAM_TIPO_COMPROB_DEFAULT_ID,
     RAFAM_TIPO_COMPROB_TO_PAXAPOS_ID,
     _UM_DEFAULT,
@@ -41,6 +42,17 @@ class TestGatewayMapperConstants:
 
     def test_tipo_cance_default_es_transferencia_id_1(self):
         assert RAFAM_TIPO_CANCE_DEFAULT_PAGO_ID == 1
+
+    @pytest.mark.parametrize(
+        "tipo_cance,paxapos_name",
+        [
+            ("CA", "Cheque"),
+            ("CM", "Cheque"),
+            ("NO", "Transferencia bancaria"),
+        ],
+    )
+    def test_tipo_cance_name_mapping(self, tipo_cance, paxapos_name):
+        assert RAFAM_TIPO_CANCE_TO_PAXAPOS_PAGO_NAME[tipo_cance] == paxapos_name
 
     @pytest.mark.parametrize(
         "rafam_code,paxapos_id",
@@ -139,21 +151,53 @@ class TestResolveTipoFacturaIdMappings:
 class TestResolveTipoPagoIdMappings:
     """_resolve_tipo_pago_id mapea TIPO_CANCE a tipo_de_pago.id."""
 
+    def test_cheque_se_resuelve_desde_lookup_del_tenant(self):
+        with patch("src.exporter.fetch_migrator_lookups") as mock_lookups:
+            mock_lookups.return_value = {
+                "unidades_de_medida": [],
+                "tipos_factura": [],
+                "tipos_de_pago": [
+                    {"id": 10, "name": "Transferencia bancaria", "en_pagos": True},
+                    {"id": 11, "name": "Cheque", "en_pagos": True},
+                ],
+                "tipos_retencion": [],
+            }
+            with patch.dict(
+                "os.environ",
+                {
+                    "PAXAPOS_URL": "https://example.com",
+                    "PAXAPOS_TENANT": "test",
+                    "PAXAPOS_API_KEY": "key",
+                    "LOCAL_STATE_DB_PATH": ":memory:",
+                },
+                clear=False,
+            ):
+                exporter = MigratorExporter(dry_run=True)
+
+        assert exporter._resolve_tipo_pago_id({"TIPO_CANCE": "CA"}) == 11
+        assert exporter._resolve_tipo_pago_id({"TIPO_CANCE": "CM"}) == 11
+        assert exporter._resolve_tipo_pago_id({"TIPO_CANCE": "NO"}) == 10
+
     def test_cheque_al_dia_es_id_9(self, exporter):
+        """Fallback legacy sin lookups: CA -> id historico 9."""
         assert exporter._resolve_tipo_pago_id({"TIPO_CANCE": "CA"}) == 9
 
     def test_cheque_diferido_es_id_9(self, exporter):
+        """Fallback legacy sin lookups: CM -> id historico 9."""
         assert exporter._resolve_tipo_pago_id({"TIPO_CANCE": "CM"}) == 9
 
     def test_no_es_transferencia_id_1(self, exporter):
+        """Fallback legacy sin lookups: NO -> id historico 1."""
         assert exporter._resolve_tipo_pago_id({"TIPO_CANCE": "NO"}) == 1
 
     def test_tipo_desconocido_cae_a_transferencia_id_1(self, exporter):
         assert exporter._resolve_tipo_pago_id({"TIPO_CANCE": "XX"}) == 1
 
     def test_lowercase_se_normaliza(self, exporter):
-        assert exporter._resolve_tipo_pago_id({"tipo_cance": "ca"}) == 9 or \
-               exporter._resolve_tipo_pago_id({"TIPO_CANCE": "ca"}) == 9
+        assert exporter._resolve_tipo_pago_id({"tipo_cance": "ca"}) == 9
+        assert exporter._resolve_tipo_pago_id({"TIPO_CANCE": "ca"}) == 9
+        assert exporter._resolve_tipo_pago_id({"Tipo_Cance": "cm"}) == 9
+        assert exporter._resolve_tipo_pago_id({"ORDEN_PAGO.TIPO_CANCE": "no"}) == 1
 
 
 class TestResolveUnidadMedidaDefault:
@@ -286,7 +330,7 @@ class TestPedidoInternalIdEnOrdenPago:
         assert "pedido_internal_id" not in op
 
     def test_tipo_pago_se_setea_desde_tipo_cance(self):
-        """TIPO_CANCE='CA' -> tipo_de_pago_id=9 (Cheque)."""
+        """TIPO_CANCE='CA' -> tipo_de_pago_id=9 (fallback Cheque sin lookups)."""
         exp = self._make_exporter()
         self._link_oc(exp)
         rows = [self._row(self._columns(), TIPO_CANCE="CA")]

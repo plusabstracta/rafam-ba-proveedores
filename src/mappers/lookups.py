@@ -13,6 +13,7 @@ import os
 from ..gateway_mapper import (
     RAFAM_TIPO_CANCE_DEFAULT_PAGO_ID,
     RAFAM_TIPO_CANCE_TO_PAXAPOS_PAGO_ID,
+    RAFAM_TIPO_CANCE_TO_PAXAPOS_PAGO_NAME,
     RAFAM_TIPO_COMPROB_DEFAULT_ID,
     RAFAM_TIPO_COMPROB_TO_PAXAPOS_ID,
     _UM_DEFAULT,
@@ -82,7 +83,17 @@ class LookupResolver:
     def resolve_tipo_pago_id(self, raw: dict | None = None) -> int:
         """Mapea ORDEN_PAGO.TIPO_CANCE al tipo_de_pago.id de Paxapos."""
         if raw:
-            tipo_cance = str(raw.get("TIPO_CANCE") or "").strip().upper()
+            raw_tipo_cance = ""
+            for key, value in raw.items():
+                key_name = str(key).rsplit(".", 1)[-1].upper()
+                if key_name == "TIPO_CANCE":
+                    raw_tipo_cance = value
+                    break
+            tipo_cance = str(raw_tipo_cance).strip().upper()
+            mapped_name = RAFAM_TIPO_CANCE_TO_PAXAPOS_PAGO_NAME.get(tipo_cance)
+            by_name = self._tipos_de_pago_by_name.get(normalize_text(mapped_name))
+            if by_name and to_int(by_name.get("id")) is not None:
+                return int(by_name.get("id"))
             mapped_id = RAFAM_TIPO_CANCE_TO_PAXAPOS_PAGO_ID.get(tipo_cance)
             if mapped_id is not None:
                 return mapped_id
