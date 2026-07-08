@@ -70,13 +70,23 @@ PAXAPOS_API_KEY=<api key del migrator RAFAM>
 PAXAPOS_RAFAM_IMPORT_PATH=rafam/migracion/importar.json
 PAXAPOS_RAFAM_SPEC_PATH=rafam/migracion/spec.json
 PAXAPOS_RAFAM_LOOKUPS_PATH=rafam/migracion/lookups.json
+PAXAPOS_RAFAM_RESOLVER_MERCADERIA_PATH=rafam/migracion/resolver_mercaderia.json
 PAXAPOS_RAFAM_DEFAULT_UNIDAD_ID=<id de Unidad segun lookups>
 PAXAPOS_RAFAM_DEFAULT_TIPO_FACTURA_ID=
 PAXAPOS_RAFAM_DEFAULT_TIPO_PAGO_ID=1
 RAFAM_SYNC_BATCH_DELAY_SECONDS=2
 ```
 
-`PAXAPOS_URL` no debe incluir el tenant. El script arma las URLs migrator como `{PAXAPOS_URL}/{PAXAPOS_TENANT}/{PAXAPOS_RAFAM_*_PATH}` y además envía `X-Tenant-Id`.
+`PAXAPOS_URL` no debe incluir el tenant cuando `PAXAPOS_RAFAM_*_PATH` se configura como path relativo. El script arma las URLs migrator como `{PAXAPOS_URL}/{PAXAPOS_TENANT}/{PAXAPOS_RAFAM_*_PATH}` y además envía `X-Tenant-Id`.
+
+También se pueden configurar las URLs absolutas publicadas por el spec nuevo:
+
+```dotenv
+PAXAPOS_RAFAM_SPEC_PATH=https://proveedores.madariaga.gob.ar/madariaga/rafam/migracion/spec.json
+PAXAPOS_RAFAM_LOOKUPS_PATH=https://proveedores.madariaga.gob.ar/madariaga/rafam/migracion/lookups.json
+PAXAPOS_RAFAM_IMPORT_PATH=https://proveedores.madariaga.gob.ar/madariaga/rafam/migracion/importar.json
+PAXAPOS_RAFAM_RESOLVER_MERCADERIA_PATH=https://proveedores.madariaga.gob.ar/madariaga/rafam/migracion/resolver_mercaderia.json
+```
 
 ---
 

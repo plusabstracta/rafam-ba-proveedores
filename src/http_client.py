@@ -244,7 +244,13 @@ def http_request_with_retries(
 # ââ URL helpers ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 
 def build_url(base_url: str, tenant: str, endpoint: str) -> str:
-    """Construye URL completa: base/tenant/endpoint."""
+    """Construye URL completa: base/tenant/endpoint o devuelve URL absoluta."""
+    endpoint = endpoint.strip()
+    parsed = parse.urlparse(endpoint)
+    if parsed.scheme and parsed.netloc:
+        if parsed.scheme not in {"http", "https"}:
+            raise ValueError("endpoint absoluto debe usar http o https")
+        return endpoint
     return f"{base_url.rstrip('/')}/{tenant.strip('/')}/{endpoint.strip('/')}"
 
 
@@ -254,13 +260,15 @@ def resolve_endpoint(endpoint_env: str, default_endpoint: str) -> str:
 
 
 def _resolve_endpoint(endpoint_env: str, default_endpoint: str) -> str:
-    """Lee endpoint de env o usa default. Rechaza URLs absolutas."""
+    """Lee endpoint de env o usa default. Acepta path relativo o URL absoluta."""
     endpoint = os.getenv(endpoint_env, default_endpoint).strip()
     parsed = parse.urlparse(endpoint)
+    if parsed.scheme and parsed.netloc:
+        if parsed.scheme not in {"http", "https"}:
+            raise ValueError(f"{endpoint_env} debe usar URL absoluta http(s)")
+        return endpoint
     if parsed.scheme or parsed.netloc:
-        raise ValueError(
-            f"{endpoint_env} debe ser un path relativo; configurar host en PAXAPOS_URL y tenant en PAXAPOS_TENANT"
-        )
+        raise ValueError(f"{endpoint_env} debe ser un path relativo o una URL absoluta http(s) valida")
     endpoint = endpoint.strip("/")
     if not endpoint:
         raise ValueError(f"{endpoint_env} no puede estar vacÃ­o")

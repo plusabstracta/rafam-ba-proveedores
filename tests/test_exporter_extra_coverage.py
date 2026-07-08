@@ -232,6 +232,7 @@ class TestMigratorExporterExtraPaths:
         monkeypatch.setenv("DUMP_PAYLOAD", str(dump_path))
         monkeypatch.setenv("APP_ENV", "dev")
         url = _build_migrator_url("https://example.test", "tenant", "rafam/migracion/importar.json")
+        assert _build_migrator_url("https://example.test", "tenant", "https://api.test/importar.json") == "https://api.test/importar.json"
         response = _FakeHttpResponse(json.dumps({"ok": True}).encode(), url=url)
         with patch("src.exporter._http_request_with_retries", return_value=response):
             assert exporter._post_json(url, {"cuit": "20-12345678-3", "token": "secret"}) == {"ok": True}
@@ -291,6 +292,10 @@ class TestMigratorFetchHelpers:
                 _fetch_migrator_json("PAXAPOS_RAFAM_SPEC_PATH", "rafam/migracion/spec.json")
 
         monkeypatch.delenv("PAXAPOS_API_KEY")
+        response = _FakeHttpResponse(b'{"spec": {}}', url=url)
+        with patch("src.exporter._http_request_with_retries", return_value=response):
+            assert fetch_migrator_spec() == {"spec": {}}
+
         with pytest.raises(ValueError, match="PAXAPOS_API_KEY"):
             _fetch_migrator_json("PAXAPOS_RAFAM_SPEC_PATH", "rafam/migracion/spec.json")
 

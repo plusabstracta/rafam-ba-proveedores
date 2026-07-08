@@ -120,7 +120,7 @@ src/entity_link_store.py → vínculos RAFAM_ID ↔ Paxapos_ID
 | SOURCE RAFAM | `RAFAM_SOURCE_BACKEND`, `RAFAM_SOURCE_HOST`, `RAFAM_SOURCE_PORT`, `RAFAM_SOURCE_SERVICE`, `RAFAM_SOURCE_USER`, `RAFAM_SOURCE_PASSWORD`, `RAFAM_SOURCE_SQLITE_DB_PATH` | Export CSV desde RAFAM y sync/import |
 | LOCAL state | `LOCAL_STATE_DB_PATH` | `main.py run/status/reset`; guarda checkpoints y links RAFAM->Paxapos |
 | DESTINATION Paxapos | `PAXAPOS_URL`, `PAXAPOS_TENANT`, `PAXAPOS_VERIFY_SSL`, `PAXAPOS_TIMEOUT_SECONDS`, `PAXAPOS_JWT`, `PAXAPOS_API_KEY` | Solo gateway/migrator Paxapos |
-| RAFAM en Paxapos | `PAXAPOS_RAFAM_IMPORT_PATH`, `PAXAPOS_RAFAM_SPEC_PATH`, `PAXAPOS_RAFAM_LOOKUPS_PATH`, `PAXAPOS_RAFAM_DEFAULT_*_ID`, `RAFAM_SYNC_BATCH_DELAY_SECONDS` | Solo migrator Paxapos |
+| RAFAM en Paxapos | `PAXAPOS_RAFAM_IMPORT_PATH`, `PAXAPOS_RAFAM_SPEC_PATH`, `PAXAPOS_RAFAM_LOOKUPS_PATH`, `PAXAPOS_RAFAM_RESOLVER_MERCADERIA_PATH`, `PAXAPOS_RAFAM_DEFAULT_*_ID`, `RAFAM_SYNC_BATCH_DELAY_SECONDS` | Solo migrator Paxapos |
 
 No agregar aliases ni fallbacks legacy a `DB_*`, `SQLITE_DB_PATH`, `CHECKPOINT_DB_PATH`, `ENTITY_LINK_DB_PATH`, `GATEWAY_*`, `MIGRATOR_*`, `LOCAL_CHECKPOINT_DB_PATH` ni `LOCAL_ENTITY_LINK_DB_PATH`. Si aparece un nombre viejo, migrarlo al nombre canónico y actualizar documentación/tests en el mismo cambio.
 

@@ -149,9 +149,7 @@ class MigratorExporter(BaseExporter):
         self._verify_ssl = self._http._verify_ssl
 
         # URL del resolvedor de mercaderías para compatibilidad retroactiva con tests
-        self._resolver_endpoint = _resolve_endpoint(
-            "PAXAPOS_RAFAM_RESOLVER_PATH", "rafam/migracion/resolver_mercaderia.json"
-        )
+        self._resolver_endpoint = _resolver_mercaderia_endpoint()
         self._resolver_url = _build_migrator_url_impl(
             self._base_url, self._tenant, self._resolver_endpoint
         )
@@ -1759,7 +1757,11 @@ def build_exporter(dry_run: bool = False) -> MigratorExporter:
 
 
 def fetch_migrator_spec() -> dict:
-    return _fetch_migrator_json(endpoint_env="PAXAPOS_RAFAM_SPEC_PATH", default_endpoint="rafam/migracion/spec.json")
+    return _fetch_migrator_json(
+        endpoint_env="PAXAPOS_RAFAM_SPEC_PATH",
+        default_endpoint="rafam/migracion/spec.json",
+        require_api_key=False,
+    )
 
 
 def fetch_migrator_lookups(only: list[str] | None = None) -> dict:
@@ -1814,7 +1816,20 @@ def fetch_migrator_lookups(only: list[str] | None = None) -> dict:
     return merged
 
 
-def _fetch_migrator_json(endpoint_env: str, default_endpoint: str, query_params: dict[str, str] | None = None) -> dict:
+def _resolver_mercaderia_endpoint() -> str:
+    endpoint = os.getenv("PAXAPOS_RAFAM_RESOLVER_MERCADERIA_PATH", "").strip()
+    if endpoint:
+        return _resolve_endpoint("PAXAPOS_RAFAM_RESOLVER_MERCADERIA_PATH", endpoint)
+    return _resolve_endpoint("PAXAPOS_RAFAM_RESOLVER_PATH", "rafam/migracion/resolver_mercaderia.json")
+
+
+def _fetch_migrator_json(
+    endpoint_env: str,
+    default_endpoint: str,
+    query_params: dict[str, str] | None = None,
+    *,
+    require_api_key: bool = True,
+) -> dict:
     """GET JSON desde Paxapos. Usa _http_request_with_retries del scope del exporter
     para que los test patches en src.exporter funcionen."""
     import ssl as _ssl
@@ -1822,7 +1837,7 @@ def _fetch_migrator_json(endpoint_env: str, default_endpoint: str, query_params:
     base_url = _paxapos_url()
     tenant = _paxapos_tenant()
     api_key = os.getenv("PAXAPOS_API_KEY", "").strip()
-    if not api_key:
+    if require_api_key and not api_key:
         raise ValueError("Falta PAXAPOS_API_KEY en .env para consultar migrator")
 
     timeout = int(os.getenv("PAXAPOS_TIMEOUT_SECONDS", "20"))
@@ -1831,10 +1846,11 @@ def _fetch_migrator_json(endpoint_env: str, default_endpoint: str, query_params:
 
     headers = {
         "Accept": "application/json",
-        "X-Api-Key": api_key,
         "X-Tenant-Id": tenant,
         "User-Agent": "rafam-sync/1.0",
     }
+    if api_key:
+        headers["X-Api-Key"] = api_key
     url = _build_migrator_url(base_url, tenant, endpoint)
     if query_params:
         url = f"{url}?{parse.urlencode(query_params)}"

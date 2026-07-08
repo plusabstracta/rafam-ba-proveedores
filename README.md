@@ -261,6 +261,15 @@ RAFAM_SYNC_BATCH_DELAY_SECONDS=2
 RAFAM_EJERCICIO_MIN=2026
 ```
 
+Los `PAXAPOS_RAFAM_*_PATH` aceptan paths relativos o las URLs absolutas del spec nuevo:
+
+```dotenv
+PAXAPOS_RAFAM_SPEC_PATH=https://proveedores.madariaga.gob.ar/madariaga/rafam/migracion/spec.json
+PAXAPOS_RAFAM_LOOKUPS_PATH=https://proveedores.madariaga.gob.ar/madariaga/rafam/migracion/lookups.json
+PAXAPOS_RAFAM_IMPORT_PATH=https://proveedores.madariaga.gob.ar/madariaga/rafam/migracion/importar.json
+PAXAPOS_RAFAM_RESOLVER_MERCADERIA_PATH=https://proveedores.madariaga.gob.ar/madariaga/rafam/migracion/resolver_mercaderia.json
+```
+
 Notas importantes:
 
 - `PAXAPOS_URL` no incluye tenant.

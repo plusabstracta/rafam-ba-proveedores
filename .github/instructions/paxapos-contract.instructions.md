@@ -638,10 +638,10 @@ El mapping debe coincidir con los IDs reales de `centros_costo` del tenant desti
 | `PAXAPOS_URL` | URL base del server Paxapos | (requerida) |
 | `PAXAPOS_TENANT` | Tenant ID | (requerida) |
 | `PAXAPOS_API_KEY` | API key para auth | (requerida) |
-| `PAXAPOS_RAFAM_IMPORT_PATH` | Path relativo del importador RAFAM dentro de Paxapos | `rafam/migracion/importar.json` |
-| `PAXAPOS_RAFAM_SPEC_PATH` | Path relativo de spec RAFAM dentro de Paxapos | `rafam/migracion/spec.json` |
-| `PAXAPOS_RAFAM_LOOKUPS_PATH` | Path relativo de lookups RAFAM dentro de Paxapos | `rafam/migracion/lookups.json` |
-| `PAXAPOS_RAFAM_RESOLVER_MERCADERIA_PATH` | Path relativo del resolver determinístico de mercaderías RAFAM dentro de Paxapos | `rafam/migracion/resolver_mercaderia.json` |
+| `PAXAPOS_RAFAM_IMPORT_PATH` | Path relativo o URL absoluta del importador RAFAM dentro de Paxapos | `rafam/migracion/importar.json` |
+| `PAXAPOS_RAFAM_SPEC_PATH` | Path relativo o URL absoluta de spec RAFAM dentro de Paxapos | `rafam/migracion/spec.json` |
+| `PAXAPOS_RAFAM_LOOKUPS_PATH` | Path relativo o URL absoluta de lookups RAFAM dentro de Paxapos | `rafam/migracion/lookups.json` |
+| `PAXAPOS_RAFAM_RESOLVER_MERCADERIA_PATH` | Path relativo o URL absoluta del resolver determinístico de mercaderías RAFAM dentro de Paxapos | `rafam/migracion/resolver_mercaderia.json` |
 | `PAXAPOS_RAFAM_DEFAULT_UNIDAD_ID` | ID unidad de medida Paxapos default | Verificar contra `lookups`; ejemplo `.env`: `1` |
 | `PAXAPOS_RAFAM_DEFAULT_TIPO_FACTURA_ID` | ID tipo factura Paxapos default | (vacío) |
 | `PAXAPOS_RAFAM_DEFAULT_TIPO_PAGO_ID` | ID tipo de pago Paxapos default | `1` |

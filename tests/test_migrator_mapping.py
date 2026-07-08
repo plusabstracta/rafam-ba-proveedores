@@ -740,10 +740,12 @@ class TestMigratorUrl:
 
         assert url == "https://proveedores.madariaga.gob.ar/madariaga/rafam/migracion/spec.json"
 
-    def test_endpoint_rechaza_url_completa(self):
+    def test_endpoint_acepta_url_completa(self):
         with patch.dict("os.environ", {"PAXAPOS_RAFAM_SPEC_PATH": "https://example.com/spec.json"}):
-            with pytest.raises(ValueError):
+            assert (
                 _migrator_endpoint("PAXAPOS_RAFAM_SPEC_PATH", "rafam/migracion/spec.json")
+                == "https://example.com/spec.json"
+            )
 
     def test_no_acepta_gateway_url_como_alias(self):
         with patch.dict("os.environ", {"GATEWAY_URL": "https://legacy.example.com"}, clear=True):
