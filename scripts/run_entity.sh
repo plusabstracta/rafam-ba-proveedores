@@ -45,8 +45,11 @@ if [[ "$ENTITY" == "all" ]]; then
         ET0=$(date +%s)
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] [PROGRESS] [$POS/$TOTAL] START entidad=$E" | tee -a "$LOG_FILE"
 
-        .venv/bin/python main.py run --entity "$E" >> "$LOG_FILE" 2>&1
-        ERC=$?
+        if .venv/bin/python main.py run --entity "$E" >> "$LOG_FILE" 2>&1; then
+            ERC=0
+        else
+            ERC=$?
+        fi
         EELAPSED=$(( $(date +%s) - ET0 ))
 
         if [[ $ERC -eq 0 ]]; then
@@ -70,8 +73,11 @@ fi
 echo "[$TS_START] [START] ${ENTITY}" | tee -a "$LOG_FILE"
 T0=$(date +%s)
 cd "$PROJECT_DIR"
-.venv/bin/python main.py ${RUN_ARGS} >> "$LOG_FILE" 2>&1
-RC=$?
+if .venv/bin/python main.py ${RUN_ARGS} >> "$LOG_FILE" 2>&1; then
+    RC=0
+else
+    RC=$?
+fi
 ELAPSED=$(( $(date +%s) - T0 ))
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] [END] ${ENTITY}: rc=$RC duracion=${ELAPSED}s" | tee -a "$LOG_FILE"
 exit $RC
