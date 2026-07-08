@@ -1,15 +1,16 @@
 """
-dump_full_schema.py — Dump COMPLETO del esquema Oracle OWNER_RAFAM.
+dump_full_schema.py — Dump COMPLETO del esquema RAFAM configurado en .env.
 
 A diferencia de explore_schema.py / generate_rafam_context.py (que filtran
-por tablas relevantes), este script extrae **todo** el schema:
+por tablas relevantes), este script extrae **toda** la base disponible en el
+backend configurado por RAFAM_SOURCE_BACKEND:
 
-    - Todas las tablas (ALL_TABLES)
-    - Todas las vistas (ALL_VIEWS) con su SQL
-    - Todas las columnas (ALL_TAB_COLUMNS)
-    - Todas las PKs y FKs (ALL_CONSTRAINTS / ALL_CONS_COLUMNS)
-    - Todos los indices (ALL_INDEXES / ALL_IND_COLUMNS)
-    - Conteo de filas por tabla (best effort, NUM_ROWS de estadisticas)
+    - Todas las tablas
+    - Todas las vistas disponibles
+    - Todas las columnas
+    - Todas las PKs y FKs
+    - Todos los indices
+    - Conteo de filas por tabla (opcional, exacto y puede tardar)
 
 Sale en dos formatos:
     - output/rafam_context/full_schema.json   (machine-readable, para usar
@@ -20,41 +21,36 @@ Sale en dos formatos:
 Uso:
     python scripts/dump_full_schema.py
     python scripts/dump_full_schema.py --schema OWNER_RAFAM --out-dir output/rafam_context
+    python scripts/dump_full_schema.py --row-counts
 
-Variables de entorno requeridas (.env):
-    RAFAM_SOURCE_HOST
-    RAFAM_SOURCE_PORT
-    RAFAM_SOURCE_SERVICE
-    RAFAM_SOURCE_USER
-    RAFAM_SOURCE_PASSWORD
+Variables de entorno:
+    RAFAM_SOURCE_BACKEND=oracle|sqlite
+    RAFAM_SOURCE_* segun el backend elegido (ver README.md)
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
-from collections import defaultdict
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
-import oracledb
 from dotenv import load_dotenv
+from sqlalchemy import inspect as sa_inspect
+from sqlalchemy import text
+from sqlalchemy.engine import Engine
+from sqlalchemy.exc import SQLAlchemyError
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_OUT_DIR = REPO_ROOT / "output" / "rafam_context"
 
-# Inicializar Oracle Instant Client a nivel de módulo (ANTES de cualquier intento de conexión)
 load_dotenv(REPO_ROOT / ".env")
-try:
-    lib_dir = os.getenv("ORACLE_CLIENT_LIB_DIR") or None
-    oracledb.init_oracle_client(lib_dir=lib_dir)
-    print(f"[thick mode] Oracle Instant Client habilitado desde: {lib_dir or 'LD_LIBRARY_PATH'}", file=sys.stderr)
-except Exception as e:
-    if "already been initialized" not in str(e):
-        print(f"[thin mode] No se pudo inicializar Oracle Instant Client: {e}", file=sys.stderr)
-        print("[aviso] Si la BD es Oracle < 12.1, instala Oracle Instant Client.", file=sys.stderr)
+
+sys.path.insert(0, str(REPO_ROOT))
+
+from src.db import create_source_engine  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -76,177 +72,199 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="No incluir indices",
     )
+    parser.add_argument(
+        "--row-counts",
+        action="store_true",
+        help="Contar filas exactas con SELECT COUNT(*) por tabla (puede tardar mucho)",
+    )
     return parser.parse_args()
 
 
-def connect() -> oracledb.Connection:
-    load_dotenv(REPO_ROOT / ".env")
-    host = os.getenv("RAFAM_SOURCE_HOST")
-    port = int(os.getenv("RAFAM_SOURCE_PORT", "1521"))
-    service = os.getenv("RAFAM_SOURCE_SERVICE")
-    user = os.getenv("RAFAM_SOURCE_USER")
-    password = os.getenv("RAFAM_SOURCE_PASSWORD")
-    if not all([host, service, user, password]):
-        sys.exit("ERROR: faltan RAFAM_SOURCE_* en .env")
-    
-    dsn = oracledb.makedsn(host, port, service_name=service)
-    print(f"[conn] {user}@{host}:{port}/{service}")
-    return oracledb.connect(user=user, password=password, dsn=dsn)
+# ─── Introspeccion de schema ────────────────────────────────────────────────
+
+def _effective_schema(engine: Engine, requested_schema: str) -> str | None:
+    if engine.dialect.name == "sqlite":
+        return None
+    return requested_schema.upper()
 
 
-# ─── Queries al diccionario de Oracle ────────────────────────────────────────
+def _qualified_name(engine: Engine, table_name: str, schema: str | None) -> str:
+    preparer = engine.dialect.identifier_preparer
+    quoted_table = preparer.quote(table_name)
+    if schema:
+        return f"{preparer.quote_schema(schema)}.{quoted_table}"
+    return quoted_table
 
-def fetch_tables(cur, owner: str) -> list[dict]:
-    cur.execute(
+
+def _safe_inspect_call(default: Any, callback):
+    try:
+        return callback()
+    except SQLAlchemyError as exc:
+        print(f"[warn] introspeccion parcial: {exc}", file=sys.stderr)
+        return default
+
+
+def _fetch_oracle_table_metadata(engine: Engine, schema: str | None) -> dict[str, dict[str, Any]]:
+    if engine.dialect.name != "oracle" or not schema:
+        return {}
+
+    query = text(
         """
         SELECT TABLE_NAME, NUM_ROWS, LAST_ANALYZED, TABLESPACE_NAME
         FROM ALL_TABLES
-        WHERE OWNER = :o
-        ORDER BY TABLE_NAME
+        WHERE OWNER = :owner
         """,
-        o=owner,
     )
-    return [
-        {
-            "name": r[0],
-            "num_rows": int(r[1]) if r[1] is not None else None,
-            "last_analyzed": r[2].isoformat() if r[2] else None,
-            "tablespace": r[3],
+    with engine.connect() as conn:
+        rows = conn.execute(query, {"owner": schema}).mappings().all()
+
+    return {
+        str(row["table_name" if "table_name" in row else "TABLE_NAME"]): {
+            "num_rows": int(row["num_rows" if "num_rows" in row else "NUM_ROWS"])
+            if row["num_rows" if "num_rows" in row else "NUM_ROWS"] is not None
+            else None,
+            "last_analyzed": row[
+                "last_analyzed" if "last_analyzed" in row else "LAST_ANALYZED"
+            ].isoformat()
+            if row["last_analyzed" if "last_analyzed" in row else "LAST_ANALYZED"]
+            else None,
+            "tablespace": row["tablespace_name" if "tablespace_name" in row else "TABLESPACE_NAME"],
         }
-        for r in cur.fetchall()
-    ]
+        for row in rows
+    }
 
 
-def fetch_views(cur, owner: str) -> list[dict]:
-    cur.execute(
-        """
-        SELECT VIEW_NAME, TEXT_LENGTH, TEXT
-        FROM ALL_VIEWS
-        WHERE OWNER = :o
-        ORDER BY VIEW_NAME
-        """,
-        o=owner,
-    )
-    out = []
-    for r in cur.fetchall():
-        text = r[2]
-        # TEXT viene como LONG; oracledb lo entrega como str
-        out.append({"name": r[0], "text_length": int(r[1] or 0), "text": text or ""})
-    return out
+def _fetch_exact_row_count(engine: Engine, table_name: str, schema: str | None) -> int | None:
+    qualified_name = _qualified_name(engine, table_name, schema)
+    try:
+        with engine.connect() as conn:
+            return int(conn.execute(text(f"SELECT COUNT(*) FROM {qualified_name}")).scalar_one())
+    except SQLAlchemyError as exc:
+        print(f"[warn] no se pudo contar {qualified_name}: {exc}", file=sys.stderr)
+        return None
 
 
-def fetch_columns(cur, owner: str) -> dict[str, list[dict]]:
-    cur.execute(
-        """
-        SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE, DATA_LENGTH,
-               DATA_PRECISION, DATA_SCALE, NULLABLE, COLUMN_ID, DATA_DEFAULT
-        FROM ALL_TAB_COLUMNS
-        WHERE OWNER = :o
-        ORDER BY TABLE_NAME, COLUMN_ID
-        """,
-        o=owner,
-    )
-    cols: dict[str, list[dict]] = defaultdict(list)
-    for r in cur.fetchall():
-        # Tipo formateado estilo "VARCHAR2(13)" / "NUMBER(15,2)"
-        dtype = r[2]
-        if dtype in ("NUMBER",) and (r[4] is not None or r[5] is not None):
-            if r[5]:
-                dtype = f"NUMBER({r[4]},{r[5]})"
-            else:
-                dtype = f"NUMBER({r[4]})"
-        elif dtype in ("VARCHAR2", "CHAR", "NVARCHAR2", "NCHAR") and r[3]:
-            dtype = f"{dtype}({r[3]})"
-        default = r[8]
-        if default is not None:
-            try:
-                default = default.read() if hasattr(default, "read") else str(default)
-                default = default.strip()
-            except Exception:
-                default = None
-        cols[r[0]].append(
+def fetch_tables(engine: Engine, schema: str | None, include_row_counts: bool) -> list[dict[str, Any]]:
+    inspector = sa_inspect(engine)
+    table_names = _safe_inspect_call([], lambda: inspector.get_table_names(schema=schema))
+    oracle_metadata = _fetch_oracle_table_metadata(engine, schema)
+    tables: list[dict[str, Any]] = []
+
+    for table_name in sorted(table_names):
+        metadata = oracle_metadata.get(table_name, {})
+        table = {
+            "name": table_name,
+            "num_rows": metadata.get("num_rows"),
+            "row_count_source": "oracle_statistics" if metadata.get("num_rows") is not None else None,
+            "last_analyzed": metadata.get("last_analyzed"),
+            "tablespace": metadata.get("tablespace"),
+        }
+        if include_row_counts:
+            table["num_rows"] = _fetch_exact_row_count(engine, table_name, schema)
+            table["row_count_source"] = "exact_count"
+        tables.append(table)
+
+    return tables
+
+
+def fetch_views(engine: Engine, schema: str | None) -> list[dict[str, Any]]:
+    inspector = sa_inspect(engine)
+    view_names = _safe_inspect_call([], lambda: inspector.get_view_names(schema=schema))
+    views: list[dict[str, Any]] = []
+
+    for view_name in sorted(view_names):
+        definition = _safe_inspect_call(
+            "",
+            lambda view_name=view_name: inspector.get_view_definition(view_name, schema=schema) or "",
+        )
+        views.append({"name": view_name, "text_length": len(definition), "text": definition})
+
+    return views
+
+
+def fetch_columns(engine: Engine, tables: list[dict[str, Any]], schema: str | None) -> dict[str, list[dict]]:
+    inspector = sa_inspect(engine)
+    columns: dict[str, list[dict]] = {}
+
+    for table in tables:
+        table_name = table["name"]
+        raw_columns = _safe_inspect_call(
+            [],
+            lambda table_name=table_name: inspector.get_columns(table_name, schema=schema),
+        )
+        columns[table_name] = [
             {
-                "name": r[1],
-                "type": dtype,
-                "nullable": r[6] == "Y",
-                "position": int(r[7]) if r[7] is not None else None,
-                "default": default,
+                "name": column["name"],
+                "type": str(column.get("type", "")),
+                "nullable": bool(column.get("nullable", True)),
+                "position": position,
+                "default": str(column.get("default") or "").strip() or None,
             }
+            for position, column in enumerate(raw_columns, start=1)
+        ]
+
+    return columns
+
+
+def fetch_constraints(
+    engine: Engine,
+    tables: list[dict[str, Any]],
+    schema: str | None,
+) -> tuple[dict[str, list[str]], dict[str, list[dict[str, Any]]]]:
+    inspector = sa_inspect(engine)
+    primary_keys: dict[str, list[str]] = {}
+    foreign_keys: dict[str, list[dict[str, Any]]] = {}
+
+    for table in tables:
+        table_name = table["name"]
+        pk = _safe_inspect_call(
+            {},
+            lambda table_name=table_name: inspector.get_pk_constraint(table_name, schema=schema),
         )
-    return cols
+        primary_keys[table_name] = list(pk.get("constrained_columns") or [])
 
-
-def fetch_constraints(cur, owner: str) -> tuple[dict, dict]:
-    """Devuelve (pks_por_tabla, fks_por_tabla)."""
-    # PKs
-    cur.execute(
-        """
-        SELECT c.TABLE_NAME, cc.COLUMN_NAME, cc.POSITION
-        FROM ALL_CONSTRAINTS c
-        JOIN ALL_CONS_COLUMNS cc
-            ON cc.OWNER = c.OWNER AND cc.CONSTRAINT_NAME = c.CONSTRAINT_NAME
-        WHERE c.OWNER = :o AND c.CONSTRAINT_TYPE = 'P'
-        ORDER BY c.TABLE_NAME, cc.POSITION
-        """,
-        o=owner,
-    )
-    pks: dict[str, list[str]] = defaultdict(list)
-    for tn, col, _pos in cur.fetchall():
-        pks[tn].append(col)
-
-    # FKs
-    cur.execute(
-        """
-        SELECT c.TABLE_NAME,
-               c.CONSTRAINT_NAME,
-               cc.COLUMN_NAME,
-               cc.POSITION,
-               r.OWNER AS REF_OWNER,
-               r.TABLE_NAME AS REF_TABLE,
-               rcc.COLUMN_NAME AS REF_COLUMN
-        FROM ALL_CONSTRAINTS c
-        JOIN ALL_CONS_COLUMNS cc
-            ON cc.OWNER = c.OWNER AND cc.CONSTRAINT_NAME = c.CONSTRAINT_NAME
-        JOIN ALL_CONSTRAINTS r
-            ON r.OWNER = c.R_OWNER AND r.CONSTRAINT_NAME = c.R_CONSTRAINT_NAME
-        JOIN ALL_CONS_COLUMNS rcc
-            ON rcc.OWNER = r.OWNER
-           AND rcc.CONSTRAINT_NAME = r.CONSTRAINT_NAME
-           AND rcc.POSITION = cc.POSITION
-        WHERE c.OWNER = :o AND c.CONSTRAINT_TYPE = 'R'
-        ORDER BY c.TABLE_NAME, c.CONSTRAINT_NAME, cc.POSITION
-        """,
-        o=owner,
-    )
-    fks_raw: dict[str, dict[str, dict]] = defaultdict(dict)
-    for tn, cname, col, _pos, ref_owner, ref_table, ref_col in cur.fetchall():
-        entry = fks_raw[tn].setdefault(
-            cname,
-            {"constraint": cname, "ref_owner": ref_owner, "ref_table": ref_table, "columns": [], "ref_columns": []},
+        raw_fks = _safe_inspect_call(
+            [],
+            lambda table_name=table_name: inspector.get_foreign_keys(table_name, schema=schema),
         )
-        entry["columns"].append(col)
-        entry["ref_columns"].append(ref_col)
-    fks = {tn: list(d.values()) for tn, d in fks_raw.items()}
-    return pks, fks
+        foreign_keys[table_name] = [
+            {
+                "constraint": fk.get("name") or "",
+                "ref_owner": fk.get("referred_schema") or schema or "",
+                "ref_table": fk.get("referred_table") or "",
+                "columns": list(fk.get("constrained_columns") or []),
+                "ref_columns": list(fk.get("referred_columns") or []),
+            }
+            for fk in raw_fks
+        ]
+
+    return primary_keys, foreign_keys
 
 
-def fetch_indexes(cur, owner: str) -> dict[str, list[dict]]:
-    cur.execute(
-        """
-        SELECT i.TABLE_NAME, i.INDEX_NAME, i.UNIQUENESS, ic.COLUMN_NAME, ic.COLUMN_POSITION
-        FROM ALL_INDEXES i
-        JOIN ALL_IND_COLUMNS ic
-            ON ic.INDEX_OWNER = i.OWNER AND ic.INDEX_NAME = i.INDEX_NAME
-        WHERE i.OWNER = :o
-        ORDER BY i.TABLE_NAME, i.INDEX_NAME, ic.COLUMN_POSITION
-        """,
-        o=owner,
-    )
-    raw: dict[str, dict[str, dict]] = defaultdict(dict)
-    for tn, idx_name, uniq, col, _pos in cur.fetchall():
-        entry = raw[tn].setdefault(idx_name, {"name": idx_name, "unique": uniq == "UNIQUE", "columns": []})
-        entry["columns"].append(col)
-    return {tn: list(d.values()) for tn, d in raw.items()}
+def fetch_indexes(
+    engine: Engine,
+    tables: list[dict[str, Any]],
+    schema: str | None,
+) -> dict[str, list[dict[str, Any]]]:
+    inspector = sa_inspect(engine)
+    indexes: dict[str, list[dict[str, Any]]] = {}
+
+    for table in tables:
+        table_name = table["name"]
+        raw_indexes = _safe_inspect_call(
+            [],
+            lambda table_name=table_name: inspector.get_indexes(table_name, schema=schema),
+        )
+        indexes[table_name] = [
+            {
+                "name": index.get("name") or "",
+                "unique": bool(index.get("unique")),
+                "columns": list(index.get("column_names") or []),
+            }
+            for index in raw_indexes
+        ]
+
+    return indexes
 
 
 # ─── Renderers ───────────────────────────────────────────────────────────────
@@ -260,6 +278,7 @@ def write_json(data: dict, path: Path) -> None:
 def write_markdown(data: dict, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     schema = data["schema"]
+    backend = data["backend"]
     tables = data["tables"]
     views = data.get("views", [])
     columns = data["columns"]
@@ -268,9 +287,10 @@ def write_markdown(data: dict, path: Path) -> None:
     indexes = data.get("indexes", {})
 
     lines: list[str] = []
-    lines.append(f"# Esquema completo Oracle — `{schema}`")
+    lines.append(f"# Esquema completo RAFAM — `{schema}`")
     lines.append("")
     lines.append(f"> Generado por `scripts/dump_full_schema.py` el {data['generated_at']}")
+    lines.append(f"> Backend: `{backend}`")
     lines.append(f"> **No editar manualmente** — regenerar ejecutando el script.")
     lines.append("")
     lines.append(f"- Tablas: **{len(tables)}**")
@@ -300,9 +320,12 @@ def write_markdown(data: dict, path: Path) -> None:
         lines.append("")
         meta = []
         if t.get("num_rows") is not None:
-            meta.append(f"**Rows (estimado):** {t['num_rows']:,}")
+            label = "exacto" if t.get("row_count_source") == "exact_count" else "estimado"
+            meta.append(f"**Rows ({label}):** {t['num_rows']:,}")
         if t.get("tablespace"):
             meta.append(f"**Tablespace:** `{t['tablespace']}`")
+        if t.get("last_analyzed"):
+            meta.append(f"**Ultimo analisis:** `{t['last_analyzed']}`")
         if meta:
             lines.append("  ".join(meta))
             lines.append("")
@@ -376,41 +399,41 @@ def write_markdown(data: dict, path: Path) -> None:
 def main() -> None:
     args = parse_args()
     out_dir: Path = args.out_dir
-    schema: str = args.schema.upper()
+    requested_schema: str = args.schema.upper()
+    engine = create_source_engine()
+    schema = _effective_schema(engine, requested_schema)
+    display_schema = schema or "default"
+    backend = engine.dialect.name
 
-    conn = connect()
-    cur = conn.cursor()
-
-    print(f"[fetch] tables…")
-    tables = fetch_tables(cur, schema)
+    print(f"[conn] backend={backend} schema={display_schema}")
+    print("[fetch] tables...")
+    tables = fetch_tables(engine, schema, args.row_counts)
     print(f"        {len(tables)} tablas")
 
-    print(f"[fetch] columns…")
-    columns = fetch_columns(cur, schema)
+    print("[fetch] columns...")
+    columns = fetch_columns(engine, tables, schema)
     print(f"        {sum(len(v) for v in columns.values())} columnas en {len(columns)} tablas")
 
-    print(f"[fetch] constraints (PK/FK)…")
-    pks, fks = fetch_constraints(cur, schema)
+    print("[fetch] constraints (PK/FK)...")
+    pks, fks = fetch_constraints(engine, tables, schema)
     print(f"        {len(pks)} PKs, {sum(len(v) for v in fks.values())} FKs")
 
     indexes: dict = {}
     if not args.no_indexes:
-        print(f"[fetch] indexes…")
-        indexes = fetch_indexes(cur, schema)
+        print("[fetch] indexes...")
+        indexes = fetch_indexes(engine, tables, schema)
         print(f"        {sum(len(v) for v in indexes.values())} indices en {len(indexes)} tablas")
 
     views: list[dict] = []
     if not args.no_views:
-        print(f"[fetch] views (puede tardar)…")
-        views = fetch_views(cur, schema)
+        print("[fetch] views (puede tardar)...")
+        views = fetch_views(engine, schema)
         print(f"        {len(views)} vistas")
 
-    cur.close()
-    conn.close()
-
     data = {
-        "schema": schema,
-        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "schema": display_schema,
+        "backend": backend,
+        "generated_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "tables": tables,
         "views": views,
         "columns": columns,
