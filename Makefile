@@ -12,6 +12,7 @@ BATCH ?= 500
 LIMIT ?=
 
 .PHONY: help setup install env load-dev update-mapping update-mapping-oracle explore-schema dump-full-schema \
+	explore-clasificaciones \
 	extract-cat-uni-med rafam-context status migrator-spec migrator-lookups \
 	migrate-proveedores migrate-proveedores-dry \
 	migrate-oc migrate-oc-dry \
@@ -33,6 +34,7 @@ help:
 	@echo "  make update-mapping     Regenera docs/field_mapping.md desde la DB (SQLite o Oracle)"
 	@echo "  make explore-schema     Genera docs/rafam_schema.md desde Oracle"
 	@echo "  make dump-full-schema   Genera output/rafam_context/full_schema.{md,json} de toda la DB"
+	@echo "  make explore-clasificaciones  Detecta tablas de clasificaciones/partidas (inciso/par_prin/par_parc)"
 	@echo "  make extract-cat-uni-med  Extrae CAT_UNI_MED de Oracle a docs/cat_uni_med.md"
 	@echo "  make rafam-context      Genera output/rafam_context/*.md con contexto RAFAM medido"
 	@echo "  make status             Muestra estado de checkpoints"
@@ -92,6 +94,9 @@ explore-schema:
 
 dump-full-schema:
 	$(PY) scripts/dump_full_schema.py $(RAFAM_SCHEMA_ARGS)
+
+explore-clasificaciones:
+	$(PY) scripts/explore_clasificaciones.py $(RAFAM_CLASIF_ARGS)
 
 extract-cat-uni-med:
 	$(PY) scripts/extract_cat_uni_med.py
