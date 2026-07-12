@@ -281,8 +281,12 @@ def notify_run_report(
     ok_entities = sum(1 for m in entity_metrics if m.get("success"))
     fail_entities = total_entities - ok_entities
     total_records = sum(m.get("records_ok", 0) for m in entity_metrics)
+    total_migrator_sent = sum(m.get("migrator_sent", 0) for m in entity_metrics)
+    total_migrator_saved = sum(m.get("migrator_saved", 0) for m in entity_metrics)
+    total_migrator_errors = sum(m.get("migrator_errors", 0) for m in entity_metrics)
     total_batches_ok = sum(m.get("batches_ok", 0) for m in entity_metrics)
     total_batches_failed = sum(m.get("batches_failed", 0) for m in entity_metrics)
+    runs_count = summary_data.get("runs_count")
     global_speed_min = (total_records / run_mins) if run_mins > 0 else 0.0
     global_speed_sec = (total_records / run_secs) if run_secs > 0 else 0.0
 
@@ -300,10 +304,16 @@ def notify_run_report(
 
     lines.append("RESUMEN GLOBAL")
     lines.append(SUB)
+    if runs_count is not None:
+        lines.append(f"  • Corridas agregadas    : {runs_count}")
     lines.append(f"  • Entidades procesadas   : {total_entities}  (OK: {ok_entities}, con error: {fail_entities})")
-    lines.append(f"  • Registros migrados     : {total_records:,}")
+    lines.append(f"  • Registros procesados   : {total_records:,}")
+    lines.append(f"  • Enviados al migrator   : {total_migrator_sent:,}")
+    lines.append(f"  • Guardados por migrator : {total_migrator_saved:,}")
+    lines.append(f"  • Errores del migrator   : {total_migrator_errors:,}")
     lines.append(f"  • Batches OK / con error : {total_batches_ok} / {total_batches_failed}")
     lines.append(f"  • Velocidad global       : {global_speed_min:,.1f} reg/min   ({global_speed_sec:,.1f} reg/s)")
+    lines.append("  • Nota                  : registros procesados no equivale a altas nuevas en Paxapos")
     lines.append("")
 
     # Error general de la corrida
@@ -324,6 +334,9 @@ def notify_run_report(
         duration = m.get("duration_secs", 0.0) or 0.0
         dur_min = duration / 60.0
         records = m.get("records_ok", 0)
+        migrator_sent = m.get("migrator_sent", 0)
+        migrator_saved = m.get("migrator_saved", 0)
+        migrator_errors = m.get("migrator_errors", 0)
         speed_min = (records / dur_min) if dur_min > 0 else 0.0
         speed_sec = (records / duration) if duration > 0 else 0.0
         query_dur = m.get("query_duration_secs", 0.0) or 0.0
@@ -336,7 +349,10 @@ def notify_run_report(
             b_min = b_max = b_avg = 0.0
 
         lines.append(f"[{ent}]  ({m.get('mode', '—')})  →  {ent_status}")
-        lines.append(f"  Registros migrados      : {records:,}")
+        lines.append(f"  Registros procesados    : {records:,}")
+        lines.append(f"  Enviados al migrator    : {migrator_sent:,}")
+        lines.append(f"  Guardados por migrator  : {migrator_saved:,}")
+        lines.append(f"  Errores del migrator    : {migrator_errors:,}")
         lines.append(f"  Batches OK / con error  : {m.get('batches_ok', 0)} / {m.get('batches_failed', 0)}")
         lines.append(f"  Duración                : {duration:.2f} s   ({dur_min:.2f} min)")
         lines.append(f"  Query origen (SQL)      : {query_dur:.2f} s")

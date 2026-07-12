@@ -258,6 +258,7 @@ def check_content_hash_proveedores(
                     source_key=source_key,
                     link_store=link_store,
                     exporter=exporter,
+                    content_hash=current_hash,
                 )
                 result.actualizados += 1
                 logger.info("Proveedor COD_PROV=%s reenviado y hash actualizado", source_key)
@@ -294,6 +295,7 @@ def _reenviar_proveedor(
     source_key: str,
     link_store: EntityLinkStore,
     exporter: Any,
+    content_hash: str,
 ) -> None:
     """Reenvía un proveedor actualizado a Paxapos usando la lógica del exporter.
 
@@ -306,6 +308,15 @@ def _reenviar_proveedor(
 
     # El exporter internamente mapea (inyectando el remote_id si existe), envía y actualiza el link (con el nuevo hash)
     exporter.write_batch(entity="proveedores", columns=columns, rows=rows)
+    link = link_store.get_link("proveedores", source_key) or {}
+    remote_id = link.get("remote_id")
+    if remote_id:
+        link_store.save_link(
+            entity="proveedores",
+            source_key=source_key,
+            remote_id=str(remote_id),
+            content_hash=content_hash,
+        )
 
 
 

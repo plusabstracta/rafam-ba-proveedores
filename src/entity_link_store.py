@@ -8,16 +8,17 @@ _TABLE_PREFIX = "link_"
 # Extra columns per entity (beyond the base source_key, remote_id, updated_at).
 # Override via the ``schemas`` parameter in EntityLinkStore.__init__().
 DEFAULT_LINK_SCHEMAS: dict[str, list[str]] = {
-    "proveedores": ["cuit", "cod_estado", "payload_hash"],
+    "proveedores": ["cuit", "cod_estado", "payload_hash", "content_hash", "deleted_at"],
     "unidad_medida": ["name", "codigo"],
     "tipo_factura": ["name", "codigo"],
     "tipo_pago": ["name", "codigo"],
     "tipo_retencion": ["name", "codigo"],
     "mercaderia": ["barcode", "nombre_compra"],
     "pedido": [],
-    "orden_compra": ["fech_confirm", "estado_oc", "cod_prov", "importe_tot", "gasto_refs", "gasto_linked_refs", "paxapos_gasto_ids", "has_op", "payload_hash"],
-    "gasto": ["estado_solic", "importe_tot", "cod_prov"],
-    "orden_pago": ["estado_op", "confirmado", "fech_confirm", "importe_total"],
+    "orden_compra": ["fech_confirm", "estado_oc", "cod_prov", "importe_tot", "gasto_refs", "gasto_linked_refs", "paxapos_gasto_ids", "has_op", "payload_hash", "deleted_at"],
+    "gasto": ["estado_solic", "importe_tot", "cod_prov", "deleted_at"],
+    "orden_pago": ["estado_op", "confirmado", "fech_confirm", "importe_total", "deleted_at"],
+    "retenciones": ["fingerprint", "retenciones_count", "deleted_at"],
 }
 
 
@@ -201,3 +202,19 @@ class EntityLinkStore:
         table = self._ensure_table(entity)
         rows = self._conn.execute(f"SELECT * FROM [{table}]").fetchall()
         return [dict(row) for row in rows]
+
+    def iter_all_links(self, entity: str, *, include_deleted: bool = True) -> list[dict]:
+        """Return links for an entity, optionally excluding soft-deleted rows."""
+        links = self.get_all_links(entity)
+        if include_deleted:
+            return links
+        return [link for link in links if not link.get("deleted_at")]
+
+    def mark_deleted(self, entity: str, source_key: str) -> None:
+        """Soft-delete a migrated link for audit-friendly integrity fixes."""
+        table = self._ensure_table(entity)
+        self._conn.execute(
+            f"UPDATE [{table}] SET deleted_at = datetime('now'), updated_at = datetime('now') WHERE source_key = ?",
+            (source_key,),
+        )
+        self._conn.commit()

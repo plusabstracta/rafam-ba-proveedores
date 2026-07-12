@@ -21,12 +21,15 @@ def _summary(success, start="2026-07-07 10:00:00", end="2026-07-07 10:03:00", du
     }
 
 
-def _entity(name, success=True, records=100, migrator_error=None):
+def _entity(name, success=True, records=100, migrator_error=None, sent=10, saved=9, errors=1):
     return {
         "entity": name,
         "mode": "INCREMENTAL",
         "success": success,
         "records_ok": records,
+        "migrator_sent": sent,
+        "migrator_saved": saved,
+        "migrator_errors": errors,
         "batches_ok": 2,
         "batches_failed": 0 if success else 1,
         "duration_secs": 5.0,
@@ -50,12 +53,15 @@ def test_record_and_load(hist):
     day1 = run_history.load_runs("2026-07-07")
     assert len(day1) == 1
     assert day1[0]["entities"][0]["records_ok"] == 100
+    assert day1[0]["entities"][0]["migrator_sent"] == 10
+    assert day1[0]["entities"][0]["migrator_saved"] == 9
+    assert day1[0]["entities"][0]["migrator_errors"] == 1
 
 
 def test_aggregate_runs_ok(hist):
-    run_history.record_run(_summary(True), [_entity("proveedores", records=100)])
+    run_history.record_run(_summary(True), [_entity("proveedores", records=100, sent=20, saved=18, errors=2)])
     run_history.record_run(_summary(True, start="2026-07-07 10:10:00", end="2026-07-07 10:12:00", dur="00:02:00"),
-                           [_entity("proveedores", records=50)])
+                           [_entity("proveedores", records=50, sent=5, saved=5, errors=0)])
 
     runs = run_history.load_runs("2026-07-07")
     summary, metrics = run_history.aggregate_runs(runs, "2026-07-07")
@@ -66,6 +72,9 @@ def test_aggregate_runs_ok(hist):
     assert summary["duration_formatted"] == "00:05:00"
     assert len(metrics) == 1
     assert metrics[0]["records_ok"] == 150
+    assert metrics[0]["migrator_sent"] == 25
+    assert metrics[0]["migrator_saved"] == 23
+    assert metrics[0]["migrator_errors"] == 2
 
 
 def test_aggregate_runs_con_errores(hist):

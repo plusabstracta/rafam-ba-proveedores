@@ -167,17 +167,10 @@ class TestIntegrityEndToEnd:
         assert res.actualizados == 1
         assert mock_exporter.write_batch.call_count == 1
 
-        # El exporter mockeado no actualiza la db de links en su mock,
-        # así que emulamos el comportamiento guardando el nuevo hash real.
         from src.mappers.proveedores import compute_content_hash
         row = repo.fetch_proveedor_row(85)
         new_hash = compute_content_hash(row)
-        mock_link_store.save_link(
-            "proveedores",
-            source_key,
-            "remote-prov-85",
-            content_hash=new_hash,
-        )
+        assert mock_link_store.get_link("proveedores", source_key)["content_hash"] == new_hash
 
         # 3. Correr de nuevo: ahora el hash coincide, reporta sin cambios
         res = check_content_hash_proveedores(

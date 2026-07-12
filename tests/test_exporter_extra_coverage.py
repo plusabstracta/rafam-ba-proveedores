@@ -121,6 +121,8 @@ class TestMigratorExporterExtraPaths:
         assert link["remote_id"] == "700"
         assert link["cuit"] == "20123456783"
         assert link["cod_estado"] == "A"
+        from src.mappers.proveedores import compute_content_hash
+        assert link["content_hash"] == compute_content_hash(dict(zip(columns, rows[0])))
 
     def test_write_batch_solic_gastos_filters_by_sent_oc_refs(self, monkeypatch, tmp_path):
         exporter = _migrator(monkeypatch, tmp_path, dry_run=False)

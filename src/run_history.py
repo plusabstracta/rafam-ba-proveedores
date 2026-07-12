@@ -67,6 +67,9 @@ def record_run(summary_data: dict, entity_metrics: list[dict]) -> None:
                 "mode": m.get("mode"),
                 "success": m.get("success", False),
                 "records_ok": m.get("records_ok", 0),
+                "migrator_sent": m.get("migrator_sent", 0),
+                "migrator_saved": m.get("migrator_saved", 0),
+                "migrator_errors": m.get("migrator_errors", 0),
                 "batches_ok": m.get("batches_ok", 0),
                 "batches_failed": m.get("batches_failed", 0),
                 "duration_secs": m.get("duration_secs", 0.0),
@@ -148,6 +151,9 @@ def aggregate_runs(runs: list[dict], date_str: str) -> tuple[dict, list[dict]]:
                     "entity": name,
                     "mode": "DIARIO",
                     "records_ok": 0,
+                    "migrator_sent": 0,
+                    "migrator_saved": 0,
+                    "migrator_errors": 0,
                     "batches_ok": 0,
                     "batches_failed": 0,
                     "duration_secs": 0.0,
@@ -162,6 +168,9 @@ def aggregate_runs(runs: list[dict], date_str: str) -> tuple[dict, list[dict]]:
                 },
             )
             agg["records_ok"] += int(m.get("records_ok", 0) or 0)
+            agg["migrator_sent"] += int(m.get("migrator_sent", 0) or 0)
+            agg["migrator_saved"] += int(m.get("migrator_saved", 0) or 0)
+            agg["migrator_errors"] += int(m.get("migrator_errors", 0) or 0)
             agg["batches_ok"] += int(m.get("batches_ok", 0) or 0)
             agg["batches_failed"] += int(m.get("batches_failed", 0) or 0)
             agg["duration_secs"] += float(m.get("duration_secs", 0.0) or 0.0)

@@ -65,6 +65,9 @@ class EntityWriter:
         self._persist_fn = persist_fn
         self._result_section = result_section
         self._log_stats_fn = log_stats_fn
+        self._last_payload_count = 0
+        self._last_saved_count = 0
+        self._last_error_count = 0
 
     @property
     def entity_name(self) -> str:
@@ -73,6 +76,22 @@ class EntityWriter:
     @property
     def mapper(self) -> Any:
         return self._mapper
+
+    @property
+    def result_section(self) -> str:
+        return self._result_section
+
+    @property
+    def last_payload_count(self) -> int:
+        return self._last_payload_count
+
+    @property
+    def last_saved_count(self) -> int:
+        return self._last_saved_count
+
+    @property
+    def last_error_count(self) -> int:
+        return self._last_error_count
 
     def write_batch(
         self,
@@ -101,6 +120,10 @@ class EntityWriter:
         Returns:
             Dict parseado de la respuesta, o None si no se enviÃ³ nada.
         """
+        self._last_payload_count = 0
+        self._last_saved_count = 0
+        self._last_error_count = 0
+
         import inspect
         sig = inspect.signature(self._mapper.build_payload)
         kwargs = {
@@ -122,6 +145,7 @@ class EntityWriter:
 
         # Log pre-POST
         count = self._count_items(payload)
+        self._last_payload_count = count
         logger.debug(
             "Migrator request [%s] POST %s dry_run=%s items=%d",
             self._entity_name, import_url, dry_run, count,
@@ -129,6 +153,7 @@ class EntityWriter:
 
         # POST
         parsed = post_fn(import_url, payload)
+        self._capture_response_counts(parsed)
 
         # Persist links
         self._persist_fn(parsed, context, link_store, dry_run)
@@ -151,6 +176,25 @@ class EntityWriter:
             items = payload.get(self._result_section, [])
             return len(items) if isinstance(items, list) else 0
         return 0
+
+    @staticmethod
+    def _to_int(value: Any) -> int:
+        try:
+            return int(value or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def _capture_response_counts(self, parsed: dict | None) -> None:
+        if not self._result_section or not isinstance(parsed, dict):
+            return
+        stats = parsed.get("stats")
+        if not isinstance(stats, dict):
+            return
+        section_stats = stats.get(self._result_section)
+        if not isinstance(section_stats, dict):
+            return
+        self._last_saved_count = self._to_int(section_stats.get("ok", 0))
+        self._last_error_count = self._to_int(section_stats.get("error", 0))
 
 
 # ââ Persist function adapters ââââââââââââââââââââââââââââââââââââââââââââ

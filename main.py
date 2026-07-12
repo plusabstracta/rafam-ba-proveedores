@@ -192,11 +192,17 @@ def _sync_entity(
     last_batch_error_detail: str | None = None
     query_duration = 0.0
     total = 0
+    migrator_sent = 0
+    migrator_saved = 0
+    migrator_errors = 0
 
     metrics = {
         "entity": entity,
         "mode": mode,
         "records_ok": 0,
+        "migrator_sent": 0,
+        "migrator_saved": 0,
+        "migrator_errors": 0,
         "batches_ok": 0,
         "batches_failed": 0,
         "query_duration_secs": 0.0,
@@ -225,6 +231,25 @@ def _sync_entity(
         last_id = None
         last_ts = None
 
+        def record_migrator_metrics() -> None:
+            nonlocal migrator_sent, migrator_saved, migrator_errors
+            metrics_fn = getattr(exporter, "get_last_batch_migrator_metrics", None)
+            if not callable(metrics_fn):
+                return
+            batch_metrics = metrics_fn() or {}
+            try:
+                migrator_sent += int(batch_metrics.get("sent", 0) or 0)
+            except (TypeError, ValueError):
+                pass
+            try:
+                migrator_saved += int(batch_metrics.get("saved", 0) or 0)
+            except (TypeError, ValueError):
+                pass
+            try:
+                migrator_errors += int(batch_metrics.get("errors", 0) or 0)
+            except (TypeError, ValueError):
+                pass
+
         def process_batch(batch: list[tuple]) -> None:
             nonlocal last_id, last_ts, total, batch_count, failed_batches, last_batch_error, last_batch_error_detail, batches_ok
             bid, bts = engine.extract_cursor_values(columns, batch, entity)
@@ -239,9 +264,11 @@ def _sync_entity(
             t_batch_start = time.monotonic()
             try:
                 exporter.write_batch(entity, columns, batch)
+                record_migrator_metrics()
                 batch_times.append(time.monotonic() - t_batch_start)
                 batches_ok += 1
             except Exception as exc:
+                record_migrator_metrics()
                 batch_times.append(time.monotonic() - t_batch_start)
                 failed_batches += 1
                 last_batch_error = str(exc)
@@ -300,6 +327,9 @@ def _sync_entity(
                 process_batch([tuple(row) for row in raw_rows])
 
         metrics["records_ok"] = total
+        metrics["migrator_sent"] = migrator_sent
+        metrics["migrator_saved"] = migrator_saved
+        metrics["migrator_errors"] = migrator_errors
         metrics["batches_ok"] = batches_ok
         metrics["batches_failed"] = failed_batches
         metrics["batch_times"] = batch_times

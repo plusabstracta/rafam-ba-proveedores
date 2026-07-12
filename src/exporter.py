@@ -120,6 +120,10 @@ class BaseExporter(ABC):
         elif entity == "oc_items":
             self._temp_oc_payload_hashes = dict(payload_hashes)
 
+    def get_last_batch_migrator_metrics(self) -> dict[str, int]:
+        """Devuelve contadores del ultimo batch enviado al migrator."""
+        return {"sent": 0, "saved": 0, "errors": 0}
+
     def attach_source(self, source_repo) -> None:
         """Inyecta SourceRepository para fetch secundarios. Default: no-op."""
         return None
@@ -165,6 +169,7 @@ class MigratorExporter(BaseExporter):
         self._retry_store = None
         # Ultima respuesta parseada del receptor; la usa _record_batch_outcomes
         self._last_parsed = None
+        self._last_batch_migrator_metrics = {"sent": 0, "saved": 0, "errors": 0}
 
         # ââ Mapper instances âââââââââââââââââââââââââââââââââââââââââââââ
         self._oc_mapper = OcItemsMapper(link_store=self._link_store, lookup_resolver=self._lookup)
@@ -282,10 +287,73 @@ class MigratorExporter(BaseExporter):
             "notificar_proveedor_pago": False,
         }
 
+    def get_last_batch_migrator_metrics(self) -> dict[str, int]:
+        return dict(self._last_batch_migrator_metrics)
+
+    def _reset_last_batch_migrator_metrics(self) -> None:
+        self._last_batch_migrator_metrics = {"sent": 0, "saved": 0, "errors": 0}
+
+    @staticmethod
+    def _metric_int(value) -> int:
+        try:
+            return int(value or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    @classmethod
+    def _stats_counts(cls, parsed: dict | None, sections: list[str]) -> tuple[int, int]:
+        if not isinstance(parsed, dict):
+            return 0, 0
+        stats = parsed.get("stats")
+        if not isinstance(stats, dict):
+            return 0, 0
+        saved = 0
+        errors = 0
+        for section in sections:
+            section_stats = stats.get(section)
+            if not isinstance(section_stats, dict):
+                continue
+            saved += cls._metric_int(section_stats.get("ok", 0))
+            errors += cls._metric_int(section_stats.get("error", 0))
+        return saved, errors
+
+    @staticmethod
+    def _payload_count(payload: dict | None, sections: list[str]) -> int:
+        if not isinstance(payload, dict):
+            return 0
+        total = 0
+        for section in sections:
+            items = payload.get(section, [])
+            if isinstance(items, list):
+                total += len(items)
+        return total
+
+    def _set_last_batch_migrator_metrics(
+        self,
+        *,
+        sent: int,
+        parsed: dict | None,
+        sections: list[str],
+    ) -> None:
+        saved, errors = self._stats_counts(parsed, sections)
+        self._last_batch_migrator_metrics = {
+            "sent": self._metric_int(sent),
+            "saved": saved,
+            "errors": errors,
+        }
+
+    def _set_last_batch_migrator_metrics_from_writer(self, writer: EntityWriter) -> None:
+        self._last_batch_migrator_metrics = {
+            "sent": self._metric_int(writer.last_payload_count),
+            "saved": self._metric_int(writer.last_saved_count),
+            "errors": self._metric_int(writer.last_error_count),
+        }
+
     # ââ write_batch: orchestrator ââââââââââââââââââââââââââââââââââââââââ
 
     def write_batch(self, entity: str, columns: list[str], rows: list[tuple]) -> None:
         self._last_parsed = None
+        self._reset_last_batch_migrator_metrics()
 
         if entity == "proveedores":
             return self._write_batch_proveedores(columns, rows)
@@ -1132,14 +1200,23 @@ class MigratorExporter(BaseExporter):
     def _write_batch_proveedores(self, columns, rows):
         """Delegado a EntityWriter."""
         writer = self._writers["proveedores"]
-        parsed = writer.write_batch(
-            columns, rows,
-            dry_run=self._dry_run,
-            payload_options=self._payload_options(),
-            import_url=self._import_url,
-            post_fn=self._post_json,
-            link_store=self._link_store,
-            raise_on_errors_fn=self._raise_on_migrator_errors,
+        try:
+            parsed = writer.write_batch(
+                columns, rows,
+                dry_run=self._dry_run,
+                payload_options=self._payload_options(),
+                import_url=self._import_url,
+                post_fn=self._post_json,
+                link_store=self._link_store,
+                raise_on_errors_fn=self._raise_on_migrator_errors,
+            )
+        except Exception:
+            self._set_last_batch_migrator_metrics_from_writer(writer)
+            raise
+        self._set_last_batch_migrator_metrics(
+            sent=writer.last_payload_count,
+            parsed=parsed,
+            sections=[writer.result_section],
         )
         if parsed is not None:
             self._last_parsed = parsed
@@ -1147,14 +1224,23 @@ class MigratorExporter(BaseExporter):
     def _write_batch_oc_items(self, columns, rows):
         """Delegado a EntityWriter."""
         writer = self._writers["oc_items"]
-        parsed = writer.write_batch(
-            columns, rows,
-            dry_run=self._dry_run,
-            payload_options=self._payload_options(),
-            import_url=self._import_url,
-            post_fn=self._post_json,
-            link_store=self._link_store,
-            raise_on_errors_fn=self._raise_on_migrator_errors,
+        try:
+            parsed = writer.write_batch(
+                columns, rows,
+                dry_run=self._dry_run,
+                payload_options=self._payload_options(),
+                import_url=self._import_url,
+                post_fn=self._post_json,
+                link_store=self._link_store,
+                raise_on_errors_fn=self._raise_on_migrator_errors,
+            )
+        except Exception:
+            self._set_last_batch_migrator_metrics_from_writer(writer)
+            raise
+        self._set_last_batch_migrator_metrics(
+            sent=writer.last_payload_count,
+            parsed=parsed,
+            sections=[writer.result_section],
         )
         if parsed is not None:
             self._last_parsed = parsed
@@ -1162,14 +1248,23 @@ class MigratorExporter(BaseExporter):
     def _write_batch_solic_gastos(self, columns, rows):
         """Delegado a EntityWriter."""
         writer = self._writers["solic_gastos"]
-        parsed = writer.write_batch(
-            columns, rows,
-            dry_run=self._dry_run,
-            payload_options=self._payload_options(),
-            import_url=self._import_url,
-            post_fn=self._post_json,
-            link_store=self._link_store,
-            raise_on_errors_fn=self._raise_on_migrator_errors,
+        try:
+            parsed = writer.write_batch(
+                columns, rows,
+                dry_run=self._dry_run,
+                payload_options=self._payload_options(),
+                import_url=self._import_url,
+                post_fn=self._post_json,
+                link_store=self._link_store,
+                raise_on_errors_fn=self._raise_on_migrator_errors,
+            )
+        except Exception:
+            self._set_last_batch_migrator_metrics_from_writer(writer)
+            raise
+        self._set_last_batch_migrator_metrics(
+            sent=writer.last_payload_count,
+            parsed=parsed,
+            sections=[writer.result_section],
         )
         if parsed is not None:
             self._last_parsed = parsed
@@ -1182,6 +1277,7 @@ class MigratorExporter(BaseExporter):
         )
         if payload is None:
             return
+        payload_sections = ["ordenes_pago", "gastos"]
 
         url = self._import_url
         logger.debug("Migrator request [orden_pago] POST %s dry_run=%s ops=%d gastos=%d",
@@ -1189,6 +1285,11 @@ class MigratorExporter(BaseExporter):
                       len(payload.get("ordenes_pago", [])),
                       len(payload.get("gastos", [])))
         parsed = self._post_json(url, payload)
+        self._set_last_batch_migrator_metrics(
+            sent=self._payload_count(payload, payload_sections),
+            parsed=parsed,
+            sections=payload_sections,
+        )
 
         self._op_mapper.process_response(parsed, raw_by_source_key,
                                           link_store=self._link_store, dry_run=self._dry_run)
@@ -1203,11 +1304,17 @@ class MigratorExporter(BaseExporter):
         )
         if payload is None:
             return
+        payload_sections = ["retenciones"]
 
         url = self._import_url
         logger.debug("Migrator request [retenciones] POST %s dry_run=%s ops=%d",
                       url, self._dry_run, len(payload.get("retenciones", [])))
         parsed = self._post_json(url, payload)
+        self._set_last_batch_migrator_metrics(
+            sent=self._payload_count(payload, payload_sections),
+            parsed=parsed,
+            sections=payload_sections,
+        )
 
         persist_links_retenciones(parsed, pending_fingerprints, self._link_store, self._dry_run)
         self._raise_on_migrator_errors(parsed)
@@ -1384,6 +1491,7 @@ class MigratorExporter(BaseExporter):
                 mapped = map_proveedor_migrator_row(raw)
                 if mapped:
                     payload_hash = compute_payload_hash(mapped.get("Proveedor", {}))
+            content_hash = prov_mapper.compute_content_hash(raw) if raw else None
 
             self._link_store.save_link(
                 entity="proveedores",
@@ -1392,6 +1500,7 @@ class MigratorExporter(BaseExporter):
                 cuit=cuit,
                 cod_estado=cod_estado,
                 payload_hash=payload_hash,
+                content_hash=content_hash,
             )
 
     def _persist_links_orden_compra(self, results: dict, raw_by_source_key: dict[str, dict]) -> None:
