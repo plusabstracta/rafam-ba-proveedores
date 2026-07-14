@@ -99,6 +99,17 @@ ENTITY_CONFIGS: dict[str, EntityConfig] = {
         pending_reprocess_days=30,
         ejercicio_min=_EJERCICIO_MIN,
     ),
+    # Clasificador por objeto del gasto: la jerarquia de 4 niveles vive
+    # desnormalizada en GASTOS (no hay tabla maestra). Se escanea DISTINCT de
+    # (INCISO, PAR_PRIN, PAR_PARC, PAR_SUBP, DENOMINACION) — ver
+    # SourceRepository._build_clasificaciones_statement. Sin filtro de
+    # ejercicio: es un catalogo atemporal. NO corre en el run por defecto
+    # (main.py: solo proveedores + oc_items); se invoca con --entity clasificaciones.
+    "clasificaciones": EntityConfig(
+        name="clasificaciones",
+        table_name="GASTOS",
+        full_load=True,
+    ),
 }
 
 # Entidades sujetas al filtro RAFAM_EJERCICIO_MIN (todas menos proveedores, que

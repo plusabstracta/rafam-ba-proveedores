@@ -91,6 +91,8 @@ class SourceRepository:
             # Retenciones escanea las mismas OP que orden_pago; el exporter
             # trae las deducciones por OP via fetch_deducciones_for_ops.
             return self._build_orden_pago_statement(cfg, checkpoint)
+        if entity == "clasificaciones":
+            return self._build_clasificaciones_statement(cfg, checkpoint)
         return self._build_simple_table_statement(cfg, checkpoint)
 
     def execute(self, stmt: Select):
@@ -355,6 +357,39 @@ class SourceRepository:
         table = self._reflect_table(cfg.table_name)
         stmt = select(table)
         return self._apply_incremental_filters(stmt, table, cfg, checkpoint)
+
+    def _build_clasificaciones_statement(
+        self,
+        cfg: EntityConfig,
+        checkpoint: Checkpoint,
+    ) -> Select:
+        """DISTINCT de la jerarquia del clasificador de gasto desde GASTOS.
+
+        RAFAM no tiene tabla maestra del clasificador: la jerarquia de 4
+        niveles + DENOMINACION vive repetida en GASTOS. Extraemos las
+        combinaciones distintas (con inciso no nulo, defensa contra basura),
+        ordenadas por los 4 niveles para que el mapper reconstruya el arbol
+        (padres antes que hijos).
+        """
+        gastos = self._reflect_table(cfg.table_name)  # GASTOS
+        cols = [
+            gastos.c.INCISO.label("INCISO"),
+            gastos.c.PAR_PRIN.label("PAR_PRIN"),
+            gastos.c.PAR_PARC.label("PAR_PARC"),
+            gastos.c.PAR_SUBP.label("PAR_SUBP"),
+            gastos.c.DENOMINACION.label("DENOMINACION"),
+        ]
+        return (
+            select(*cols)
+            .distinct()
+            .where(gastos.c.INCISO.isnot(None))
+            .order_by(
+                gastos.c.INCISO,
+                gastos.c.PAR_PRIN,
+                gastos.c.PAR_PARC,
+                gastos.c.PAR_SUBP,
+            )
+        )
 
     def _build_oc_items_statement(
         self,

@@ -65,6 +65,10 @@ from .mappers.orden_pago import (
     _pedido_id_from_op_row as _pedido_id_fn,
 )
 from .mappers.retenciones import RetencionesMapper, persist_links_retenciones
+from .mappers.clasificaciones import (
+    ClasificacionesMapper,
+    persist_links as clasif_persist_links,
+)
 from .retry_store import REASON_BACKEND_REJECTED
 from .utils import (
     build_single_index,
@@ -176,6 +180,7 @@ class MigratorExporter(BaseExporter):
         self._sg_mapper = SolicGastosMapper(link_store=self._link_store, lookup_resolver=self._lookup)
         self._op_mapper = OrdenPagoMapper(link_store=self._link_store, lookup_resolver=self._lookup)
         self._ret_mapper = RetencionesMapper(link_store=self._link_store, lookup_resolver=self._lookup)
+        self._clasif_mapper = ClasificacionesMapper(link_store=self._link_store, lookup_resolver=self._lookup)
 
         if isinstance(self._lookup_payload, dict) and self._lookup_payload.get("_partial_errors"):
             logger.warning("Migrator lookups parciales: %s", self._lookup_payload.get("_partial_errors"))
@@ -223,6 +228,7 @@ class MigratorExporter(BaseExporter):
         "solic_gastos": "gastos",
         "orden_pago": "ordenes_pago",
         "retenciones": "retenciones",
+        "clasificaciones": "clasificaciones",
     }
 
     @staticmethod
@@ -386,6 +392,9 @@ class MigratorExporter(BaseExporter):
         if entity == "retenciones":
             return self._write_batch_retenciones(columns, rows)
 
+        if entity == "clasificaciones":
+            return self._write_batch_clasificaciones(columns, rows)
+
         if entity == "pedidos":
             logger.warning(
                 "Migrator [%s]: entidad recibida sin items. Para migrar solicitudes usa 'ped_items' (genera pedidos con items).",
@@ -445,6 +454,32 @@ class MigratorExporter(BaseExporter):
             error_count,
             self._dry_run,
         )
+
+    def _write_batch_clasificaciones(self, columns: list[str], rows: list[tuple]) -> None:
+        """Reconstruye el arbol del clasificador de gasto y lo envia al migrator.
+
+        En dry_run arma y postea el payload para preview (no persiste links).
+        """
+        payload, raw_by_source_key = self._clasif_mapper.build_payload(
+            columns,
+            rows,
+            dry_run=self._dry_run,
+            payload_options=self._payload_options(),
+        )
+        if payload is None:
+            return
+
+        url = self._import_url
+        nodos = len(payload.get("clasificaciones", []))
+        logger.debug(
+            "Migrator request [clasificaciones] POST %s dry_run=%s nodos=%d",
+            url, self._dry_run, nodos,
+        )
+        parsed = self._post_json(url, payload)
+
+        self._persist_links("clasificaciones", parsed, raw_by_source_key)
+        self._raise_on_migrator_errors(parsed)
+        self._clasif_mapper.log_stats(parsed, self._dry_run)
 
     def _write_batch_ped_items(self, columns: list[str], rows: list[tuple]) -> None:
         grouped: dict[tuple[int, int], dict] = {}
@@ -1840,6 +1875,8 @@ class MigratorExporter(BaseExporter):
             sg_persist_links(parsed, raw_by_source_key, self._link_store)
         elif entity == "orden_pago":
             persist_links_orden_pago(parsed, raw_by_source_key, self._link_store, self._dry_run)
+        elif entity == "clasificaciones":
+            clasif_persist_links(parsed, raw_by_source_key, self._link_store)
 
     @staticmethod
     def _source_key(entity, raw):
