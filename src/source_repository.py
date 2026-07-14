@@ -701,6 +701,12 @@ class SourceRepository:
             "opi_tipo": self._safe_column(opi, "TIPO_COMPROB"),
             "opi_nro": self._safe_column(opi, "NRO_COMPROB"),
             "opi_prov": self._safe_column(opi, "COD_PROV"),
+            # Partida presupuestaria imputada por la OP (clasificador de gasto).
+            # Opcional: si la tabla no las expone, quedan NULL y el gasto va sin clasificar.
+            "opi_inciso": self._safe_column(opi, "INCISO"),
+            "opi_par_prin": self._safe_column(opi, "PAR_PRIN"),
+            "opi_par_parc": self._safe_column(opi, "PAR_PARC"),
+            "opi_par_subp": self._safe_column(opi, "PAR_SUBP"),
             "cc_ej": self._safe_column(cta_comprob, "EJERCICIO"),
             "cc_tipo": self._safe_column(cta_comprob, "TIPO"),
             "cc_nro": self._safe_column(cta_comprob, "NRO_COMPROB"),
@@ -729,6 +735,19 @@ class SourceRepository:
         cc_venc_expr = (
             cols["cc_venc"] if cols["cc_venc"] is not None
             else literal_column("NULL")
+        )
+
+        opi_inciso_expr = (
+            cols["opi_inciso"] if cols["opi_inciso"] is not None else literal_column("NULL")
+        )
+        opi_par_prin_expr = (
+            cols["opi_par_prin"] if cols["opi_par_prin"] is not None else literal_column("NULL")
+        )
+        opi_par_parc_expr = (
+            cols["opi_par_parc"] if cols["opi_par_parc"] is not None else literal_column("NULL")
+        )
+        opi_par_subp_expr = (
+            cols["opi_par_subp"] if cols["opi_par_subp"] is not None else literal_column("NULL")
         )
 
         reg_cols = {}
@@ -799,6 +818,10 @@ class SourceRepository:
                 cols["opi_tipo"].label("OPI_TIPO_COMPROB"),
                 cols["opi_nro"].label("OPI_NRO_COMPROB"),
                 cols["opi_prov"].label("OPI_COD_PROV"),
+                opi_inciso_expr.label("OPI_INCISO"),
+                opi_par_prin_expr.label("OPI_PAR_PRIN"),
+                opi_par_parc_expr.label("OPI_PAR_PARC"),
+                opi_par_subp_expr.label("OPI_PAR_SUBP"),
                 sg_deleg_expr.label("SG_DELEG_SOLIC"),
                 sg_nro_expr.label("SG_NRO_SOLIC"),
                 sg_oc_ej_expr.label("SG_OC_EJERCICIO"),

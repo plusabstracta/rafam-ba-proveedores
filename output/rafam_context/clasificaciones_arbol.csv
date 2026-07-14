@@ -1,0 +1,381 @@
+INCISO,PAR_PRIN,PAR_PARC,PAR_SUBP,DENOMINACION
+1,0,0,0,Gastos en personal
+1,1,0,0,Personal permanente
+1,1,1,0,Retribuciones del cargo
+1,1,2,0,Retribuciones a personal directivo y de control
+1,1,3,0,Retribuciones que no hacen al cargo
+1,1,4,0,Sueldo anual complementario
+1,1,5,0,Otros gastos en personal
+1,1,6,0,Contribuciones patronales
+1,1,6,1,al IPS
+1,1,6,2,AL IOMA
+1,1,6,3,Aporte a la Aseguradora de Riesgos de Trabajo
+1,1,7,0,Complementos
+1,2,0,0,Personal temporario
+1,2,1,0,Retribuciones del cargo
+1,2,2,0,Retribuciones que no hacen al cargo
+1,2,3,0,Sueldo anual complementario
+1,2,4,0,Otros gastos en personal
+1,2,5,0,Contribuciones patronales
+1,2,5,1,AL IPS
+1,2,5,2,AL IOMA
+1,2,5,3,Aporte a la Aseguradora de Riesgos de Trabajo
+1,2,6,0,Complementos
+1,3,0,0,Servicios extraordinarios
+1,3,1,0,Retribuciones extraordinarias
+1,3,2,0,Sueldo anual complementario
+1,3,3,0,Contribuciones patronales
+1,4,0,0,Asignaciones familiares
+1,5,0,0,Asistencia social al personal
+1,6,0,0,Beneficios y compensaciones
+2,0,0,0,Bienes de consumo
+2,1,0,0,Productos alimenticios agropecuarios y forestales
+2,1,1,0,Alimentos para personas
+2,1,2,0,Alimentos para animales
+2,1,3,0,Productos pecuarios
+2,1,4,0,Productos agroforestales
+2,1,5,0,"Madera, corcho y sus manufacturas"
+2,1,9,0,Otros
+2,2,0,0,Textiles y vestuario
+2,2,1,0,Hilados y telas
+2,2,2,0,Prendas de vestir
+2,2,3,0,Confecciones textiles
+2,2,9,0,Otros
+2,3,0,0,"Productos de papel, cartón e impresos"
+2,3,1,0,Papel de escritorio y cartón
+2,3,2,0,Papel para computación
+2,3,3,0,Productos de artes gráficas
+2,3,4,0,Productos de papel y cartón
+2,3,5,0,"Libros, revistas y periódicos"
+2,3,6,0,Textos de enseñanza
+2,3,7,0,Especies timbradas y valores
+2,3,9,0,Otros
+2,4,0,0,Productos de cuero y caucho
+2,4,1,0,Cueros y pieles
+2,4,2,0,Artículos de cuero
+2,4,3,0,Artículos de caucho
+2,4,4,0,Cubiertas y cámaras de aire
+2,4,9,0,Otros
+2,5,0,0,"Productos químicos, combustibles y lubricantes"
+2,5,1,0,Compuestos químicos
+2,5,2,0,Productos farmacéuticos y medicinales
+2,5,3,0,Abonos y fertilizantes
+2,5,4,0,"Insecticidas, fumigantes y otros"
+2,5,5,0,"Tintas, pinturas y colorantes"
+2,5,6,0,Combustibles y lubricantes
+2,5,7,0,Específicos veterinarios
+2,5,8,0,Productos de material plástico
+2,5,9,0,Otros
+2,6,0,0,Productos de minerales no metálicos
+2,6,1,0,Productos de arcilla y cerámica
+2,6,2,0,Productos de vidrio
+2,6,3,0,Productos de loza y porcelana
+2,6,4,0,"Productos de cemento, asbesto y yeso"
+2,6,5,0,"Cemento, cal y yeso"
+2,6,9,0,Otros
+2,7,0,0,productos metálicos
+2,7,1,0,Productos ferrosos
+2,7,2,0,Productos no ferrosos
+2,7,3,0,Material de guerra
+2,7,4,0,Estructuras metálicas acabadas
+2,7,5,0,Herramientas menores
+2,7,9,0,Otros
+2,8,0,0,Minerales
+2,8,1,0,Minerales metalíferos
+2,8,2,0,Petróleo crudo y gas natural
+2,8,3,0,Carbón mineral
+2,8,4,0,"Piedra, arcilla y arena"
+2,8,9,0,Otros
+2,9,0,0,Otros bienes de consumo
+2,9,1,0,Elementos de limpieza
+2,9,2,0,"Utiles de escritorio, oficina y enseñanza"
+2,9,3,0,Utiles y materiales eléctricos
+2,9,4,0,Utensilios de cocina y comedor
+2,9,5,0,"Utiles menores médicos, quirúrgico y de laboratorio"
+2,9,6,0,Repuestos y accesorios
+2,9,9,0,Otros
+3,0,0,0,Servicios no personales
+3,1,0,0,Servicios básicos
+3,1,1,0,Energía eléctrica
+3,1,2,0,Agua
+3,1,3,0,Gas
+3,1,4,0,"Teléfonos, telex y telefax"
+3,1,5,0,Correos y telégrafo
+3,1,9,0,Otros
+3,2,0,0,Alquileres y derechos
+3,2,1,0,Alquiler de edificios y locales
+3,2,2,0,"Alquiler de maquinaria, equipo y medios de transporte"
+3,2,3,0,Alquiler de equipos de computación
+3,2,4,0,Alquiler de fotocopiadoras
+3,2,5,0,Arrendamiento de tierras y terrenos
+3,2,6,0,Derechos de bienes intangibles
+3,2,9,0,Otros
+3,3,0,0,"Mantenimiento, reparación y limpieza"
+3,3,1,0,Mantenimiento y reparación de edificios y locales
+3,3,2,0,Mantenimiento y reparación  de vehículos
+3,3,3,0,Mantenimiento y reparación de maquinaria y equipo
+3,3,4,0,Mantenimiento y reparación de vías de comunicación
+3,3,5,0,Mantenimiento de espacios verdes y del arbolado
+3,3,6,0,Mantenimiento y Limpieza
+3,3,6,0,Mantenimiento y limpieza de desagues
+3,3,6,0,Mantenimiento y limpieza de desag³es
+3,3,7,0,"Limpieza, aseo y fumigación"
+3,3,9,0,Otros
+3,4,0,0,Servicios técnicos y profesionales
+3,4,1,0,"Estudios, investigaciones y proyectos de factibilidad"
+3,4,2,0,Médicos y sanitarios
+3,4,3,0,Jurídicos
+3,4,4,0,Contabilidad y auditoría
+3,4,5,0,De capacitación
+3,4,6,0,De informática y sistemas computarizados
+3,4,7,0,Servicios de hotelería
+3,4,9,0,Otros
+3,5,0,0,Servicios comerciales y financieros
+3,5,1,0,Transporte
+3,5,2,0,Almacenamiento
+3,5,3,0,"Imprenta, publicaciones y reproducciones"
+3,5,4,0,Primas y gastos de seguros
+3,5,5,0,Comisiones y gastos bancarios
+3,5,9,0,Otros
+3,6,0,0,Publicidad y propaganda
+3,6,1,0,Publicidad
+3,6,2,0,Propaganda
+3,6,9,0,Otros
+3,7,0,0,Pasajes y viáticos
+3,7,1,0,Pasajes
+3,7,2,0,Viáticos
+3,7,9,0,Otros
+3,8,0,0,"Impuestos, derechos y tasas"
+3,8,1,0,Impuestos indirectos
+3,8,2,0,Impuestos directos
+3,8,3,0,Derechos y tasas
+3,8,4,0,"Multas, recargos y gastos judiciales"
+3,8,5,0,Regalías
+3,8,9,0,Otros
+3,9,0,0,Otros servicios
+3,9,1,0,Servicios de ceremonial
+3,9,2,0,Gastos Reservados
+3,9,3,0,Servicios de vigilancia
+3,9,9,0,Otros
+4,0,0,0,Bienes de uso
+4,1,0,0,Bienes preexistentes
+4,1,1,0,Tierras y terrenos
+4,1,2,0,Edificios e instalaciones
+4,1,3,0,Otros bienes preexistentes
+4,2,0,0,Construcciones
+4,2,1,0,Construcciones en bienes de dominio privado
+4,2,2,0,Construcciones en bienes de dominio publico
+4,3,0,0,Maquinaria y equipo
+4,3,1,0,Maquinaria y equipo de producción
+4,3,2,0,"Equipo de transporte, tracción y elevación"
+4,3,3,0,Equipo sanitario y de laboratorio
+4,3,4,0,Equipo de comunicación y señalamiento
+4,3,5,0,Equipo educacional y recreativo
+4,3,6,0,Equipo para computación
+4,3,7,0,Equipo de oficina y muebles
+4,3,8,0,Herramientas y repuestos mayores
+4,3,9,0,Equipos varios
+4,4,0,0,Equipo de seguridad
+4,5,0,0,"Libros, revistas y otros elementos coleccionables"
+4,6,0,0,Obras de arte
+4,7,0,0,Semovientes
+4,8,0,0,Activos intangibles
+4,8,1,0,Programas de computación
+4,8,9,0,Otros activos intangibles
+5,0,0,0,Transferencias
+5,1,0,0,Transferencias al sector privado para financiar gastos corrientes
+5,1,3,0,Becas
+5,1,4,0,Ayudas sociales a personas
+5,1,5,0,Transferencias a instituciones de enseñanza
+5,1,6,0,Transferencias para actividades científicas o académicas
+5,1,7,0,Transferencias a otras instituciones culturales y sociales sin fines de lucro
+5,1,8,0,Transferencias a cooperativas
+5,1,9,0,Transferencias a empresas privadas
+5,2,0,0,Transferencias al sector privado para financiar gastos de capital
+5,2,1,0,Transferencias a personas
+5,2,2,0,Transferencias a instituciones de enseñanza
+5,2,3,0,Transferencias para actividades científicas o académicas
+5,2,4,0,Transferencias a otras instituciones culturales y sociales sin fines de lucro
+5,2,5,0,Transferencias a cooperativas
+5,2,6,0,Transferencias a empresas privadas
+5,3,0,0,"Transferencias al Sector Público Nacional, al Sector Público Provincial y al Sector Público Municipal para financiar gastos corrientes"
+5,3,1,0,Transferencias a la administración central nacional
+5,3,2,0,Transferencias a instituciones descentralizadas nacionales
+5,3,3,0,Transferencias a instituciones de seguridad social nacionales
+5,3,4,0,Transferencias a universidades nacionales
+5,3,5,0,Transferencias a otras instituciones públicas nacionales
+5,3,6,0,Transferencias a los gobiernos provinciales
+5,3,7,0,Transferencias a entes de gobiernos provinciales
+5,3,8,0,Transferencias a municipalidades y otros entes comunales
+5,4,0,0,"Transferencias al Sector Público Nacional, al Sector Público Provincial y al Sector Público Municipal para financiar gastos de capital"
+5,4,1,0,Transferencias a la administración central nacional
+5,4,2,0,Transferencias a instituciones descentralizadas nacionales
+5,4,3,0,Transferencias a instituciones de seguridad social nacionales
+5,4,4,0,Transferencias a universidades nacionales
+5,4,5,0,Transferencias a otras instituciones públicas nacionales
+5,4,6,0,Transferencias a los gobiernos provinciales
+5,4,7,0,Transferencias a entes de gobiernos provinciales
+5,4,8,0,Transferencias a municipalidades y otros entes comunales
+5,5,0,0,Transferencias al Sector Público empresarial
+5,5,1,0,Transferencias a instituciones públicas financieras para financiar gastos corrientes
+5,5,2,0,Transferencias a empresas públicas no financieras para financiar gastos corrientes
+5,5,3,0,Transferencias a empresas públicas multinacionales para financiar gastos corrientes
+5,5,6,0,Transferencias a instituciones públicas financieras para financiar gastos de capital
+5,5,7,0,Transferencias a empresas públicas no financieras para financiar gastos de capital
+5,5,8,0,Transferencias a empresas públicas multinacionales para financiar gastos de capital
+5,9,0,0,Transferencias al exterior
+5,9,1,0,Transferencias a gobiernos extranjeros para financiar gastos corrientes
+5,9,2,0,Transferencias a organismos internacionales para financiar gastos corrientes
+5,9,6,0,Transferencias a gobiernos extranjeros para financiar gastos de capital
+5,9,7,0,Transferencias a organismos internacionales para financiar gastos de capital
+6,0,0,0,Activos financieros
+6,1,0,0,Aportes de capital
+6,1,1,0,Aportes de capital a empresas privadas nacionales
+6,1,2,0,Aportes de capital a empresas públicas no financieras
+6,1,3,0,Aportes de capital a instituciones públicas financieras
+6,1,4,0,Aportes de capital a organismos internacionales
+6,1,5,0,Aportes de capital a empresas públicas multinacionales
+6,1,6,0,Aportes de capital a otras organizaciones del sector externo
+6,2,0,0,Préstamos a corto plazo
+6,2,1,0,Préstamos a corto plazo al sector privado
+6,2,2,0,Préstamos a corto plazo al sector público nacional
+6,2,3,0,Préstamos a corto plazo a provincias
+6,2,4,0,Préstamos a corto plazo a municipalidades
+6,2,6,0,Préstamos a corto plazo a instituciones públicas financieras
+6,2,7,0,Préstamos a corto plazo a empresas públicas no financieras
+6,2,8,0,Préstamos a corto plazo a empresas públicas multinacionales
+6,2,9,0,Préstamos a corto plazo al sector externo
+6,3,0,0,Préstamos a largo plazo
+6,3,1,0,Préstamos a largo plazo al sector privado
+6,3,2,0,Préstamos a largo plazo al sector público nacional
+6,3,3,0,Préstamos a largo plazo a provincias
+6,3,4,0,Préstamos a largo plazo a municipalidades
+6,3,6,0,Préstamos a largo plazo a instituciones públicas financieras
+6,3,7,0,Préstamos a largo plazo a empresas públicas no financieras
+6,3,8,0,Préstamos a largo plazo a empresas públicas multinacionales
+6,3,9,0,Préstamos a largo plazo al sector externo
+6,4,0,0,Títulos y valores
+6,4,1,0,Títulos y valores a corto plazo
+6,4,6,0,Títulos y valores a largo plazo
+6,5,0,0,Incremento de disponibilidades
+6,5,1,0,Incremento de caja y bancos
+6,5,1,1,Crédito Adicional
+6,5,2,0,Incremento de inversiones financieras temporarias
+6,6,0,0,Incremento de cuentas a cobrar
+6,6,1,0,Incremento de cuentas a cobrar comerciales a corto plazo
+6,6,2,0,Incremento de otras cuentas a cobrar a corto plazo
+6,6,6,0,Incremento de cuentas a cobrar comerciales a largo plazo
+6,6,7,0,Incremento de otras cuentas a cobrar a largo plazo
+6,7,0,0,Incremento de documentos a cobrar
+6,7,1,0,Incremento de documentos comerciales a cobrar corto plazo
+6,7,2,0,Incremento de otros documentos a cobrar a corto plazo
+6,7,6,0,Incremento de documentos comerciales a cobrar largo plazo
+6,7,7,0,Incremento de otros documentos a cobrar a largo plazo
+6,8,0,0,Incremento de activos diferidos y adelantos a proveedores y contratistas
+6,8,1,0,Incremento de activos diferidos a corto plazo
+6,8,2,0,Adelantos a proveedores y contratistas a corto plazo
+6,8,6,0,Incremento de activos diferidos a largo plazo
+6,8,7,0,Adelantos a proveedores y contratistas a largo plazo
+7,0,0,0,Servicio de la deuda y disminución de otros pasivos
+7,1,0,0,Servicio de la deuda interna
+7,1,1,0,Intereses de la deuda interna a corto plazo
+7,1,2,0,Amortización de la deuda interna a corto plazo
+7,1,3,0,Comisiones y otros gastos de la deuda interna a corto plazo
+7,1,6,0,Intereses de la deuda interna a largo plazo
+7,1,7,0,Amortización de la deuda interna a largo plazo
+7,1,8,0,Comisiones y otros gastos de la deuda interna a largo plazo
+7,2,0,0,Servicio de la deuda externa
+7,2,1,0,Intereses de la deuda externa a corto plazo
+7,2,2,0,Amortización de la deuda externa a corto plazo
+7,2,3,0,Comisiones y otros gastos de la deuda externa a corto plazo
+7,2,6,0,Intereses de la deuda externa a largo plazo
+7,2,7,0,Amortización de la deuda externa a largo plazo
+7,2,8,0,Comisiones y otros gastos de la deuda externa a largo plazo
+7,3,0,0,Intereses por préstamos recibidos
+7,3,1,0,Intereses por préstamos del sector privado
+7,3,2,0,Intereses por préstamos del sector público nacional
+7,3,3,0,Intereses de préstamos de provincias
+7,3,4,0,Intereses de préstamos de municipalidades
+7,3,6,0,Intereses de préstamos de empresas públicas no financieras
+7,3,7,0,Intereses de préstamos de instituciones públicas financieras
+7,3,8,0,Intereses de préstamos de empresas públicas multinacionales
+7,3,9,0,Intereses de préstamos del sector externo
+7,4,0,0,Disminución de préstamos a corto plazo
+7,4,1,0,Préstamos recibidos del sector privado
+7,4,2,0,Préstamos recibidos del sector público nacional
+7,4,3,0,Préstamos recibidos de provincias
+7,4,4,0,Préstamos recibidos de municipalidades
+7,4,6,0,Préstamos recibidos de empresas públicas no financieras
+7,4,7,0,Préstamos recibidos de instituciones públicas financieras
+7,4,8,0,Préstamos recibidos de empresas públicas multinacionales
+7,4,9,0,Préstamos recibidos del sector externo
+7,5,0,0,Disminución de préstamos a largo plazo
+7,5,1,0,Préstamos recibidos del sector privado
+7,5,2,0,Préstamos recibidos del sector público nacional
+7,5,3,0,Préstamos recibidos de provincias
+7,5,4,0,Préstamos recibidos de municipalidades
+7,5,6,0,Préstamos recibidos de empresas públicas no  financieras
+7,5,7,0,Préstamos recibidos de instituciones públicas  financieras
+7,5,8,0,Préstamos recibidos de empresas públicas multinacionales
+7,5,9,0,Préstamos recibidos del sector externo
+7,6,0,0,Disminución de cuentas y documentos a pagar
+7,6,1,0,Disminución de cuentas a pagar comerciales a  corto plazo
+7,6,2,0,Disminución de otras cuentas a pagar a corto plazo
+7,6,3,0,Disminución de documentos a pagar comerciales a  corto plazo
+7,6,4,0,Disminución de otros documentos a pagar a corto plazo
+7,6,6,0,Disminución de cuentas a pagar comerciales a largo plazo
+7,6,7,0,Disminución de otras cuentas a pagar a largo plazo
+7,6,8,0,Disminución de documentos a pagar comerciales a  largo plazo
+7,6,9,0,Disminución de otros documentos a pagar a largo plazo
+7,7,0,0,Disminución de depósitos en instituciones públicas financieras
+7,7,1,0,Disminución de depósitos a la vista
+7,7,2,0,Disminución de depósitos en ahorro y plazo fijo
+7,8,0,0,Disminución de otros pasivos
+7,8,1,0,Disminución de pasivos diferidos a corto plazo
+7,8,2,0,Disminución de previsiones para cuentas incobrables
+7,8,3,0,Disminución de previsiones para autoseguro
+7,8,4,0,Disminución de provisiones
+7,8,5,0,Disminución de reservas técnicas
+7,8,6,0,Disminución de pasivos diferidos a largo plazo
+7,9,0,0,Conversión de la deuda
+7,9,1,0,Conversión de la deuda interna a largo plazo en deuda interna a corto plazo
+7,9,2,0,Conversión de la deuda externa a largo plazo en deuda externa a corto plazo
+7,9,3,0,Conversión de préstamos internos a largo plazo en préstamos internos a corto plazo
+7,9,4,0,Conversión de préstamos externos a largo plazo en préstamos externos a corto plazo
+8,0,0,0,Otros gastos
+8,1,0,0,Intereses de instituciones públicas financieras
+8,2,0,0,Depreciación y amortización
+8,2,1,0,Depreciación del activo fijo
+8,2,2,0,Amortización del activo intangible
+8,3,0,0,Descuentos y bonificaciones
+8,3,1,0,Descuentos por ventas
+8,3,2,0,Bonificaciones por ventas
+8,4,0,0,Otras pérdidas
+8,4,1,0,Cuentas incobrables
+8,4,2,0,Pérdida de inventarios
+8,4,3,0,Autoseguro
+8,4,4,0,Pérdidas de operaciones cambiarías
+8,4,5,0,Pérdidas en venta de activos
+8,4,6,0,Otras pérdidas de operación
+8,4,7,0,Otras pérdidas ajenas a la operación
+8,4,7,1,Devolución de Tributos
+8,4,8,0,Reservas técnicas
+8,4,8,1,Crédito Adicional
+8,4,9,0,Primas de emisión de valores públicos
+8,5,0,0,Disminución del patrimonio
+8,5,1,0,Disminución del capital
+8,5,2,0,Disminución de las reservas
+8,5,3,0,Disminución de los resultados acumulados
+9,0,0,0,Gastos figurativos
+9,1,0,0,Gastos figurativos de la administración municipal para transacciones corrientes
+9,1,1,0,Contribución a la administración central
+9,1,2,0,Contribución a instituciones descentralizadas
+9,1,3,0,Contribución a instituciones de seguridad social
+9,2,0,0,Gastos figurativos de la administración municipal para transacciones de capital
+9,2,1,0,Contribución a la administración central
+9,2,2,0,Contribución a instituciones descentralizadas
+9,2,3,0,Contribución a instituciones de seguridad social
+9,3,0,0,Gastos figurativos de la administración municipal para aplicaciones financieras
+9,3,1,0,Contribución a la administración central
+9,3,2,0,Contribución a instituciones descentralizadas
+9,3,3,0,Contribución a instituciones de seguridad social

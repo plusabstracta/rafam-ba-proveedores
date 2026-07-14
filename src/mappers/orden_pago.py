@@ -11,9 +11,25 @@ import logging
 
 from ..utils import format_date_only, parse_money, to_int
 from ..validation import validate_amount
+from .clasificaciones import code_str as clasif_code_str
+from .clasificaciones import parent_code as clasif_parent_code
 from .solic_gastos import gasto_external_id
 
 logger = logging.getLogger(__name__)
+
+
+def _partida_code_from_op_raw(raw: dict) -> str | None:
+    """Codigo de partida `I.PP.PC.SP` desde las columnas OPI_ de un row de OP.
+
+    Devuelve None si no hay INCISO (fila sin imputacion presupuestaria util).
+    """
+    inciso = to_int(raw.get("OPI_INCISO"))
+    if inciso is None:
+        return None
+    par_prin = to_int(raw.get("OPI_PAR_PRIN")) or 0
+    par_parc = to_int(raw.get("OPI_PAR_PARC")) or 0
+    par_subp = to_int(raw.get("OPI_PAR_SUBP")) or 0
+    return clasif_code_str(inciso, par_prin, par_parc, par_subp)
 
 
 class OrdenPagoMapper:
@@ -27,6 +43,54 @@ class OrdenPagoMapper:
         # Contadores de retenciones descartadas (shared con retenciones mapper)
         self._retencion_skipped_no_catalog: int = 0
         self._retencion_skipped_no_match: dict[str, int] = {}
+        # Contadores de clasificacion de gastos por partida presupuestaria.
+        self._clasif_resolved_exact: int = 0
+        self._clasif_resolved_fallback: int = 0
+        self._clasif_missing: int = 0
+
+    @staticmethod
+    def _partida_depth(code: str) -> int:
+        """Profundidad de un code `I.PP.PC.SP`: 1..4 segun el ultimo nivel no-cero."""
+        depth = 1
+        for i, part in enumerate(code.split(".")):
+            if part != "0":
+                depth = i + 1
+        return depth
+
+    def _choose_partida_code(self, counts: dict[str, int]) -> str | None:
+        """Elige la partida representativa de un comprobante con imputacion repartida.
+
+        Criterio: mas profunda primero; a igual profundidad, la mas frecuente;
+        desempate lexical estable.
+        """
+        if not counts:
+            return None
+        return sorted(
+            counts.items(),
+            key=lambda kv: (self._partida_depth(kv[0]), kv[1], kv[0]),
+            reverse=True,
+        )[0][0]
+
+    def _resolve_clasificacion_id(self, code: str | None) -> tuple[int | None, bool]:
+        """Resuelve clasificacion_id remoto para un code de partida.
+
+        Devuelve (clasificacion_id, used_fallback). Si no hay match exacto, sube
+        por el arbol (4->3->2->1) hasta encontrar un ancestro migrado.
+        """
+        if not code:
+            return None, False
+        remote = self._link_store.get_remote_id("clasificacion", code)
+        if remote:
+            return int(remote), False
+        parts = [int(x) for x in code.split(".")]
+        while True:
+            parent = clasif_parent_code(parts[0], parts[1], parts[2], parts[3])
+            if parent is None:
+                return None, False
+            remote = self._link_store.get_remote_id("clasificacion", parent)
+            if remote:
+                return int(remote), True
+            parts = [int(x) for x in parent.split(".")]
 
     def build_payload(
         self,
@@ -518,6 +582,10 @@ class OrdenPagoMapper:
         pedido_id = to_int(raw.get("_PAXAPOS_PEDIDO_ID") or raw.get("pedido_id"))
         if pedido_id is not None:
             gasto_data["pedido_id"] = pedido_id
+
+        clasif_id = to_int(raw.get("_PAXAPOS_CLASIFICACION_ID"))
+        if clasif_id is not None:
+            gasto_data["clasificacion_id"] = clasif_id
 
         tipo_factura_id = self._lookup.resolve_tipo_factura_id(raw.get("OPI_TIPO_COMPROB"))
         if tipo_factura_id is not None:
