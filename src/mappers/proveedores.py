@@ -94,6 +94,16 @@ def persist_links(parsed: dict, raw_by_source_key: dict[str, dict], link_store) 
     for result in proveedores:
         if not isinstance(result, dict) or not result.get("success"):
             continue
+        if result.get("mode") == "skipped_not_found":
+            # El id de Paxapos ya no existe (baja manual desde la UI). No se recrea
+            # (respeta spec.no_borra) ni se pisa el link: se conserva y se loguea
+            # para que quede en el reporte/mail del run.
+            logger.warning(
+                "Migrator [proveedores]: id Paxapos %s inexistente (baja manual); "
+                "se omite la modificacion. external_id=%s",
+                result.get("id"), result.get("external_id"),
+            )
+            continue
         external_id = result.get("external_id") or {}
         if not isinstance(external_id, dict):
             continue
