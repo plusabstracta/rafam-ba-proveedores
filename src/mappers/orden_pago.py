@@ -105,6 +105,9 @@ class OrdenPagoMapper:
         grouped_gasto_refs: dict[tuple[int, int], list[str]] = {}
         grouped_cc_nros: dict[tuple[int, int], list[str]] = {}
         grouped_cc_keys: dict[tuple[int, int], list[tuple[str, str, str]]] = {}
+        # Partidas presupuestarias por comprobante (cc_key -> {code: veces}).
+        # Un mismo comprobante puede tener imputacion repartida en varias partidas.
+        grouped_cc_partidas: dict[tuple[str, str, str], dict[str, int]] = {}
         grouped_pedido_ids: dict[tuple[int, int], list[int]] = {}
         grouped_pedido_internal_ids: dict[tuple[int, int], list[str]] = {}
         grouped_oc_source_keys: dict[tuple[int, int], list[str]] = {}
@@ -154,6 +157,11 @@ class OrdenPagoMapper:
                 cc_keys = grouped_cc_keys.setdefault(key, [])
                 if cc_key not in cc_keys:
                     cc_keys.append(cc_key)
+                # Acumular la partida imputada de esta fila OPI para el comprobante.
+                partida_code = _partida_code_from_op_raw(raw)
+                if partida_code is not None:
+                    counts = grouped_cc_partidas.setdefault(cc_key, {})
+                    counts[partida_code] = counts.get(partida_code, 0) + 1
                 existing = cc_raw_by_key.get(cc_key)
                 if existing is None or (
                     raw.get("CTA_IMPORTE_COMPR") is not None
@@ -503,6 +511,27 @@ class OrdenPagoMapper:
             pedido_id = cc_key_to_pedido_id.get(cc_key)
             if pedido_id is not None:
                 cc_raw_for_gasto["_PAXAPOS_PEDIDO_ID"] = pedido_id
+            # Clasificacion del gasto: elegir la partida representativa del
+            # comprobante y resolver su clasificacion_id remoto (con fallback al
+            # ancestro migrado si el code exacto no esta en el link_store).
+            chosen_code = self._choose_partida_code(grouped_cc_partidas.get(cc_key, {}))
+            clasif_id, used_fallback = self._resolve_clasificacion_id(chosen_code)
+            if clasif_id is not None:
+                cc_raw_for_gasto["_PAXAPOS_CLASIFICACION_ID"] = clasif_id
+                if used_fallback:
+                    self._clasif_resolved_fallback += 1
+                    logger.debug(
+                        "Migrator [orden_pago] CC %s: clasificacion por fallback desde code %s -> id %s",
+                        cc_key, chosen_code, clasif_id,
+                    )
+                else:
+                    self._clasif_resolved_exact += 1
+            elif chosen_code is not None:
+                self._clasif_missing += 1
+                logger.debug(
+                    "Migrator [orden_pago] CC %s: sin clasificacion para code %s (ni fallback)",
+                    cc_key, chosen_code,
+                )
             gasto, dedup_key = self._build_gasto_from_op_row(cc_raw_for_gasto)
             if gasto is None:
                 skipped_gastos_incomplete += 1
@@ -515,6 +544,13 @@ class OrdenPagoMapper:
             logger.info(
                 "Migrator [orden_pago]: %d comprobantes sin datos suficientes para auto-crear gasto",
                 skipped_gastos_incomplete,
+            )
+        if self._clasif_resolved_exact or self._clasif_resolved_fallback or self._clasif_missing:
+            logger.info(
+                "Migrator [orden_pago] clasificacion de gastos: %d exactas, %d por fallback, %d sin clasificar",
+                self._clasif_resolved_exact,
+                self._clasif_resolved_fallback,
+                self._clasif_missing,
             )
 
         payload = {
