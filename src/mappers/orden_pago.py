@@ -211,10 +211,25 @@ class OrdenPagoMapper:
                 continue
 
             sk = json.dumps({"ejercicio": ejercicio, "nro_op": nro_op}, sort_keys=True)
+            # ABM: si la OP ya fue migrada, re-enviarla como MODIFICACION solo si
+            # cambio en RAFAM (comparando el snapshot guardado en el link:
+            # importe_total / estado_op / confirmado / fech_confirm). Si no cambio se
+            # saltea. Al re-enviar se inyecta el id de Egreso (ver egreso["id"]) para
+            # que Paxapos actualice por id (insert-or-update) sin duplicar la OP.
+            op_remote_id = None
             existing_op = self._link_store.get_link("orden_pago", sk)
             if existing_op and existing_op.get("remote_id"):
-                skipped_existing_keys.add(key)
-                continue
+                importe_snap = str(raw.get("IMPORTE_TOTAL")) if raw.get("IMPORTE_TOTAL") is not None else None
+                unchanged = (
+                    (existing_op.get("estado_op") or None) == (estado or None)
+                    and (existing_op.get("confirmado") or None) == (confirmado or None)
+                    and (existing_op.get("fech_confirm") or None) == (fecha_confirm or None)
+                    and (existing_op.get("importe_total") or None) == importe_snap
+                )
+                if unchanged:
+                    skipped_existing_keys.add(key)
+                    continue
+                op_remote_id = existing_op.get("remote_id")
 
             if key in grouped:
                 continue
@@ -291,6 +306,14 @@ class OrdenPagoMapper:
                 "estado": 3,
                 "fecha": fecha_confirm,
             }
+            # MODIFICACION por id: la OP ya existe en Paxapos y cambio en RAFAM, se
+            # inyecta el id de Egreso para que el controller actualice ese registro
+            # exacto (no duplica; preserva el PDF adjunto del proveedor).
+            if op_remote_id:
+                try:
+                    egreso["id"] = int(op_remote_id)
+                except (TypeError, ValueError):
+                    pass
 
             concepto = raw.get("CONCEPTO") or raw.get("OBSERVACIONES")
             if concepto and str(concepto).strip():
@@ -829,6 +852,15 @@ def persist_links_orden_pago(parsed: dict, raw_by_source_key: dict[str, dict], l
     pk_fields = ["ejercicio", "nro_op"]
     for result in section:
         if not isinstance(result, dict) or not result.get("success"):
+            continue
+        if result.get("mode") == "skipped_not_found":
+            # El id de Egreso ya no existe en Paxapos (baja manual). No se recrea ni
+            # se pisa el link: se conserva y se loguea para el reporte/mail del run.
+            logger.warning(
+                "Migrator [orden_pago]: id Paxapos %s inexistente (baja manual); "
+                "se omite la modificacion. external_id=%s",
+                result.get("id"), result.get("external_id"),
+            )
             continue
         external_id = result.get("external_id") or {}
         if not isinstance(external_id, dict):
