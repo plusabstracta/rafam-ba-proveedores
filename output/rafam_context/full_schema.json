@@ -1,0 +1,3251 @@
+{
+  "schema": "default",
+  "backend": "sqlite",
+  "generated_at": "2026-07-17T14:58:33.695407Z",
+  "tables": [
+    {
+      "name": "ADJUDICACIONES",
+      "num_rows": null,
+      "row_count_source": null,
+      "last_analyzed": null,
+      "tablespace": null
+    },
+    {
+      "name": "ADJUDICACIONES_ITEMS",
+      "num_rows": null,
+      "row_count_source": null,
+      "last_analyzed": null,
+      "tablespace": null
+    },
+    {
+      "name": "CTA_COMPROB",
+      "num_rows": null,
+      "row_count_source": null,
+      "last_analyzed": null,
+      "tablespace": null
+    },
+    {
+      "name": "DEDUCCIONES",
+      "num_rows": null,
+      "row_count_source": null,
+      "last_analyzed": null,
+      "tablespace": null
+    },
+    {
+      "name": "GASTOS",
+      "num_rows": null,
+      "row_count_source": null,
+      "last_analyzed": null,
+      "tablespace": null
+    },
+    {
+      "name": "JURISDICCIONES",
+      "num_rows": null,
+      "row_count_source": null,
+      "last_analyzed": null,
+      "tablespace": null
+    },
+    {
+      "name": "OC_ITEMS",
+      "num_rows": null,
+      "row_count_source": null,
+      "last_analyzed": null,
+      "tablespace": null
+    },
+    {
+      "name": "ORDEN_COMPRA",
+      "num_rows": null,
+      "row_count_source": null,
+      "last_analyzed": null,
+      "tablespace": null
+    },
+    {
+      "name": "ORDEN_PAGO",
+      "num_rows": null,
+      "row_count_source": null,
+      "last_analyzed": null,
+      "tablespace": null
+    },
+    {
+      "name": "ORDEN_PAGO_DEDUC",
+      "num_rows": null,
+      "row_count_source": null,
+      "last_analyzed": null,
+      "tablespace": null
+    },
+    {
+      "name": "ORDEN_PAGO_IMPUT",
+      "num_rows": null,
+      "row_count_source": null,
+      "last_analyzed": null,
+      "tablespace": null
+    },
+    {
+      "name": "PEDIDOS",
+      "num_rows": null,
+      "row_count_source": null,
+      "last_analyzed": null,
+      "tablespace": null
+    },
+    {
+      "name": "PED_ITEMS",
+      "num_rows": null,
+      "row_count_source": null,
+      "last_analyzed": null,
+      "tablespace": null
+    },
+    {
+      "name": "PROVEEDORES",
+      "num_rows": null,
+      "row_count_source": null,
+      "last_analyzed": null,
+      "tablespace": null
+    },
+    {
+      "name": "REG_COMP",
+      "num_rows": null,
+      "row_count_source": null,
+      "last_analyzed": null,
+      "tablespace": null
+    },
+    {
+      "name": "RETENCIONES",
+      "num_rows": null,
+      "row_count_source": null,
+      "last_analyzed": null,
+      "tablespace": null
+    },
+    {
+      "name": "SOLIC_GASTOS",
+      "num_rows": null,
+      "row_count_source": null,
+      "last_analyzed": null,
+      "tablespace": null
+    },
+    {
+      "name": "SOLIC_GASTOS_ITEMS",
+      "num_rows": null,
+      "row_count_source": null,
+      "last_analyzed": null,
+      "tablespace": null
+    },
+    {
+      "name": "TIPOS_COMPROB",
+      "num_rows": null,
+      "row_count_source": null,
+      "last_analyzed": null,
+      "tablespace": null
+    }
+  ],
+  "views": [
+    {
+      "name": "CTA_HOJA_DE_RUTA",
+      "text_length": 743,
+      "text": "CREATE VIEW CTA_HOJA_DE_RUTA AS\nSELECT DISTINCT\n    sg.EJERCICIO    AS SG_EJERCICIO,\n    sg.NRO_SOLIC    AS SG_NRO,\n    sg.DELEG_SOLIC  AS SG_DELEG,\n    oc.EJERCICIO    AS OC_EJERCICIO,\n    oc.NRO_OC       AS OC_NRO_OC,\n    oc.COD_PROV     AS OC_COD_PROV,\n    pe.EJERCICIO    AS PE_EJERCICIO,\n    pe.NUM_PED      AS PE_NRO,\n    pe.JURISDICCION AS PE_JURISDICCION,\n    oc.FECH_CONFIRM AS FECH_HOJA\nFROM OC_ITEMS oci\nJOIN SOLIC_GASTOS sg\n  ON sg.EJERCICIO = oci.EJERCICIO\n AND sg.DELEG_SOLIC = oci.DELEG_SOLIC\n AND sg.NRO_SOLIC = oci.NRO_SOLIC\nJOIN ORDEN_COMPRA oc\n  ON oc.EJERCICIO = oci.EJERCICIO\n AND oc.UNI_COMPRA = oci.UNI_COMPRA\n AND oc.NRO_OC = oci.NRO_OC\nLEFT JOIN PEDIDOS pe\n  ON pe.EJERCICIO = sg.EJERCICIO\n AND pe.NUM_PED = sg.NRO_PED"
+    }
+  ],
+  "columns": {
+    "ADJUDICACIONES": [
+      {
+        "name": "EJERCICIO",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 1,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "NRO_ADJUDIC",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 2,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "NRO_COTI",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 3,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "DELEG_SOLIC",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 4,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "NRO_SOLIC",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 5,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "COD_PROV",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 6,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "FECH_ADJUD",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 7,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "TIPO_DOC_APROB",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 8,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "NRO_DOC_APROB",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 9,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "ANIO_DOC_APROB",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 10,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "ESTADO",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 11,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "FECH_ANUL",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 12,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "MOTIVO_ANUL",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 13,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "FECH_ENTREGA",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 14,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "OBSERVACIONES",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 15,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "COND_PAGO",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 16,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "DESC_COND_PAGO",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 17,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "NRO_LLAMADO",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 18,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "CERRADA",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 19,
+        "default": null,
+        "comment": null
+      }
+    ],
+    "ADJUDICACIONES_ITEMS": [
+      {
+        "name": "EJERCICIO",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 1,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "DELEG_SOLIC",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 2,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "NRO_SOLIC",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 3,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "NRO_COTI",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 4,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "COD_PROV",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 5,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "NRO_ADJUDIC",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 6,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "ITEM_REAL",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 7,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "NRO_ALTER",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 8,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "DESCRIPCION",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 9,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "COSTO_UNITARIO",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 10,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "ESPEC_TEC",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 11,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "CANTIDAD",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 12,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "CANT_ADJ",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 13,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "CANT_COTI",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 14,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "OBSERVACIONES",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 15,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "NRO_LLAMADO",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 16,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "PRECIO_MAXIMO",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 17,
+        "default": null,
+        "comment": null
+      }
+    ],
+    "CTA_COMPROB": [
+      {
+        "name": "EJERCICIO",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 1,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "TIPO",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 2,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "NRO_COMPROB",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 3,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "COD_PROV",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 4,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "NRO_REG_COMP",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 5,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "FECH_MOVIM",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 6,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "FECH_COMPROB",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 7,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "FECH_VENCIM",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 8,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "FECH_CONFORMAC",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 9,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "PORC_BONIF",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 10,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "FECH_BONIF",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 11,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "IMPORTE_COMPR",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 12,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "IMPORTE_PAGADO",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 13,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "RINDE_IVA",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 14,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "PORC_IVA",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 15,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "PORC_CRED_FISCAL",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 16,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "LIST_LIBRO_IVA",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 17,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "FECH_LIST_IVA",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 18,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "COD_PROV_REAL",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 19,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "RAZON_SOCIAL",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 20,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "CUIT",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 21,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "DETALLE",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 22,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "IMPORTE_SIN_IVA",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 23,
+        "default": null,
+        "comment": null
+      }
+    ],
+    "DEDUCCIONES": [
+      {
+        "name": "CODIGO",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 1,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "DESCRIPCION",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 2,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "TIPO_DEDUC",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 3,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "PORCENTAJE",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 4,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "SALDO",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 5,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "DECRIPCION_AB",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 6,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "CODIGO_AXT",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 7,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "EJERCICIO",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 8,
+        "default": null,
+        "comment": null
+      }
+    ],
+    "GASTOS": [
+      {
+        "name": "ANIO_PRESUP",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 1,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "INCISO",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 2,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "PAR_PRIN",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 3,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "PAR_PARC",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 4,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "PAR_SUBP",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 5,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "DENOMINACION",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 6,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "DENOMINACION_AB",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 7,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "TOTALIZADORA",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 8,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "FINALIDAD",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 9,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "FUNCION",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 10,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "SUBFUNCION",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 11,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "NO_CLASIF",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 12,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "CREDITO_INIC",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 13,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "CREDITO_MODIF",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 14,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "PREVENTIVO",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 15,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "COMPROMISO",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 16,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "DEVENGADO",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 17,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "PAGADO",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 18,
+        "default": null,
+        "comment": null
+      }
+    ],
+    "JURISDICCIONES": [
+      {
+        "name": "JURISDICCION",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 1,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "DENOMINACION",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 2,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "SELECCIONABLE",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 3,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "VIGENTE_DESDE",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 4,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "VIGENTE_HASTA",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 5,
+        "default": null,
+        "comment": null
+      }
+    ],
+    "OC_ITEMS": [
+      {
+        "name": "EJERCICIO",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 1,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "UNI_COMPRA",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 2,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "NRO_OC",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 3,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "ITEM_OC",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 4,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "DELEG_SOLIC",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 5,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "NRO_SOLIC",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 6,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "ITEM_REAL",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 7,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "DESCRIPCION",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 8,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "CANTIDAD",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 9,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "IMP_UNITARIO",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 10,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "CANT_RECIB",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 11,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "IMPORTE_EJER",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 12,
+        "default": null,
+        "comment": null
+      }
+    ],
+    "ORDEN_COMPRA": [
+      {
+        "name": "EJERCICIO",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 1,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "UNI_COMPRA",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 2,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "NRO_OC",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 3,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "NRO_ADJUD",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 4,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "FECH_OC",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 5,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "LUG_EMI",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 6,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "COD_PROV",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 7,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "COD_LUG_ENT",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 8,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "FECH_ENTREGA",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 9,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "ESTADO_OC",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 10,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "TIPO_DOC_APROB",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 11,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "NRO_DOC_APROB",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 12,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "ANIO_DOC_APROB",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 13,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "CONFIRMADO",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 14,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "FECH_CONFIRM",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 15,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "CANT_IMPRES",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 16,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "FECH_ANUL",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 17,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "MOTIVO_ANUL",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 18,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "OBSERVACIONES",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 19,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "IMPORTE_TOT",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 20,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "COND_PAGO",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 21,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "DESC_COND_PAGO",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 22,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "OC_DIFERIDO",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 23,
+        "default": null,
+        "comment": null
+      }
+    ],
+    "ORDEN_PAGO": [
+      {
+        "name": "EJERCICIO",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 1,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "NRO_OP",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 2,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "FECH_OP",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 3,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "LUG_EMI",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 4,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "CODIGO_FF",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 5,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "JURISDICCION",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 6,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "CODIGO_UE",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 7,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "COD_PROV",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 8,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "TIPO_OP",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 9,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "ESTADO_OP",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 10,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "TIPO_DOC",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 11,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "NRO_DOC",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 12,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "ANIO_DOC",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 13,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "NRO_CANCE",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 14,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "CONFIRMADO",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 15,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "FECH_CONFIRM",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 16,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "IMPORTE_TOTAL",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 17,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "IMPORTE_LIQUIDO",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 18,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "CANT_IMPRES",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 19,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "FECH_ANUL",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 20,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "MOTIVO_ANUL",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 21,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "CONCEPTO",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 22,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "OBSERVACIONES",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 23,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "COD_EMP",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 24,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "IMPORTE_BONIFICACION",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 25,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "IMPORTE_DEDUCCIONES",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 26,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "ASIENTO",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 27,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "ASIENTO_ANUL",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 28,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "MONTO_SIN_IVA",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 29,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "DEUDA",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 30,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "BLOQUEADA",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 31,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "RECURSO",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 32,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "PERCIBIDO",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 33,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "NO_PAGADO",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 34,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "PAGADO",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 35,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "RECO_DEU_ORDEN",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 36,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "RECO_DEU_EJERCICIO",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 37,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "RECO_DEU_COMPRA",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 38,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "RECO_DEU_COMPRA_EJER",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 39,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "F931",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 40,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "SICORE",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 41,
+        "default": null,
+        "comment": null
+      }
+    ],
+    "ORDEN_PAGO_DEDUC": [
+      {
+        "name": "EJERCICIO",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 1,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "NRO_OP",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 2,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "CODIGO_DEDUC",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 3,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "IMPORTE_RETEN",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 4,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "COMPROB_DEDUC",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 5,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "ALICUOTA",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 6,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "TIPO_GENERAC",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 7,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "CUENTA",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 8,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "COEF_CONV_MULTI",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 9,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "ACTIVIDAD",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 10,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "TIPO_ALICUOTA",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 11,
+        "default": null,
+        "comment": null
+      }
+    ],
+    "ORDEN_PAGO_IMPUT": [
+      {
+        "name": "EJERCICIO",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 1,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "NRO_OP",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 2,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "NRO_REG_COMP",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 3,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "TIPO_COMPROB",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 4,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "NRO_COMPROB",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 5,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "COD_PROV",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 6,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "CODIGO_FF",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 7,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "INCISO",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 8,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "PAR_PRIN",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 9,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "PAR_PARC",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 10,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "PAR_SUBP",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 11,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "JURISDICCION",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 12,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "PROGRAMA",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 13,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "ACTIV_PROY",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 14,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "ACTIV_OBRA",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 15,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "IMPORTE_IMPUT",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 16,
+        "default": null,
+        "comment": null
+      }
+    ],
+    "PEDIDOS": [
+      {
+        "name": "EJERCICIO",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 1,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "NUM_PED",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 2,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "LUG_EMI",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 3,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "FECH_EMI",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 4,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "NUM_PED_ORI",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 5,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "FECH_EMI_ORI",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 6,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "CODIGO_DEP",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 7,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "CODIGO_UE",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 8,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "JURISDICCION",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 9,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "COSTO_TOT",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 10,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "OBSERVACIONES",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 11,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "PED_ESTADO",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 12,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "CANT_IMP",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 13,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "FECH_MODI_ULT",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 14,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "CODIGO_FF",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 15,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "COD_LUG_ENT",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 16,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "PLAZO_ENT",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 17,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "PER_CONSUMO",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 18,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "FECH_ING_COMP",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 19,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "RESP_RETIRA_PED",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 20,
+        "default": null,
+        "comment": null
+      }
+    ],
+    "PED_ITEMS": [
+      {
+        "name": "EJERCICIO",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 1,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "NUM_PED",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 2,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "ORDEN",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 3,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "INCISO",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 4,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "PAR_PRIN",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 5,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "PAR_PARC",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 6,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "CLASE",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 7,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "TIPO",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 8,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "JURISDICCION",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 9,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "PROGRAMA",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 10,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "ACTIV_PROY",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 11,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "ACTIV_OBRA",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 12,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "CANTIDAD",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 13,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "UNI_MED",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 14,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "DESCRIP_BIE",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 15,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "COSTO_UNI",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 16,
+        "default": null,
+        "comment": null
+      }
+    ],
+    "PROVEEDORES": [
+      {
+        "name": "COD_PROV",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 1,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "RAZON_SOCIAL",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 2,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "TIPO_PROV",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 3,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "CUIT",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 4,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "FANTASIA",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 5,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "TIPO_SOC",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 6,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "COD_IVA",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 7,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "ING_BRUTOS",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 8,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "FECHA_ALTA",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 9,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "FECHA_ULT_COMP",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 10,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "CALIF_PROV",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 11,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "COD_ESTADO",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 12,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "CALLE_POSTAL",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 13,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "NRO_POSTAL",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 14,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "NRO_POSTAL_MED",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 15,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "PISO_POSTAL",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 16,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "DEPT_POSTAL",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 17,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "LOCA_POSTAL",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 18,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "COD_POSTAL",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 19,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "PROV_POSTAL",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 20,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "PAIS_POSTAL",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 21,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "CALLE_LEGAL",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 22,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "NRO_LEGAL",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 23,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "NRO_LEGAL_MED",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 24,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "PISO_LEGAL",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 25,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "DEPT_LEGAL",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 26,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "LOCA_LEGAL",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 27,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "COD_LEGAL",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 28,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "PROV_LEGAL",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 29,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "PAIS_LEGAL",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 30,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "NRO_PAIS_TE1",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 31,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "NRO_INTE_TE1",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 32,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "NRO_TELE_TE1",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 33,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "NRO_PAIS_TE2",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 34,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "NRO_INTE_TE2",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 35,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "NRO_TELE_TE2",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 36,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "NRO_PAIS_TE3",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 37,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "NRO_INTE_TE3",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 38,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "NRO_TELE_TE3",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 39,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "TE_CELULAR",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 40,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "FAX",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 41,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "EMAIL",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 42,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "OBSERVACION",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 43,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "PROV_CAJA_CHICA",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 44,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "NRO_HAB_MUN",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 45,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "DISC_RET_SUSS",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 46,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "DISC_GCIAS_UTE",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 47,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "DISC_IIBB_UTE",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 48,
+        "default": null,
+        "comment": null
+      }
+    ],
+    "REG_COMP": [
+      {
+        "name": "EJERCICIO",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 1,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "NRO_REG_COMP",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 2,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "FECH_REG_COMP",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 3,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "LUG_EMI",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 4,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "JURISDICCION",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 5,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "CODIGO_UE",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 6,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "COD_PROV",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 7,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "TIPO_REGIS",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 8,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "NRO_ORIG",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 9,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "CODIGO_FF",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 10,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "UNI_COMPRA",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 11,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "NRO_OC",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 12,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "DELEG_SOLIC",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 13,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "NRO_SOLIC",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 14,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "TIPO_DOC",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 15,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "NRO_DOC",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 16,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "ANIO_DOC",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 17,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "IMPORTE_TOT",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 18,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "ESTADO_REG_COMP",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 19,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "CONFIRMADO",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 20,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "FECH_CONFIRM",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 21,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "FECH_ANUL",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 22,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "MOTIVO_ANUL",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 23,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "CANT_IMPRES",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 24,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "CONCEPTO",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 25,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "FECH_RELOJ",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 26,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "DEUDA",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 27,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "DEPENDENCIA",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 28,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "INSISTIDO",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 29,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "RC_DIFERIDO",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 30,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "EJERCICIO_ANT",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 31,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "NRO_REG_COMP_ANT",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 32,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "RC_EJERCICIO_ANT",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 33,
+        "default": null,
+        "comment": null
+      }
+    ],
+    "RETENCIONES": [
+      {
+        "name": "EJERCICIO",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 1,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "NRO_CANCE",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 2,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "COD_RET",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 3,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "IMPORTE",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 4,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "CUENTA",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 5,
+        "default": null,
+        "comment": null
+      }
+    ],
+    "SOLIC_GASTOS": [
+      {
+        "name": "EJERCICIO",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 1,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "DELEG_SOLIC",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 2,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "NRO_SOLIC",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 3,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "NRO_PED",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 4,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "LUG_EMI",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 5,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "JURISDICCION",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 6,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "CODIGO_UE",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 7,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "CODIGO_DEP",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 8,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "FECH_SOLIC",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 9,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "TIPO_REGIS",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 10,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "NRO_ORIG",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 11,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "CODIGO_FF",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 12,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "IMPORTE_TOT",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 13,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "FECH_ENTREGA",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 14,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "FECH_NECESIDAD",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 15,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "FECH_EST_OC",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 16,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "TIPO_DOC",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 17,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "NRO_DOC",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 18,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "ANIO_DOC",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 19,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "COD_LUG_ENT",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 20,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "ESTADO_SOLIC",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 21,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "CONFIRMADO",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 22,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "FECH_CONFIRM",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 23,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "FECH_ANUL",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 24,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "MOTIVO_ANUL",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 25,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "OBSERVACIONES",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 26,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "CANT_IMP",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 27,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "SG_DIFERIDO",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 28,
+        "default": null,
+        "comment": null
+      }
+    ],
+    "SOLIC_GASTOS_ITEMS": [
+      {
+        "name": "EJERCICIO",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 1,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "DELEG_SOLIC",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 2,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "NRO_SOLIC",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 3,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "SOLIC_ITEM",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 4,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "INCISO",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 5,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "PAR_PRIN",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 6,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "PAR_PARC",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 7,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "PAR_SUBP",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 8,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "TIPO",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 9,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "CLASE",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 10,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "JURISDICCION",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 11,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "PROGRAMA",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 12,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "ACTIV_PROY",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 13,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "ACTIV_OBRA",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 14,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "DESCRIPCION",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 15,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "CODIGO_UM",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 16,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "CANTIDAD",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 17,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "IMP_UNITARIO",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 18,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "CANT_ADJ",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 19,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "CANT_COTI",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 20,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "CANTIDAD_REAL",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 21,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "IMP_UNITARIO_REAL",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 22,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "IMPORTE_EJER",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 23,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "IMPORTE_DIFER",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 24,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "IMPORTE_EJER_REAL",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 25,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "IMPORTE_DIFER_REAL",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 26,
+        "default": null,
+        "comment": null
+      }
+    ],
+    "TIPOS_COMPROB": [
+      {
+        "name": "TIPO",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 1,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "DESCRIPCION",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 2,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "IVA",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 3,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "DEBITO_CREDITO",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 4,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "FORMULA_NETO",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 5,
+        "default": null,
+        "comment": null
+      },
+      {
+        "name": "RINDE_PERCEP",
+        "type": "TEXT",
+        "nullable": true,
+        "position": 6,
+        "default": null,
+        "comment": null
+      }
+    ]
+  },
+  "primary_keys": {
+    "ADJUDICACIONES": [],
+    "ADJUDICACIONES_ITEMS": [],
+    "CTA_COMPROB": [],
+    "DEDUCCIONES": [],
+    "GASTOS": [],
+    "JURISDICCIONES": [],
+    "OC_ITEMS": [],
+    "ORDEN_COMPRA": [],
+    "ORDEN_PAGO": [],
+    "ORDEN_PAGO_DEDUC": [],
+    "ORDEN_PAGO_IMPUT": [],
+    "PEDIDOS": [],
+    "PED_ITEMS": [],
+    "PROVEEDORES": [],
+    "REG_COMP": [],
+    "RETENCIONES": [],
+    "SOLIC_GASTOS": [],
+    "SOLIC_GASTOS_ITEMS": [],
+    "TIPOS_COMPROB": []
+  },
+  "foreign_keys": {
+    "ADJUDICACIONES": [],
+    "ADJUDICACIONES_ITEMS": [],
+    "CTA_COMPROB": [],
+    "DEDUCCIONES": [],
+    "GASTOS": [],
+    "JURISDICCIONES": [],
+    "OC_ITEMS": [],
+    "ORDEN_COMPRA": [],
+    "ORDEN_PAGO": [],
+    "ORDEN_PAGO_DEDUC": [],
+    "ORDEN_PAGO_IMPUT": [],
+    "PEDIDOS": [],
+    "PED_ITEMS": [],
+    "PROVEEDORES": [],
+    "REG_COMP": [],
+    "RETENCIONES": [],
+    "SOLIC_GASTOS": [],
+    "SOLIC_GASTOS_ITEMS": [],
+    "TIPOS_COMPROB": []
+  },
+  "indexes": {
+    "ADJUDICACIONES": [],
+    "ADJUDICACIONES_ITEMS": [],
+    "CTA_COMPROB": [],
+    "DEDUCCIONES": [],
+    "GASTOS": [],
+    "JURISDICCIONES": [],
+    "OC_ITEMS": [],
+    "ORDEN_COMPRA": [],
+    "ORDEN_PAGO": [],
+    "ORDEN_PAGO_DEDUC": [],
+    "ORDEN_PAGO_IMPUT": [],
+    "PEDIDOS": [],
+    "PED_ITEMS": [],
+    "PROVEEDORES": [],
+    "REG_COMP": [],
+    "RETENCIONES": [],
+    "SOLIC_GASTOS": [],
+    "SOLIC_GASTOS_ITEMS": [],
+    "TIPOS_COMPROB": []
+  },
+  "table_comments": {}
+}
