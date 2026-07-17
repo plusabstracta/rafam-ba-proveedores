@@ -263,6 +263,152 @@ class SourceRepository:
             )
         return out
 
+    def fetch_forma_pago_for_ops(
+        self,
+        op_keys: list[tuple[int, int]] | set[tuple[int, int]],
+    ) -> dict[tuple[int, int], str] | None:
+        """Trae la forma de pago real de cada OP desde COMPROBANTES.ORIGEN_TIPO.
+
+        Cadena RAFAM: ORDEN_PAGO (EJERCICIO, NRO_OP) -> EGRESOS (EJERCICIO,
+        NRO_CANCE=NRO_OP) -> COMPROBANTES (EJERCICIO, NRO_CANCE). La forma de pago
+        real vive en COMPROBANTES.ORIGEN_TIPO (CA/CM/NO/IN/EB/OB/EFP/INT/BSF...).
+
+        ORDEN_PAGO NO tiene la forma de pago; el codigo anterior buscaba TIPO_CANCE
+        en ORDEN_PAGO (columna inexistente) y caia siempre al default Transferencia.
+
+        Clave: (EJERCICIO, NRO_OP). Devuelve {(ejercicio, nro_op): origen_tipo}.
+        Una OP puede pagar con varios comprobantes y cada uno con distinta forma de
+        pago; se conserva el ORIGEN_TIPO predominante por IMPORTE y, si hay mas de
+        uno distinto, se emite un warning discriminando los codigos y montos.
+
+        Retorna None si EGRESOS/COMPROBANTES no estan disponibles o falla la query
+        (señal para que el caller use el default). Retorna {} si no hay filas.
+        """
+        if not op_keys:
+            return {}
+
+        egresos = self._reflect_optional_table("EGRESOS")
+        comprobantes = self._reflect_optional_table("COMPROBANTES")
+        if egresos is None or comprobantes is None:
+            logger.warning(
+                "fetch_forma_pago_for_ops: tablas EGRESOS/COMPROBANTES no disponibles "
+                "(schema=%s). Se usara la forma de pago por defecto para todas las OP.",
+                self._schema,
+            )
+            return None
+
+        eg_ej = self._safe_column(egresos, "EJERCICIO")
+        eg_nro_cance = self._safe_column(egresos, "NRO_CANCE")
+        cp_ej = self._safe_column(comprobantes, "EJERCICIO")
+        cp_nro_cance = self._safe_column(comprobantes, "NRO_CANCE")
+        cp_origen_tipo = self._safe_column(comprobantes, "ORIGEN_TIPO")
+        if any(c is None for c in (eg_ej, eg_nro_cance, cp_ej, cp_nro_cance, cp_origen_tipo)):
+            logger.error(
+                "fetch_forma_pago_for_ops: columnas requeridas ausentes "
+                "(EGRESOS.EJERCICIO=%s, EGRESOS.NRO_CANCE=%s, COMPROBANTES.EJERCICIO=%s, "
+                "COMPROBANTES.NRO_CANCE=%s, COMPROBANTES.ORIGEN_TIPO=%s). "
+                "Se usara la forma de pago por defecto.",
+                eg_ej is not None, eg_nro_cance is not None, cp_ej is not None,
+                cp_nro_cance is not None, cp_origen_tipo is not None,
+            )
+            return None
+
+        cp_importe = self._safe_column(comprobantes, "IMPORTE")
+        eg_tipo_cance = self._safe_column(egresos, "TIPO_CANCE")
+        eg_estado = self._safe_column(egresos, "ESTADO")
+        cp_estado = self._safe_column(comprobantes, "ESTADO")
+
+        select_cols = [
+            eg_ej.label("EJERCICIO"),
+            eg_nro_cance.label("NRO_OP"),
+            cp_origen_tipo.label("ORIGEN_TIPO"),
+        ]
+        if cp_importe is not None:
+            select_cols.append(cp_importe.label("IMPORTE"))
+
+        join_on = and_(eg_ej == cp_ej, eg_nro_cance == cp_nro_cance)
+        from_clause = egresos.join(comprobantes, join_on)
+
+        keys_by_ej: dict[int, set[int]] = {}
+        for ej, nro_op in op_keys:
+            if ej is None or nro_op is None:
+                continue
+            keys_by_ej.setdefault(int(ej), set()).add(int(nro_op))
+        if not keys_by_ej:
+            return {}
+
+        ej_filters = []
+        for ej, nro_ops in keys_by_ej.items():
+            ej_filters.append(and_(eg_ej == ej, eg_nro_cance.in_(list(nro_ops))))
+
+        where_filters = [or_(*ej_filters)]
+        # Solo pagos normales (P); descartar anulaciones (A), devoluciones (D), etc.
+        if eg_tipo_cance is not None:
+            where_filters.append(eg_tipo_cance == "P")
+        if eg_estado is not None:
+            where_filters.append(eg_estado == "N")
+        if cp_estado is not None:
+            where_filters.append(cp_estado == "N")
+
+        stmt = select(*select_cols).select_from(from_clause).where(and_(*where_filters))
+
+        # Acumular importe por (OP, ORIGEN_TIPO) para elegir el predominante.
+        accum: dict[tuple[int, int], dict[str, float]] = {}
+        try:
+            for row in self._conn.execute(stmt):
+                mapping = row._mapping
+                try:
+                    ej = int(mapping["EJERCICIO"])
+                    nro_op = int(mapping["NRO_OP"])
+                except (TypeError, ValueError, KeyError):
+                    continue
+                origen = str(mapping.get("ORIGEN_TIPO") or "").strip().upper()
+                if not origen:
+                    continue
+                try:
+                    importe = abs(float(mapping.get("IMPORTE"))) if "IMPORTE" in mapping.keys() and mapping.get("IMPORTE") is not None else 0.0
+                except (TypeError, ValueError):
+                    importe = 0.0
+                por_tipo = accum.setdefault((ej, nro_op), {})
+                # +importe para ponderar; el 1e-9 asegura registrar el tipo aun con importe 0.
+                por_tipo[origen] = por_tipo.get(origen, 0.0) + importe + 1e-9
+        except (SQLAlchemyError, Exception) as exc:
+            logger.error(
+                "fetch_forma_pago_for_ops: error ejecutando query EGRESOS/COMPROBANTES: %s. "
+                "Se usara la forma de pago por defecto.",
+                exc,
+            )
+            return None
+
+        out: dict[tuple[int, int], str] = {}
+        for op_key, por_tipo in accum.items():
+            if not por_tipo:
+                continue
+            # Predominante por importe; desempate lexical estable.
+            chosen = sorted(por_tipo.items(), key=lambda kv: (kv[1], kv[0]), reverse=True)[0][0]
+            out[op_key] = chosen
+            if len(por_tipo) > 1:
+                detalle = ", ".join(
+                    f"{code}={monto:.2f}" for code, monto in sorted(por_tipo.items())
+                )
+                logger.warning(
+                    "fetch_forma_pago_for_ops: OP %s-%s tiene %d formas de pago distintas "
+                    "(%s). Se asigna la predominante '%s'.",
+                    op_key[0], op_key[1], len(por_tipo), detalle, chosen,
+                )
+
+        if out:
+            logger.debug(
+                "fetch_forma_pago_for_ops: forma de pago resuelta para %d OPs desde COMPROBANTES.",
+                len(out),
+            )
+        else:
+            logger.debug(
+                "fetch_forma_pago_for_ops: EGRESOS/COMPROBANTES no devolvio filas para %d keys.",
+                len(op_keys),
+            )
+        return out
+
     def fetch_proveedores_by_keys(self, cod_provs: list[int]) -> tuple[list[str], list[tuple]]:
         """Fetch specific proveedores by COD_PROV for change detection."""
         if not cod_provs:

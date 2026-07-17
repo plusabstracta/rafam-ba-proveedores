@@ -218,8 +218,8 @@ class TestMigratorExporterExtraPaths:
         assert exporter._gasto_ref_from_external_id({"ejercicio": "bad"}) == ""
         assert exporter._split_ref_set(" a, ,b ") == {"a", "b"}
 
-        assert exporter._resolve_tipo_pago_id({"TIPO_CANCE": "CA"}) == 9
-        assert exporter._resolve_tipo_pago_id({"TIPO_CANCE": "NO"}) == 1
+        assert exporter._resolve_tipo_pago_id("CA") == 9
+        assert exporter._resolve_tipo_pago_id("NO") == 1
         assert exporter._resolve_tipo_retencion_id("GAN", "") == 101
         assert exporter._resolve_tipo_retencion_id("iva", "") == 102
         assert exporter._resolve_tipo_retencion_id("", "Ingresos Brutos") == 103

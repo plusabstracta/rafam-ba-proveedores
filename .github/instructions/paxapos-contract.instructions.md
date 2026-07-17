@@ -644,7 +644,7 @@ El mapping debe coincidir con los IDs reales de `centros_costo` del tenant desti
 | `PAXAPOS_RAFAM_RESOLVER_MERCADERIA_PATH` | Path relativo o URL absoluta del resolver determinístico de mercaderías RAFAM dentro de Paxapos | `rafam/migracion/resolver_mercaderia.json` |
 | `PAXAPOS_RAFAM_DEFAULT_UNIDAD_ID` | ID unidad de medida Paxapos default | Verificar contra `lookups`; ejemplo `.env`: `1` |
 | `PAXAPOS_RAFAM_DEFAULT_TIPO_FACTURA_ID` | ID tipo factura Paxapos default | (vacío) |
-| `PAXAPOS_RAFAM_DEFAULT_TIPO_PAGO_ID` | ID tipo de pago Paxapos default | `1` |
+| `PAXAPOS_RAFAM_DEFAULT_TIPO_PAGO_ID` | ID tipo de pago Paxapos default (`Otros`) | `10` |
 | `RAFAM_SYNC_BATCH_DELAY_SECONDS` | Delay local entre batches | `2` |
 | `PAXAPOS_VERIFY_SSL` | Verificación SSL | `false` en dev |
 | `PAXAPOS_TIMEOUT_SECONDS` | Timeout HTTP | `20` |

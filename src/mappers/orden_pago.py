@@ -302,7 +302,9 @@ class OrdenPagoMapper:
             egreso: dict = {
                 "identificador_pago": f"RAFAM-OP-{ejercicio}-{nro_op}",
                 "total": total,
-                "tipo_de_pago_id": self._lookup.resolve_tipo_pago_id(raw),
+                # Default por ahora; se sobreescribe abajo con la forma de pago
+                # real resuelta desde COMPROBANTES.ORIGEN_TIPO por OP.
+                "tipo_de_pago_id": self._lookup.resolve_tipo_pago_id(),
                 "estado": 3,
                 "fecha": fecha_confirm,
             }
@@ -326,6 +328,19 @@ class OrdenPagoMapper:
             }
             if remote_prov_id is not None:
                 grouped[key]["proveedor_id"] = remote_prov_id
+
+        # Forma de pago real por OP desde COMPROBANTES.ORIGEN_TIPO (via EGRESOS).
+        # ORDEN_PAGO no tiene la forma de pago; sin esto todas las OP quedaban como
+        # Transferencia bancaria. Si viene None se conserva el default del egreso.
+        if grouped and self._source_repo is not None:
+            forma_pago_by_op = self._source_repo.fetch_forma_pago_for_ops(list(grouped.keys()))
+            if forma_pago_by_op:
+                for op_key, origen_tipo in forma_pago_by_op.items():
+                    op_entry = grouped.get(op_key)
+                    if op_entry is not None:
+                        op_entry["Egreso"]["tipo_de_pago_id"] = (
+                            self._lookup.resolve_tipo_pago_id(origen_tipo)
+                        )
 
         # Fetch deducciones por OP
         deducciones_by_op: dict[tuple[int, int], list[dict]] = {}

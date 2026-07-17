@@ -1755,8 +1755,8 @@ class MigratorExporter(BaseExporter):
     def _resolve_tipo_factura_id(self, tipo_doc):
         return self._lookup.resolve_tipo_factura_id(tipo_doc)
 
-    def _resolve_tipo_pago_id(self, raw=None):
-        return self._lookup.resolve_tipo_pago_id(raw)
+    def _resolve_tipo_pago_id(self, origen_tipo=None):
+        return self._lookup.resolve_tipo_pago_id(origen_tipo)
 
     def _resolve_tipo_retencion_id(self, cod_ret, descripcion):
         return self._lookup.resolve_tipo_retencion_id(cod_ret, descripcion)

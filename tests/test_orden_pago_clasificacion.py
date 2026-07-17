@@ -39,7 +39,7 @@ class FakeLookup:
     def resolve_tipo_factura_id(self, tipo):
         return 7
 
-    def resolve_tipo_pago_id(self, raw):
+    def resolve_tipo_pago_id(self, origen_tipo=None):
         return 1
 
 

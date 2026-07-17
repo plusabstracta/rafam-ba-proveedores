@@ -11,9 +11,10 @@ import logging
 import os
 
 from ..gateway_mapper import (
-    RAFAM_TIPO_CANCE_DEFAULT_PAGO_ID,
-    RAFAM_TIPO_CANCE_TO_PAXAPOS_PAGO_ID,
-    RAFAM_TIPO_CANCE_TO_PAXAPOS_PAGO_NAME,
+    RAFAM_ORIGEN_TIPO_DEFAULT_PAGO_ID,
+    RAFAM_ORIGEN_TIPO_DEFAULT_PAGO_NAME,
+    RAFAM_ORIGEN_TIPO_TO_PAXAPOS_PAGO_ID,
+    RAFAM_ORIGEN_TIPO_TO_PAXAPOS_PAGO_NAME,
     RAFAM_TIPO_COMPROB_DEFAULT_ID,
     RAFAM_TIPO_COMPROB_TO_PAXAPOS_ID,
     _UM_DEFAULT,
@@ -41,7 +42,10 @@ class LookupResolver:
         # Tipos de pago
         self._tipos_de_pago = lookup_list(lookup_payload, "tipos_de_pago")
         self._tipos_de_pago_by_name = build_single_index(self._tipos_de_pago, "name")
-        self._default_tipo_pago_id = to_int(os.getenv("PAXAPOS_RAFAM_DEFAULT_TIPO_PAGO_ID")) or 1
+        self._default_tipo_pago_id = (
+            to_int(os.getenv("PAXAPOS_RAFAM_DEFAULT_TIPO_PAGO_ID"))
+            or RAFAM_ORIGEN_TIPO_DEFAULT_PAGO_ID
+        )
 
         # Tipos de retenciÃ³n
         self._tipos_retencion = lookup_list(lookup_payload, "tipos_retencion")
@@ -80,24 +84,32 @@ class LookupResolver:
 
     # ââ Tipo Pago âââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 
-    def resolve_tipo_pago_id(self, raw: dict | None = None) -> int:
-        """Mapea ORDEN_PAGO.TIPO_CANCE al tipo_de_pago.id de Paxapos."""
-        if raw:
-            raw_tipo_cance = ""
-            for key, value in raw.items():
-                key_name = str(key).rsplit(".", 1)[-1].upper()
-                if key_name == "TIPO_CANCE":
-                    raw_tipo_cance = value
-                    break
-            tipo_cance = str(raw_tipo_cance).strip().upper()
-            mapped_name = RAFAM_TIPO_CANCE_TO_PAXAPOS_PAGO_NAME.get(tipo_cance)
+    def resolve_tipo_pago_id(self, origen_tipo: str | None = None) -> int:
+        """Mapea COMPROBANTES.ORIGEN_TIPO al tipo_de_pago.id de Paxapos.
+
+        Recibe el codigo de forma de pago ya extraido de COMPROBANTES.ORIGEN_TIPO
+        (resuelto via SourceRepository.fetch_forma_pago_for_ops). Si es None o vacio,
+        o si el codigo no esta mapeado (IN, EB, OB, EFP, etc.), cae al tipo de pago
+        "Otros".
+        """
+        code = str(origen_tipo).strip().upper() if origen_tipo else ""
+        if code:
+            mapped_name = RAFAM_ORIGEN_TIPO_TO_PAXAPOS_PAGO_NAME.get(code)
             by_name = self._tipos_de_pago_by_name.get(normalize_text(mapped_name))
             if by_name and to_int(by_name.get("id")) is not None:
                 return int(by_name.get("id"))
-            mapped_id = RAFAM_TIPO_CANCE_TO_PAXAPOS_PAGO_ID.get(tipo_cance)
+            mapped_id = RAFAM_ORIGEN_TIPO_TO_PAXAPOS_PAGO_ID.get(code)
             if mapped_id is not None:
                 return mapped_id
-            return RAFAM_TIPO_CANCE_DEFAULT_PAGO_ID
+        return self._resolve_default_tipo_pago_id()
+
+    def _resolve_default_tipo_pago_id(self) -> int:
+        """Default "Otros": resuelve por name del tenant, si no cae al id fijo."""
+        by_name = self._tipos_de_pago_by_name.get(
+            normalize_text(RAFAM_ORIGEN_TIPO_DEFAULT_PAGO_NAME)
+        )
+        if by_name and to_int(by_name.get("id")) is not None:
+            return int(by_name.get("id"))
         return self._default_tipo_pago_id
 
     # ââ Tipo RetenciÃ³n ââââââââââââââââââââââââââââââââââââââââââââââââââââ

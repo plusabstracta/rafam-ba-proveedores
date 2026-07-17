@@ -4,7 +4,7 @@ Regression tests para los mappings de catálogos Paxapos.
 Estos tests bloquean el contrato de mapeo entre RAFAM y Paxapos:
 
 - RAFAM CTA_COMPROB.TIPO  -> tipo_factura.id (1=A, 2=B, 5=C, 4=M, 7=Otros, 8..14 NC/ND)
-- RAFAM ORDEN_PAGO.TIPO_CANCE -> tipo_de_pago.id vía lookups por name
+- RAFAM COMPROBANTES.ORIGEN_TIPO -> tipo_de_pago.id vía lookups por name
 - Default UM = 5 (Unidad)
 - orden_pago solo se envia cuando la OC ya resuelve a pedido_id local
 
@@ -19,13 +19,30 @@ import pytest
 
 from src.exporter import MigratorExporter
 from src.gateway_mapper import (
-    RAFAM_TIPO_CANCE_DEFAULT_PAGO_ID,
-    RAFAM_TIPO_CANCE_TO_PAXAPOS_PAGO_ID,
-    RAFAM_TIPO_CANCE_TO_PAXAPOS_PAGO_NAME,
+    RAFAM_ORIGEN_TIPO_DEFAULT_PAGO_ID,
+    RAFAM_ORIGEN_TIPO_TO_PAXAPOS_PAGO_ID,
+    RAFAM_ORIGEN_TIPO_TO_PAXAPOS_PAGO_NAME,
     RAFAM_TIPO_COMPROB_DEFAULT_ID,
     RAFAM_TIPO_COMPROB_TO_PAXAPOS_ID,
     _UM_DEFAULT,
 )
+
+
+class _FakeFormaPagoSource:
+    """SourceRepository de prueba: devuelve la forma de pago por OP.
+
+    Simula COMPROBANTES.ORIGEN_TIPO sin tocar Oracle. fetch_deducciones_for_ops
+    devuelve {} (sin retenciones) para no interferir con el payload de OP.
+    """
+
+    def __init__(self, forma_pago_by_op: dict[tuple[int, int], str]):
+        self._forma_pago_by_op = forma_pago_by_op
+
+    def fetch_forma_pago_for_ops(self, op_keys):
+        return dict(self._forma_pago_by_op)
+
+    def fetch_deducciones_for_ops(self, op_keys):
+        return {}
 
 
 # ─── Constantes ───────────────────────────────────────────────────────────────
@@ -40,19 +57,19 @@ class TestGatewayMapperConstants:
     def test_tipo_comprob_default_es_otros_id_7(self):
         assert RAFAM_TIPO_COMPROB_DEFAULT_ID == 7
 
-    def test_tipo_cance_default_es_transferencia_id_1(self):
-        assert RAFAM_TIPO_CANCE_DEFAULT_PAGO_ID == 1
+    def test_tipo_cance_default_es_otros_id_10(self):
+        assert RAFAM_ORIGEN_TIPO_DEFAULT_PAGO_ID == 10
 
     @pytest.mark.parametrize(
-        "tipo_cance,paxapos_name",
+        "origen_tipo,paxapos_name",
         [
             ("CA", "Cheque"),
             ("CM", "Cheque"),
             ("NO", "Transferencia bancaria"),
         ],
     )
-    def test_tipo_cance_name_mapping(self, tipo_cance, paxapos_name):
-        assert RAFAM_TIPO_CANCE_TO_PAXAPOS_PAGO_NAME[tipo_cance] == paxapos_name
+    def test_tipo_cance_name_mapping(self, origen_tipo, paxapos_name):
+        assert RAFAM_ORIGEN_TIPO_TO_PAXAPOS_PAGO_NAME[origen_tipo] == paxapos_name
 
     @pytest.mark.parametrize(
         "rafam_code,paxapos_id",
@@ -85,15 +102,15 @@ class TestGatewayMapperConstants:
         assert RAFAM_TIPO_COMPROB_TO_PAXAPOS_ID[rafam_code] == paxapos_id
 
     @pytest.mark.parametrize(
-        "tipo_cance,paxapos_id",
+        "origen_tipo,paxapos_id",
         [
             ("CA", 9),  # Cheque al dia
             ("CM", 9),  # Cheque diferido
             ("NO", 1),  # Transferencia bancaria
         ],
     )
-    def test_tipo_cance_id_mapping(self, tipo_cance, paxapos_id):
-        assert RAFAM_TIPO_CANCE_TO_PAXAPOS_PAGO_ID[tipo_cance] == paxapos_id
+    def test_tipo_cance_id_mapping(self, origen_tipo, paxapos_id):
+        assert RAFAM_ORIGEN_TIPO_TO_PAXAPOS_PAGO_ID[origen_tipo] == paxapos_id
 
 
 # ─── Resolvers en el exporter ─────────────────────────────────────────────────
@@ -149,7 +166,7 @@ class TestResolveTipoFacturaIdMappings:
 
 
 class TestResolveTipoPagoIdMappings:
-    """_resolve_tipo_pago_id mapea TIPO_CANCE a tipo_de_pago.id."""
+    """_resolve_tipo_pago_id mapea COMPROBANTES.ORIGEN_TIPO a tipo_de_pago.id."""
 
     def test_cheque_se_resuelve_desde_lookup_del_tenant(self):
         with patch("src.exporter.fetch_migrator_lookups") as mock_lookups:
@@ -174,30 +191,34 @@ class TestResolveTipoPagoIdMappings:
             ):
                 exporter = MigratorExporter(dry_run=True)
 
-        assert exporter._resolve_tipo_pago_id({"TIPO_CANCE": "CA"}) == 11
-        assert exporter._resolve_tipo_pago_id({"TIPO_CANCE": "CM"}) == 11
-        assert exporter._resolve_tipo_pago_id({"TIPO_CANCE": "NO"}) == 10
+        assert exporter._resolve_tipo_pago_id("CA") == 11
+        assert exporter._resolve_tipo_pago_id("CM") == 11
+        assert exporter._resolve_tipo_pago_id("NO") == 10
 
     def test_cheque_al_dia_es_id_9(self, exporter):
         """Fallback legacy sin lookups: CA -> id historico 9."""
-        assert exporter._resolve_tipo_pago_id({"TIPO_CANCE": "CA"}) == 9
+        assert exporter._resolve_tipo_pago_id("CA") == 9
 
     def test_cheque_diferido_es_id_9(self, exporter):
         """Fallback legacy sin lookups: CM -> id historico 9."""
-        assert exporter._resolve_tipo_pago_id({"TIPO_CANCE": "CM"}) == 9
+        assert exporter._resolve_tipo_pago_id("CM") == 9
 
     def test_no_es_transferencia_id_1(self, exporter):
         """Fallback legacy sin lookups: NO -> id historico 1."""
-        assert exporter._resolve_tipo_pago_id({"TIPO_CANCE": "NO"}) == 1
+        assert exporter._resolve_tipo_pago_id("NO") == 1
 
-    def test_tipo_desconocido_cae_a_transferencia_id_1(self, exporter):
-        assert exporter._resolve_tipo_pago_id({"TIPO_CANCE": "XX"}) == 1
+    def test_tipo_desconocido_cae_a_otros_id_10(self, exporter):
+        assert exporter._resolve_tipo_pago_id("XX") == 10
 
     def test_lowercase_se_normaliza(self, exporter):
-        assert exporter._resolve_tipo_pago_id({"tipo_cance": "ca"}) == 9
-        assert exporter._resolve_tipo_pago_id({"TIPO_CANCE": "ca"}) == 9
-        assert exporter._resolve_tipo_pago_id({"Tipo_Cance": "cm"}) == 9
-        assert exporter._resolve_tipo_pago_id({"ORDEN_PAGO.TIPO_CANCE": "no"}) == 1
+        assert exporter._resolve_tipo_pago_id("ca") == 9
+        assert exporter._resolve_tipo_pago_id("cm") == 9
+        assert exporter._resolve_tipo_pago_id("no") == 1
+
+    def test_none_o_vacio_cae_al_default_otros_id_10(self, exporter):
+        """Sin ORIGEN_TIPO (OP sin comprobante) usa el default 'Otros' id=10."""
+        assert exporter._resolve_tipo_pago_id(None) == 10
+        assert exporter._resolve_tipo_pago_id("") == 10
 
 
 class TestResolveUnidadMedidaDefault:
@@ -329,23 +350,35 @@ class TestPedidoInternalIdEnOrdenPago:
         assert op["pedido_id"] == 4242
         assert "pedido_internal_id" not in op
 
-    def test_tipo_pago_se_setea_desde_tipo_cance(self):
-        """TIPO_CANCE='CA' -> tipo_de_pago_id=9 (fallback Cheque sin lookups)."""
+    def test_tipo_pago_se_setea_desde_origen_tipo(self):
+        """COMPROBANTES.ORIGEN_TIPO='CA' -> tipo_de_pago_id=9 (fallback Cheque)."""
         exp = self._make_exporter()
         self._link_oc(exp)
-        rows = [self._row(self._columns(), TIPO_CANCE="CA")]
+        exp.attach_source(_FakeFormaPagoSource({(2026, 5001): "CA"}))
+        rows = [self._row(self._columns())]
         sent = self._send_and_capture(exp, rows)
         op = sent[0]["ordenes_pago"][0]
         assert op["Egreso"]["tipo_de_pago_id"] == 9
 
-    def test_tipo_pago_default_para_tipo_cance_no(self):
-        """TIPO_CANCE='NO' -> tipo_de_pago_id=1 (Transferencia bancaria)."""
+    def test_tipo_pago_default_para_origen_tipo_no(self):
+        """COMPROBANTES.ORIGEN_TIPO='NO' -> tipo_de_pago_id=1 (Transferencia)."""
         exp = self._make_exporter()
         self._link_oc(exp)
-        rows = [self._row(self._columns(), TIPO_CANCE="NO")]
+        exp.attach_source(_FakeFormaPagoSource({(2026, 5001): "NO"}))
+        rows = [self._row(self._columns())]
         sent = self._send_and_capture(exp, rows)
         op = sent[0]["ordenes_pago"][0]
         assert op["Egreso"]["tipo_de_pago_id"] == 1
+
+    def test_tipo_pago_default_cuando_no_hay_comprobante(self):
+        """Sin ORIGEN_TIPO (OP sin comprobante en EGRESOS) -> default 'Otros' id=10."""
+        exp = self._make_exporter()
+        self._link_oc(exp)
+        exp.attach_source(_FakeFormaPagoSource({}))
+        rows = [self._row(self._columns())]
+        sent = self._send_and_capture(exp, rows)
+        op = sent[0]["ordenes_pago"][0]
+        assert op["Egreso"]["tipo_de_pago_id"] == 10
 
 
 # ─── Bug "varios pagos en cero para un mismo comprobante" ────────────────────
