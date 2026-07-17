@@ -78,30 +78,36 @@ def _ora_fmt_type(dtype: str | None, length: int | None,
 
 
 class OracleFetcher:
-    """Fetch completo del diccionario de datos Oracle via queries directas."""
+    """Fetch completo del diccionario de datos Oracle via queries directas.
+
+    Usa acceso posicional (row[0], row[1]...) en vez de .mappings()
+    porque oracledb + SQLAlchemy puede devolver keys en caso inesperado.
+    """
 
     def __init__(self, engine: Engine, schema: str):
         self.engine = engine
         self.schema = schema
 
-    def _q(self, sql: str, **kw) -> list[dict[str, Any]]:
+    def _fetchall(self, sql: str, **kw) -> list[tuple]:
+        """Retorna filas como tuplas posicionales."""
         with self.engine.connect() as conn:
-            return conn.execute(text(sql), {"owner": self.schema, **kw}).mappings().all()
+            return conn.execute(text(sql), {"owner": self.schema, **kw}).fetchall()
 
     # ── tables ────────────────────────────────────────────────────────────
     def fetch_tables(self, include_row_counts: bool) -> list[dict[str, Any]]:
-        rows = self._q(
+        # 0:TABLE_NAME 1:NUM_ROWS 2:LAST_ANALYZED 3:TABLESPACE_NAME
+        rows = self._fetchall(
             "SELECT TABLE_NAME, NUM_ROWS, LAST_ANALYZED, TABLESPACE_NAME "
             "FROM ALL_TABLES WHERE OWNER = :owner ORDER BY TABLE_NAME"
         )
         tables: list[dict[str, Any]] = []
         for r in rows:
             t: dict[str, Any] = {
-                "name": r["TABLE_NAME"],
-                "num_rows": int(r["NUM_ROWS"]) if r["NUM_ROWS"] is not None else None,
-                "row_count_source": "oracle_statistics" if r["NUM_ROWS"] is not None else None,
-                "last_analyzed": r["LAST_ANALYZED"].isoformat() if r["LAST_ANALYZED"] else None,
-                "tablespace": r["TABLESPACE_NAME"],
+                "name": r[0],
+                "num_rows": int(r[1]) if r[1] is not None else None,
+                "row_count_source": "oracle_statistics" if r[1] is not None else None,
+                "last_analyzed": r[2].isoformat() if r[2] else None,
+                "tablespace": r[3],
             }
             if include_row_counts and t["name"]:
                 t["num_rows"] = self._exact_count(t["name"])
@@ -123,11 +129,13 @@ class OracleFetcher:
         result: dict[str, list[dict]] = {}
         for t in tables:
             tn = t["name"]
-            rows = self._q(
+            # 0:COLUMN_NAME 1:DATA_TYPE 2:DATA_LENGTH 3:DATA_PRECISION
+            # 4:DATA_SCALE 5:NULLABLE 6:DATA_DEFAULT 7:COL_COMMENT
+            rows = self._fetchall(
                 """
                 SELECT col.COLUMN_NAME, col.DATA_TYPE, col.DATA_LENGTH,
                        col.DATA_PRECISION, col.DATA_SCALE, col.NULLABLE,
-                       col.DATA_DEFAULT, com.COMMENTS AS COL_COMMENT
+                       col.DATA_DEFAULT, com.COMMENTS
                 FROM   ALL_TAB_COLUMNS col
                 LEFT JOIN ALL_COL_COMMENTS com
                        ON  com.OWNER       = col.OWNER
@@ -141,15 +149,12 @@ class OracleFetcher:
             )
             result[tn] = [
                 {
-                    "name": r["COLUMN_NAME"],
-                    "type": _ora_fmt_type(
-                        r["DATA_TYPE"], r["DATA_LENGTH"],
-                        r["DATA_PRECISION"], r["DATA_SCALE"],
-                    ),
-                    "nullable": r["NULLABLE"] == "Y",
+                    "name": r[0],
+                    "type": _ora_fmt_type(r[1], r[2], r[3], r[4]),
+                    "nullable": r[5] == "Y",
                     "position": i + 1,
-                    "default": (r["DATA_DEFAULT"] or "").strip() or None,
-                    "comment": (r["COL_COMMENT"] or "").strip() or None,
+                    "default": (r[6] or "").strip() or None,
+                    "comment": (r[7] or "").strip() or None,
                 }
                 for i, r in enumerate(rows)
             ]
@@ -164,7 +169,9 @@ class OracleFetcher:
 
         for t in tables:
             tn = t["name"]
-            rows = self._q(
+            # 0:CONSTRAINT_NAME 1:CONSTRAINT_TYPE 2:COLUMN_NAME
+            # 3:POSITION 4:R_OWNER 5:R_CONSTRAINT_NAME
+            rows = self._fetchall(
                 """
                 SELECT c.CONSTRAINT_NAME, c.CONSTRAINT_TYPE,
                        cc.COLUMN_NAME, cc.POSITION,
@@ -182,40 +189,25 @@ class OracleFetcher:
             )
 
             pk_cols: list[str] = []
-            fk_list: list[dict[str, Any]] = []
-            for r in rows:
-                if r["CONSTRAINT_TYPE"] == "P" and r["COLUMN_NAME"] not in pk_cols:
-                    pk_cols.append(r["COLUMN_NAME"])
-                elif r["CONSTRAINT_TYPE"] == "R":
-                    ref_table = self._resolve_fk_table(
-                        r["R_OWNER"], r["R_CONSTRAINT_NAME"]
-                    )
-                    fk_list.append({
-                        "constraint": r["CONSTRAINT_NAME"],
-                        "ref_owner": r["R_OWNER"] or "",
-                        "ref_table": ref_table,
-                        "columns": [r["COLUMN_NAME"]],
-                        "ref_columns": [],  # se resuelve por nombre de FK
-                    })
-            pks[tn] = pk_cols
-
-            # Agrupar columnas por FK constraint
             fk_grouped: dict[str, dict[str, Any]] = {}
             for r in rows:
-                if r["CONSTRAINT_TYPE"] != "R":
-                    continue
-                cname = r["CONSTRAINT_NAME"]
-                if cname not in fk_grouped:
-                    ref_table = self._resolve_fk_table(r["R_OWNER"], r["R_CONSTRAINT_NAME"])
-                    fk_grouped[cname] = {
-                        "constraint": cname,
-                        "ref_owner": r["R_OWNER"] or "",
-                        "ref_table": ref_table,
-                        "columns": [],
-                        "ref_columns": [],
-                    }
-                fk_grouped[cname]["columns"].append(r["COLUMN_NAME"])
+                ctype, col_name = r[1], r[2]
+                if ctype == "P" and col_name not in pk_cols:
+                    pk_cols.append(col_name)
+                elif ctype == "R":
+                    cname = r[0]
+                    if cname not in fk_grouped:
+                        ref_table = self._resolve_fk_table(r[4], r[5])
+                        fk_grouped[cname] = {
+                            "constraint": cname,
+                            "ref_owner": r[4] or "",
+                            "ref_table": ref_table,
+                            "columns": [],
+                            "ref_columns": [],
+                        }
+                    fk_grouped[cname]["columns"].append(col_name)
 
+            pks[tn] = pk_cols
             fks[tn] = list(fk_grouped.values())
 
         return pks, fks
@@ -229,9 +221,9 @@ class OracleFetcher:
                     text("SELECT TABLE_NAME FROM ALL_CONSTRAINTS "
                          "WHERE OWNER = :o AND CONSTRAINT_NAME = :c"),
                     {"o": r_owner, "c": r_constraint},
-                ).mappings().first()
+                ).fetchone()
                 if row:
-                    return f"{r_owner}.{row['TABLE_NAME']}"
+                    return f"{r_owner}.{row[0]}"
         except SQLAlchemyError:
             pass
         return f"{r_owner}.{r_constraint}"
@@ -241,7 +233,8 @@ class OracleFetcher:
         result: dict[str, list[dict[str, Any]]] = {}
         for t in tables:
             tn = t["name"]
-            rows = self._q(
+            # 0:INDEX_NAME 1:UNIQUENESS 2:COLUMN_NAME 3:COLUMN_POSITION
+            rows = self._fetchall(
                 """
                 SELECT i.INDEX_NAME, i.UNIQUENESS, ic.COLUMN_NAME, ic.COLUMN_POSITION
                 FROM   ALL_INDEXES i
@@ -256,36 +249,38 @@ class OracleFetcher:
             )
             idx_map: dict[str, dict[str, Any]] = {}
             for r in rows:
-                iname = r["INDEX_NAME"]
+                iname = r[0]
                 if iname not in idx_map:
                     idx_map[iname] = {
                         "name": iname,
-                        "unique": r["UNIQUENESS"] == "UNIQUE",
+                        "unique": r[1] == "UNIQUE",
                         "columns": [],
                     }
-                idx_map[iname]["columns"].append(r["COLUMN_NAME"])
+                idx_map[iname]["columns"].append(r[2])
             result[tn] = list(idx_map.values())
         return result
 
     # ── views ─────────────────────────────────────────────────────────────
     def fetch_views(self) -> list[dict[str, Any]]:
-        rows = self._q(
+        # 0:VIEW_NAME 1:TEXT_LENGTH 2:TEXT
+        rows = self._fetchall(
             "SELECT VIEW_NAME, TEXT_LENGTH, TEXT "
             "FROM ALL_VIEWS WHERE OWNER = :owner ORDER BY VIEW_NAME"
         )
         return [
-            {"name": r["VIEW_NAME"], "text_length": r["TEXT_LENGTH"] or len(r["TEXT"] or ""),
-             "text": r["TEXT"] or ""}
+            {"name": r[0], "text_length": r[1] or len(r[2] or ""),
+             "text": r[2] or ""}
             for r in rows
         ]
 
     # ── table comments ────────────────────────────────────────────────────
     def fetch_table_comments(self) -> dict[str, str]:
-        rows = self._q(
+        # 0:TABLE_NAME 1:COMMENTS
+        rows = self._fetchall(
             "SELECT TABLE_NAME, COMMENTS FROM ALL_TAB_COMMENTS "
             "WHERE OWNER = :owner AND TABLE_TYPE = 'TABLE'"
         )
-        return {r["TABLE_NAME"]: (r["COMMENTS"] or "").strip() for r in rows}
+        return {r[0]: (r[1] or "").strip() for r in rows}
 
 
 # ─── SQLAlchemy fallback (SQLite, etc.) ──────────────────────────────────────
