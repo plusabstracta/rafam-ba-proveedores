@@ -316,7 +316,6 @@ class SourceRepository:
         cp_importe = self._safe_column(comprobantes, "IMPORTE")
         eg_tipo_cance = self._safe_column(egresos, "TIPO_CANCE")
         eg_estado = self._safe_column(egresos, "ESTADO")
-        cp_estado = self._safe_column(comprobantes, "ESTADO")
 
         select_cols = [
             eg_ej.label("EJERCICIO"),
@@ -343,12 +342,14 @@ class SourceRepository:
 
         where_filters = [or_(*ej_filters)]
         # Solo pagos normales (P); descartar anulaciones (A), devoluciones (D), etc.
+        # La validez del pago se determina por EGRESOS (TIPO_CANCE='P', ESTADO='N').
+        # NO se filtra COMPROBANTES.ESTADO: es numerico (1/2/3/4), no la letra 'N'
+        # como EGRESOS. El filtro previo cp_estado=='N' no matcheaba nunca y dejaba
+        # TODAS las OP sin forma de pago (caian a "Otros").
         if eg_tipo_cance is not None:
             where_filters.append(eg_tipo_cance == "P")
         if eg_estado is not None:
             where_filters.append(eg_estado == "N")
-        if cp_estado is not None:
-            where_filters.append(cp_estado == "N")
 
         stmt = select(*select_cols).select_from(from_clause).where(and_(*where_filters))
 

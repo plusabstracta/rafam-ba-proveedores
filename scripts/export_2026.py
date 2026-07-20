@@ -68,6 +68,11 @@ FULL_LOAD_TABLES: set[str] = {
     "ADJUDICACIONES_ITEMS",
     "TIPOS_COMPROB",
     "ORDEN_PAGO_DEDUC",
+    # Catalogo de formas de pago (COMPROBANTES.ORIGEN_TIPO -> descripcion).
+    # Nombre incierto: se prueban variantes y el script omite las que no existan.
+    "TIPO_DE_ORIGENE",
+    "TIPOS_DE_ORIGEN",
+    "TIPO_ORIGEN",
 }
 
 # Tablas filtradas por EJERCICIO (no tienen DATE pero sí columna EJERCICIO)
@@ -100,6 +105,9 @@ ALL_TABLES: list[str] = [
     "SOLIC_GASTOS_ITEMS",
     "ADJUDICACIONES_ITEMS",
     "TIPOS_COMPROB",
+    "TIPO_DE_ORIGENE",
+    "TIPOS_DE_ORIGEN",
+    "TIPO_ORIGEN",
 ]
 
 # ─── Conexión ─────────────────────────────────────────────────────────────────

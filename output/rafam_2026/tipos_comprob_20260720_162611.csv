@@ -1,0 +1,23 @@
+TIPO,DESCRIPCION,IVA,DEBITO_CREDITO,FORMULA_NETO,RINDE_PERCEP
+FAA,"Factura ""A""",S,D,AJU+EXE+GRA,N
+FAB,"Factura ""B""",N,D,IMT,N
+FAC,"Factura ""C""",N,D,IMT,N
+NDA,"Nota débito ""A""",S,D,AJU+EXE+GRA,N
+NCA,"Nota crédito ""A""",S,C,AJU+EXE+GRA,N
+REA,"Recibo ""A""",S,D,AJU+EXE+GRA,N
+NCB,"Nota de crédito ""B""",N,C,IMT,N
+FAS,Factura de servicios,N,D,IMT,N
+NDB,"Nota de débito ""B""",N,D,IMT,N
+NDC,"Nota de débito ""C""",N,D,IMT,N
+REB,"Recibo ""B""",N,D,IMT,N
+REC,"Recibo ""C""",N,D,IMT,N
+COM,Comprobante,N,D,IMT,N
+VIA,Liquidación de viáticos,N,D,IMT,N
+LIR,Liquidación de remuneraciones,N,D,IMT,N
+CEO,Certificado de avance de obra,N,D,IMT,N
+LIQ,Liquidaciones,N,D,IMT,N
+TKT,Ticket,N,D,IMT,N
+EXB,Extracto Bancario,N,D,IMT,N
+NCC,"Nota de crédito ""C""",N,C,IMT,N
+FBD,Factura B discriminada,S,D,AJU+EXE+GRA,N
+FAM,Factura M,N,D,IMT,N
