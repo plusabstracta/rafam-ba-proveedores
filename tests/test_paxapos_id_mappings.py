@@ -168,7 +168,7 @@ class TestResolveTipoFacturaIdMappings:
 class TestResolveTipoPagoIdMappings:
     """_resolve_tipo_pago_id mapea COMPROBANTES.ORIGEN_TIPO a tipo_de_pago.id."""
 
-    def test_cheque_se_resuelve_desde_lookup_del_tenant(self):
+    def test_origen_tipo_usa_ids_canonicos_aunque_el_lookup_tenga_otro_id(self):
         with patch("src.exporter.fetch_migrator_lookups") as mock_lookups:
             mock_lookups.return_value = {
                 "unidades_de_medida": [],
@@ -191,9 +191,9 @@ class TestResolveTipoPagoIdMappings:
             ):
                 exporter = MigratorExporter(dry_run=True)
 
-        assert exporter._resolve_tipo_pago_id("CA") == 11
-        assert exporter._resolve_tipo_pago_id("CM") == 11
-        assert exporter._resolve_tipo_pago_id("NO") == 10
+        assert exporter._resolve_tipo_pago_id("CA") == 9
+        assert exporter._resolve_tipo_pago_id("CM") == 9
+        assert exporter._resolve_tipo_pago_id("NO") == 1
 
     def test_cheque_al_dia_es_id_9(self, exporter):
         """Fallback legacy sin lookups: CA -> id historico 9."""

@@ -14,7 +14,6 @@ from ..gateway_mapper import (
     RAFAM_ORIGEN_TIPO_DEFAULT_PAGO_ID,
     RAFAM_ORIGEN_TIPO_DEFAULT_PAGO_NAME,
     RAFAM_ORIGEN_TIPO_TO_PAXAPOS_PAGO_ID,
-    RAFAM_ORIGEN_TIPO_TO_PAXAPOS_PAGO_NAME,
     RAFAM_TIPO_COMPROB_DEFAULT_ID,
     RAFAM_TIPO_COMPROB_TO_PAXAPOS_ID,
     _UM_DEFAULT,
@@ -88,16 +87,11 @@ class LookupResolver:
         """Mapea COMPROBANTES.ORIGEN_TIPO al tipo_de_pago.id de Paxapos.
 
         Recibe el codigo de forma de pago ya extraido de COMPROBANTES.ORIGEN_TIPO
-        (resuelto via SourceRepository.fetch_forma_pago_for_ops). Si es None o vacio,
-        o si el codigo no esta mapeado (IN, EB, OB, EFP, etc.), cae al tipo de pago
-        "Otros".
+        (resuelto via SourceRepository.fetch_forma_pago_for_ops). Usa IDs canonicos:
+        resolver por nombre contra lookups del tenant puede devolver IDs no compatibles.
         """
         code = str(origen_tipo).strip().upper() if origen_tipo else ""
         if code:
-            mapped_name = RAFAM_ORIGEN_TIPO_TO_PAXAPOS_PAGO_NAME.get(code)
-            by_name = self._tipos_de_pago_by_name.get(normalize_text(mapped_name))
-            if by_name and to_int(by_name.get("id")) is not None:
-                return int(by_name.get("id"))
             mapped_id = RAFAM_ORIGEN_TIPO_TO_PAXAPOS_PAGO_ID.get(code)
             if mapped_id is not None:
                 return mapped_id

@@ -94,24 +94,15 @@ RAFAM_TIPO_COMPROB_TO_PAXAPOS_ID: dict[str, int] = {
 }
 RAFAM_TIPO_COMPROB_DEFAULT_ID = 7  # "Otros"
 
-# Mapeo RAFAM COMPROBANTES.ORIGEN_TIPO -> Paxapos tipo_de_pagos.name.
-# ORIGEN_TIPO es la forma de pago REAL de la OP (via ORDEN_PAGO -> EGRESOS ->
-# COMPROBANTES). El id es tenant-specific: resolverlo contra
-# /rafam/migracion/lookups.json. Codigos no mapeados caen al default "Otros".
-RAFAM_ORIGEN_TIPO_TO_PAXAPOS_PAGO_NAME: dict[str, str] = {
-    "CA": "Cheque",                    # Cheque al dia (Cheque Aché)
-    "CM": "Cheque",                    # Cheque manual / diferido
-    "NO": "Transferencia bancaria",    # Nota de Orden (transferencia)
-}
 
-# Fallback legacy cuando el endpoint de lookups no devuelve tipos_de_pago.
+
+# IDs canonicos de tipo_de_pagos para ORIGEN_TIPO.
 RAFAM_ORIGEN_TIPO_TO_PAXAPOS_PAGO_ID: dict[str, int] = {
     "CA": 9,   # Cheque al dia
     "CM": 9,   # Cheque manual / diferido
     "NO": 1,   # Transferencia bancaria
 }
 # Default para ORIGEN_TIPO no mapeado (IN, EB, OB, EFP, INT, BSF, etc.) o ausente.
-RAFAM_ORIGEN_TIPO_DEFAULT_PAGO_NAME = "Otros"
 RAFAM_ORIGEN_TIPO_DEFAULT_PAGO_ID = 10  # "Otros"
 
 
