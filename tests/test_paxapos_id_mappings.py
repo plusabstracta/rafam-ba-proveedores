@@ -4,7 +4,7 @@ Regression tests para los mappings de catálogos Paxapos.
 Estos tests bloquean el contrato de mapeo entre RAFAM y Paxapos:
 
 - RAFAM CTA_COMPROB.TIPO  -> tipo_factura.id (1=A, 2=B, 5=C, 4=M, 7=Otros, 8..14 NC/ND)
-- RAFAM COMPROBANTES.ORIGEN_TIPO -> tipo_de_pago.id vía lookups por name
+- RAFAM COMPROBANTES.ORIGEN_TIPO -> tipo_de_pago.id canónico
 - Default UM = 5 (Unidad)
 - orden_pago solo se envia cuando la OC ya resuelve a pedido_id local
 
@@ -21,7 +21,6 @@ from src.exporter import MigratorExporter
 from src.gateway_mapper import (
     RAFAM_ORIGEN_TIPO_DEFAULT_PAGO_ID,
     RAFAM_ORIGEN_TIPO_TO_PAXAPOS_PAGO_ID,
-    RAFAM_ORIGEN_TIPO_TO_PAXAPOS_PAGO_NAME,
     RAFAM_TIPO_COMPROB_DEFAULT_ID,
     RAFAM_TIPO_COMPROB_TO_PAXAPOS_ID,
     _UM_DEFAULT,
@@ -59,17 +58,6 @@ class TestGatewayMapperConstants:
 
     def test_tipo_cance_default_es_otros_id_10(self):
         assert RAFAM_ORIGEN_TIPO_DEFAULT_PAGO_ID == 10
-
-    @pytest.mark.parametrize(
-        "origen_tipo,paxapos_name",
-        [
-            ("CA", "Cheque"),
-            ("CM", "Cheque"),
-            ("NO", "Transferencia bancaria"),
-        ],
-    )
-    def test_tipo_cance_name_mapping(self, origen_tipo, paxapos_name):
-        assert RAFAM_ORIGEN_TIPO_TO_PAXAPOS_PAGO_NAME[origen_tipo] == paxapos_name
 
     @pytest.mark.parametrize(
         "rafam_code,paxapos_id",

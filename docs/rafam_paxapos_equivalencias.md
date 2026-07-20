@@ -135,7 +135,7 @@ Facturas reales del proveedor (con número fiscal AFIP). **Pasada standalone `so
 | `FECH_CONFIRM` | `fecha` | Sólo cuando `ESTADO_OP='C'` y `CONFIRMADO='S'`. |
 | `IMPORTE_TOTAL` | `importe_total` | Total bruto de la OP. El payload conserva también `Egreso.total` por compatibilidad con el importador actual. |
 | `IMPORTE_LIQUIDO` | `importe_neto` | Neto líquido informativo según RAFAM. **`neto_transferido` NO se envía:** Paxapos lo calcula como `total − retenciones` en `_replaceRetencionesForEgreso`. |
-| `TIPO_CANCE` (CA/CM/NO) | `tipo_de_pago_id` | Vía `RAFAM_TIPO_CANCE_TO_PAXAPOS_PAGO_NAME` → lookup por `name` en `tipo_de_pagos`. Default `"Transferencia bancaria"`. |
+| `COMPROBANTES.ORIGEN_TIPO` (CA/CM/NO) | `tipo_de_pago_id` | Vía IDs canónicos: CA/CM→9, NO→1. Default `10` (`Otros`). No se resuelve por `name`. |
 | `JURISDICCION` | `centro_costo_id` | |
 | (vía `ORDEN_PAGO_DEDUC`) | `retenciones[]` (embebidas) | `orden_pago` embebe las retenciones de la OP (deducciones 1:1 por `EJERCICIO + NRO_OP`) dentro del payload del egreso. Si la suma supera el `total` de la OP se descartan y se loguea. Ver §2.6. |
 | (vía `ORDEN_PAGO_IMPUT` → `REG_COMP`) | HABTM `account_egresos_gastos` | Vincula el egreso con uno o varios gastos (`CTA_COMPROB`) por la imputación física de la OP. Las OPs sin `ORDEN_PAGO_IMPUT` se omiten. |
@@ -228,7 +228,7 @@ Lookup dinámico por `name` (no se hardcodean IDs). El mapping `RAFAM_TIPO_COMPR
 
 ### 5.5 `tipo_de_pagos`
 
-Lookup dinámico por `name`. El mapping `RAFAM_TIPO_CANCE_TO_PAXAPOS_PAGO_NAME` resuelve el `name`.
+IDs canónicos para `COMPROBANTES.ORIGEN_TIPO`: CA/CM→9, NO→1, default→10. No se usa lookup por `name`.
 
 ### 5.6 `centros_costo` (por tenant)
 

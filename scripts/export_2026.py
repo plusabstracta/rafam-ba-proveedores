@@ -73,6 +73,10 @@ FULL_LOAD_TABLES: set[str] = {
 # Tablas filtradas por EJERCICIO (no tienen DATE pero sí columna EJERCICIO)
 EJERCICIO_FILTER_TABLES: dict[str, int] = {
     "ORDEN_PAGO_IMPUT": YEAR,
+    # Forma de pago real de la OP: ORDEN_PAGO -> EGRESOS (NRO_CANCE=NRO_OP) ->
+    # COMPROBANTES (ORIGEN_TIPO). Se filtran por EJERCICIO para acompañar a las OP.
+    "EGRESOS": YEAR,
+    "COMPROBANTES": YEAR,
 }
 
 # Tablas objetivo — en orden de exportación
@@ -85,6 +89,8 @@ ALL_TABLES: list[str] = [
     "PED_ITEMS",
     "ORDEN_PAGO",
     "ORDEN_PAGO_IMPUT",
+    "EGRESOS",
+    "COMPROBANTES",
     "CTA_COMPROB",
     "REG_COMP",
     "DEDUCCIONES",
@@ -166,6 +172,15 @@ def table_exists(cursor: oracledb.Cursor, table: str) -> bool:
     return cursor.fetchone()[0] > 0
 
 
+def list_all_tables(cursor: oracledb.Cursor) -> list[str]:
+    """Lista TODAS las tablas del schema OWNER_RAFAM (para --all-tables)."""
+    cursor.execute(
+        "SELECT TABLE_NAME FROM ALL_TABLES WHERE OWNER = :1 ORDER BY TABLE_NAME",
+        [SCHEMA],
+    )
+    return [row[0] for row in cursor.fetchall()]
+
+
 # ─── Exportar tabla ───────────────────────────────────────────────────────────
 
 def export_table(
@@ -227,6 +242,10 @@ def main() -> None:
         help=f"Tablas separadas por coma. Default: {', '.join(ALL_TABLES)}",
     )
     parser.add_argument(
+        "--all-tables", action="store_true",
+        help="Descubre y exporta TODAS las tablas del schema OWNER_RAFAM (auto-detecta filtro por DATE/EJERCICIO).",
+    )
+    parser.add_argument(
         "--output-dir", metavar="DIR", default=str(DEFAULT_OUTPUT_DIR),
         help=f"Directorio de salida (default: {DEFAULT_OUTPUT_DIR})",
     )
@@ -249,6 +268,10 @@ def main() -> None:
     cursor = conn.cursor()
     cursor.arraysize = 5000
 
+    if args.all_tables:
+        tables = list_all_tables(cursor)
+        print(f"🔎 --all-tables: {len(tables)} tablas encontradas en {SCHEMA}")
+
     results: list[dict] = []
     skipped: list[str]  = []
 
@@ -266,8 +289,13 @@ def main() -> None:
         date_col  = None if (full_load or ejercicio is not None) else pick_date_column(table, columns)
 
         if not full_load and ejercicio is None and date_col is None:
-            print(f"  ⚠️  {table}: sin columna DATE detectada → export completo")
-            full_load = True
+            # Sin columna DATE: si tiene EJERCICIO filtramos por año; si no, full load.
+            if any(c["name"] == "EJERCICIO" for c in columns):
+                ejercicio = YEAR
+                print(f"  ℹ️  {table}: sin columna DATE → filtrando por EJERCICIO={YEAR}")
+            else:
+                print(f"  ⚠️  {table}: sin columna DATE ni EJERCICIO → export completo")
+                full_load = True
 
         try:
             result = export_table(

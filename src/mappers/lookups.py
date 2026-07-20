@@ -12,7 +12,6 @@ import os
 
 from ..gateway_mapper import (
     RAFAM_ORIGEN_TIPO_DEFAULT_PAGO_ID,
-    RAFAM_ORIGEN_TIPO_DEFAULT_PAGO_NAME,
     RAFAM_ORIGEN_TIPO_TO_PAXAPOS_PAGO_ID,
     RAFAM_TIPO_COMPROB_DEFAULT_ID,
     RAFAM_TIPO_COMPROB_TO_PAXAPOS_ID,
@@ -38,9 +37,14 @@ class LookupResolver:
         self._tipos_factura_by_name = build_single_index(self._tipos_factura, "name")
         self._default_tipo_factura_id = to_int(os.getenv("PAXAPOS_RAFAM_DEFAULT_TIPO_FACTURA_ID"))
 
-        # Tipos de pago
-        self._tipos_de_pago = lookup_list(lookup_payload, "tipos_de_pago")
-        self._tipos_de_pago_by_name = build_single_index(self._tipos_de_pago, "name")
+        # Tipos de pago. Los codigos CA/CM/NO usan IDs canonicos directos; el
+        # catalogo del tenant se usa SOLO para validar el default y no emitir
+        # nunca un tipo_de_pago_id inexistente (dejaria el egreso sin medio de pago).
+        self._tipos_de_pago_ids = {
+            to_int(t.get("id"))
+            for t in lookup_list(lookup_payload, "tipos_de_pago")
+            if to_int(t.get("id")) is not None
+        }
         self._default_tipo_pago_id = (
             to_int(os.getenv("PAXAPOS_RAFAM_DEFAULT_TIPO_PAGO_ID"))
             or RAFAM_ORIGEN_TIPO_DEFAULT_PAGO_ID
@@ -98,13 +102,23 @@ class LookupResolver:
         return self._resolve_default_tipo_pago_id()
 
     def _resolve_default_tipo_pago_id(self) -> int:
-        """Default "Otros": resuelve por name del tenant, si no cae al id fijo."""
-        by_name = self._tipos_de_pago_by_name.get(
-            normalize_text(RAFAM_ORIGEN_TIPO_DEFAULT_PAGO_NAME)
-        )
-        if by_name and to_int(by_name.get("id")) is not None:
-            return int(by_name.get("id"))
-        return self._default_tipo_pago_id
+        """Default de tipo de pago por ID canonico o override explicito.
+
+        Si conocemos el catalogo del tenant y el default no existe (ej. "Otros"=10
+        no dado de alta), cae al menor id disponible para no dejar el egreso sin
+        medio de pago. Configura PAXAPOS_RAFAM_DEFAULT_TIPO_PAGO_ID a un id valido.
+        """
+        candidate = self._default_tipo_pago_id
+        if self._tipos_de_pago_ids and candidate not in self._tipos_de_pago_ids:
+            fallback = min(self._tipos_de_pago_ids)
+            logger.warning(
+                "resolve_tipo_pago_id: default tipo_de_pago_id=%s no existe en el "
+                "tenant (disponibles=%s). Se usa fallback=%s. Configura "
+                "PAXAPOS_RAFAM_DEFAULT_TIPO_PAGO_ID a un id valido.",
+                candidate, sorted(self._tipos_de_pago_ids), fallback,
+            )
+            return fallback
+        return candidate
 
     # ââ Tipo RetenciÃ³n ââââââââââââââââââââââââââââââââââââââââââââââââââââ
 
