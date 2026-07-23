@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 
+from ..change_detection import compute_payload_hash
 from ..utils import format_date_only, normalize_text, to_int
 
 logger = logging.getLogger(__name__)
@@ -143,6 +144,8 @@ class OcItemsMapper:
         ocs_to_skip_has_op: list[tuple[int, int, int]] = []
         ocs_same_state: list[tuple[int, int, int]] = []
         skipped_same_state = 0
+        resent_hash = 0
+        oc_payload_hashes: dict[str, str] = {}
 
         for key, oc_data in grouped.items():
             if not oc_data["items"]:
@@ -154,6 +157,13 @@ class OcItemsMapper:
                 {"ejercicio": key[0], "nro_oc": key[2], "uni_compra": key[1]},
                 sort_keys=True,
             )
+            # Hash del contenido de la OC. Se computa con la misma forma que
+            # exporter._group_oc_rows (incluye el shadow _rafam_estado_oc) para
+            # que coincida con el payload_hash que guarda sync-changes/backfill.
+            # oc_data no se muta: {**oc_data, ...} crea un dict nuevo.
+            current_hash = compute_payload_hash({**oc_data, "_rafam_estado_oc": estado_actual})
+            oc_payload_hashes[source_key] = current_hash
+
             link_previo = self._link_store.get_link("orden_compra", source_key)
             estado_previo = link_previo.get("estado_oc", "").strip().upper() if link_previo else None
 
@@ -161,8 +171,16 @@ class OcItemsMapper:
                 if link_previo is None or estado_previo != "R":
                     ocs_to_create.append(oc_data)
                 else:
-                    ocs_same_state.append(key)
-                    skipped_same_state += 1
+                    # Ya migrada en estado R. Si el contenido cambio (hash
+                    # distinto al almacenado), re-enviar con upsert aunque el
+                    # estado siga siendo R; si no, dejar como mismo_estado.
+                    stored_hash = link_previo.get("payload_hash")
+                    if stored_hash and current_hash != stored_hash:
+                        ocs_to_create.append(oc_data)
+                        resent_hash += 1
+                    else:
+                        ocs_same_state.append(key)
+                        skipped_same_state += 1
             elif estado_actual == "A":
                 if link_previo and estado_previo == "R" and link_previo.get("remote_id"):
                     if link_previo.get("has_op"):
@@ -220,6 +238,7 @@ class OcItemsMapper:
                 importe_tot=importe_tot,
                 gasto_refs=gasto_refs,
                 gasto_linked_refs=gasto_linked_refs,
+                payload_hash=oc_payload_hashes.get(source_key),
             )
 
         # ââ 4. Enviar OCs a crear + OCs a anular en un solo payload âââââââ
@@ -234,6 +253,7 @@ class OcItemsMapper:
             gasto_refs_list = grouped_gasto_refs.get(key, [])
             raw_by_source_key[sk]["_GASTO_REFS"] = ",".join(gasto_refs_list) if gasto_refs_list else ""
             raw_by_source_key[sk]["_GASTO_LINKED_REFS"] = ""
+            raw_by_source_key[sk]["_PAYLOAD_HASH"] = oc_payload_hashes.get(sk, "")
 
         if not ordenes_compra:
             logger.info(
@@ -261,6 +281,7 @@ class OcItemsMapper:
             "anular": len(ocs_to_anular),
             "skip_estado": len(ocs_to_skip_register),
             "mismo_estado": skipped_same_state,
+            "reenviado_hash": resent_hash,
             "skip_has_op": len(ocs_to_skip_has_op),
             "unresolved_items": unresolved_items,
         }
@@ -320,13 +341,14 @@ class OcItemsMapper:
         section_stats = stats.get("ordenes_compra", {}) if isinstance(stats, dict) else {}
         logger.info(
             "Migrator OK [oc_items->ordenes_compra]: %d ok, %d error, crear=%d, anular=%d, "
-            "skip_estado=%d, mismo_estado=%d, skip_has_op=%d, dry_run=%s",
+            "skip_estado=%d, mismo_estado=%d, reenviado_hash=%d, skip_has_op=%d, dry_run=%s",
             section_stats.get("ok", 0),
             section_stats.get("error", 0),
             stats_dict.get("crear", 0),
             stats_dict.get("anular", 0),
             stats_dict.get("skip_estado", 0),
             stats_dict.get("mismo_estado", 0),
+            stats_dict.get("reenviado_hash", 0),
             stats_dict.get("skip_has_op", 0),
             dry_run,
         )
@@ -372,6 +394,7 @@ def persist_links(parsed: dict, raw_by_source_key: dict[str, dict], link_store) 
 
         gasto_refs = raw.get("_GASTO_REFS", "")
         gasto_linked_refs = raw.get("_GASTO_LINKED_REFS", "")
+        payload_hash = raw.get("_PAYLOAD_HASH") or None
 
         paxapos_gasto_ids_list = result.get("gasto_ids") or []
         paxapos_gasto_ids = ",".join(str(g) for g in paxapos_gasto_ids_list) if paxapos_gasto_ids_list else ""
@@ -387,6 +410,7 @@ def persist_links(parsed: dict, raw_by_source_key: dict[str, dict], link_store) 
             gasto_refs=gasto_refs,
             gasto_linked_refs=gasto_linked_refs,
             paxapos_gasto_ids=paxapos_gasto_ids,
+            payload_hash=payload_hash,
         )
 
 
