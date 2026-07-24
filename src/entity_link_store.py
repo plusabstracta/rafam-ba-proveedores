@@ -16,7 +16,7 @@ DEFAULT_LINK_SCHEMAS: dict[str, list[str]] = {
     "mercaderia": ["barcode", "nombre_compra"],
     "pedido": [],
     "orden_compra": ["fech_confirm", "estado_oc", "cod_prov", "importe_tot", "gasto_refs", "gasto_linked_refs", "paxapos_gasto_ids", "has_op", "payload_hash", "deleted_at"],
-    "gasto": ["estado_solic", "importe_tot", "cod_prov", "deleted_at"],
+    "gasto": ["estado_solic", "importe_tot", "cod_prov", "pedido_id", "nro_comprobante", "payload_hash", "deleted_at"],
     "orden_pago": ["estado_op", "confirmado", "fech_confirm", "importe_total", "deleted_at"],
     "retenciones": ["fingerprint", "retenciones_count", "deleted_at"],
     # Clasificador por objeto del gasto (RAFAM 4 niveles -> categorias Paxapos).

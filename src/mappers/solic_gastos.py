@@ -6,6 +6,7 @@ del migrator Paxapos y persiste entity links a partir de la respuesta.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 
@@ -17,9 +18,10 @@ logger = logging.getLogger(__name__)
 class SolicGastosMapper:
     """Mapper para gastos de solicitud (SOLIC_GASTOS + CTA_COMPROB)."""
 
-    def __init__(self, *, link_store, lookup_resolver):
+    def __init__(self, *, link_store, lookup_resolver, resolve_gastos_fn=None):
         self._link_store = link_store
         self._lookup = lookup_resolver
+        self._resolve_gastos_fn = resolve_gastos_fn
 
     def build_payload(
         self,
@@ -29,48 +31,53 @@ class SolicGastosMapper:
         dry_run: bool,
         payload_options: dict,
     ) -> tuple[dict | None, dict[str, dict]]:
-        """Construye el payload de gastos para POST al migrator.
+        """Construye el payload de ENRIQUECIMIENTO de gastos (UPDATE-ONLY).
 
-        Filtra: solo gastos vinculados a OCs ya enviadas a Paxapos.
+        No crea gastos. Solo completa campos vacios de gastos que Paxapos ya
+        creo (al subir el proveedor la factura de una OC; account_gastos.pedido_id).
+        El pareo usa el gasto_id que devuelve resolver_gasto, matcheado por el
+        pedido_id de la OC (remote_id del link orden_compra). Gastos sin OC
+        enviada, sin gasto parcial en Paxapos, o ya completos, se omiten.
         """
         allowed_refs = self._link_store.get_sent_oc_gasto_refs()
 
-        gastos: list[dict] = []
-        raw_by_source_key: dict[str, dict] = {}
-        skipped_no_oc = 0
-        skipped_already_linked = 0
+        # Indice inverso rafam_ref -> pedido_id (remote_id de la OC en Paxapos).
+        oc_ref_to_pedido: dict[str, int] = {}
+        for link in self._link_store.get_all_links("orden_compra"):
+            remote_id = link.get("remote_id")
+            gasto_refs = link.get("gasto_refs") or ""
+            if not remote_id or not gasto_refs:
+                continue
+            try:
+                pedido_id = int(remote_id)
+            except (TypeError, ValueError):
+                continue
+            for ref in str(gasto_refs).split(","):
+                ref = ref.strip()
+                if ref:
+                    oc_ref_to_pedido.setdefault(ref, pedido_id)
 
+        mapped: list[dict] = []
+        skipped_no_oc = 0
         for row in rows:
             raw = dict(zip(columns, row))
             gasto = self._map_solic_gasto(raw)
             if gasto is None:
                 continue
-
-            # Filtrar: solo gastos cuya ref estÃ© vinculada a una OC enviada
             ext = gasto.get("external_id", {})
             rafam_ref = _gasto_ref_from_external_id(ext) if ext else ""
             if rafam_ref not in allowed_refs:
                 skipped_no_oc += 1
                 continue
-
             sk = json.dumps(ext, sort_keys=True) if ext else None
-
-            # Solucion B: no reenviar gastos que ya tienen link local.
-            # La ventana de reproceso de 30 dias vuelve a escanear gastos ya
-            # confirmados; sin este filtro, cada corrida reenvia gastos ya
-            # migrados y el receptor los rechaza ("factura ya cargada"),
-            # engordando la cola de reintentos. La source_key consultada aca es
-            # exactamente la que persiste persist_links (json de external_id),
-            # asi que el match es 1:1. La divergencia de estado/importe de un
-            # gasto ya vinculado la concilia check_integrity aparte, no esta
-            # ventana incremental.
-            if sk is not None and self._link_store.get_remote_id("gasto", sk):
-                skipped_already_linked += 1
-                continue
-
-            gastos.append(gasto)
-            if sk is not None:
-                raw_by_source_key[sk] = raw
+            mapped.append({
+                "external_id": ext,
+                "gasto_data": gasto.get("Gasto", {}),
+                "rafam_ref": rafam_ref,
+                "sk": sk,
+                "pedido_id": oc_ref_to_pedido.get(rafam_ref),
+                "raw": raw,
+            })
 
         if skipped_no_oc:
             logger.info(
@@ -78,14 +85,103 @@ class SolicGastosMapper:
                 skipped_no_oc,
             )
 
-        if skipped_already_linked:
-            logger.info(
-                "Migrator [solic_gastos]: %d gastos omitidos (ya vinculados; evita reenvio)",
-                skipped_already_linked,
-            )
+        if not mapped:
+            logger.info("Migrator [solic_gastos]: lote vacio luego del mapeo")
+            return None, {}
+
+        # Consultar resolver_gasto: gastos parciales ya creados por Paxapos.
+        pedido_ids = sorted({m["pedido_id"] for m in mapped if m["pedido_id"] is not None})
+        comprobantes: list[dict] = []
+        for m in mapped:
+            gd = m["gasto_data"]
+            if not gd.get("factura_nro"):
+                continue
+            comprobantes.append({
+                "proveedor_id": gd.get("proveedor_id"),
+                "punto_de_venta": gd.get("punto_de_venta"),
+                "factura_nro": gd.get("factura_nro"),
+                "tipo_factura_id": gd.get("tipo_factura_id"),
+            })
+
+        resolver = {}
+        if self._resolve_gastos_fn is not None:
+            resolver = self._resolve_gastos_fn(pedido_ids, comprobantes) or {}
+
+        resolved_gastos = resolver.get("gastos", []) if isinstance(resolver, dict) else []
+        by_pedido: dict[int, list[dict]] = {}
+        for g in resolved_gastos:
+            if not isinstance(g, dict):
+                continue
+            try:
+                gp_int = int(g.get("pedido_id"))
+            except (TypeError, ValueError):
+                continue
+            by_pedido.setdefault(gp_int, []).append(g)
+
+        gastos: list[dict] = []
+        raw_by_source_key: dict[str, dict] = {}
+        skipped_no_match = 0
+        skipped_complete = 0
+        skipped_same_hash = 0
+        skipped_ambiguous = 0
+
+        for m in mapped:
+            pedido_id = m["pedido_id"]
+            candidates = by_pedido.get(pedido_id) if pedido_id is not None else None
+            if not candidates:
+                skipped_no_match += 1
+                continue
+            gd = m["gasto_data"]
+            resolved = _pick_resolved(candidates, gd)
+            if resolved is None:
+                skipped_ambiguous += 1
+                continue
+
+            empty_fields = resolved.get("empty_fields") or []
+            enrich = {
+                field: gd[field]
+                for field in empty_fields
+                if field in gd and gd[field] not in (None, "")
+            }
+            if not enrich:
+                skipped_complete += 1
+                continue
+
+            gasto_id = resolved.get("id")
+            if gasto_id is None:
+                skipped_no_match += 1
+                continue
+
+            payload_hash = _stable_payload_hash({"id": gasto_id, "enrich": enrich})
+            sk = m["sk"]
+            if sk is not None:
+                existing_link = self._link_store.get_link("gasto", sk)
+                if existing_link and existing_link.get("payload_hash") == payload_hash:
+                    skipped_same_hash += 1
+                    continue
+
+            entry_gasto = {"id": gasto_id, "merge": "fill_empty"}
+            entry_gasto.update(enrich)
+            gastos.append({"external_id": m["external_id"], "Gasto": entry_gasto})
+
+            if sk is not None:
+                raw = dict(m["raw"])
+                raw["_pedido_id"] = pedido_id
+                raw["_nro_comprobante"] = _nro_comprobante_from_gasto(gd)
+                raw["_payload_hash"] = payload_hash
+                raw_by_source_key[sk] = raw
+
+        for cnt, label in (
+            (skipped_no_match, "sin gasto parcial en Paxapos (proveedor aun no subio factura)"),
+            (skipped_ambiguous, "ambiguos (varias facturas en la OC sin desambiguar)"),
+            (skipped_complete, "ya completos"),
+            (skipped_same_hash, "sin cambios (mismo hash)"),
+        ):
+            if cnt:
+                logger.info("Migrator [solic_gastos]: %d gastos omitidos (%s)", cnt, label)
 
         if not gastos:
-            logger.info("Migrator [solic_gastos]: lote vacÃ­o luego del mapeo")
+            logger.info("Migrator [solic_gastos]: nada para enriquecer este lote")
             return None, {}
 
         payload = {
@@ -197,6 +293,47 @@ class SolicGastosMapper:
 
 # ââ Persist Links ââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 
+def _norm_factura(value) -> str:
+    """Normaliza un numero de factura para comparar (sin ceros a izquierda)."""
+    if value is None:
+        return ""
+    return str(value).strip().lstrip("0")
+
+
+def _pick_resolved(candidates: list[dict], gasto_data: dict) -> dict | None:
+    """Elige el gasto resolver correcto cuando una OC tiene varias facturas.
+
+    Con un solo candidato lo devuelve. Con varios, desambigua por factura_nro;
+    si no se puede, devuelve None (se omite para no enriquecer el gasto errado).
+    """
+    if len(candidates) == 1:
+        return candidates[0]
+    want = _norm_factura(gasto_data.get("factura_nro"))
+    if not want:
+        return None
+    for candidate in candidates:
+        if _norm_factura(candidate.get("factura_nro")) == want:
+            return candidate
+    return None
+
+
+def _stable_payload_hash(obj) -> str:
+    """Hash estable del contenido de enriquecimiento (para anti-reenvio)."""
+    blob = json.dumps(obj, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha1(blob.encode("utf-8")).hexdigest()
+
+
+def _nro_comprobante_from_gasto(gasto_data: dict) -> str | None:
+    """Reconstruye el nro de comprobante (pdv-nro) desde el gasto mapeado."""
+    factura_nro = gasto_data.get("factura_nro")
+    if not factura_nro:
+        return None
+    pdv = gasto_data.get("punto_de_venta")
+    if pdv:
+        return f"{pdv}-{factura_nro}"
+    return str(factura_nro)
+
+
 def persist_links(parsed: dict, raw_by_source_key: dict[str, dict], link_store) -> None:
     """Persiste entity links de gastos desde la respuesta del API."""
     if not isinstance(parsed, dict):
@@ -225,6 +362,9 @@ def persist_links(parsed: dict, raw_by_source_key: dict[str, dict], link_store) 
         estado_solic = str(raw.get("ESTADO_SOLIC", "")).strip().upper() or None
         importe_tot = str(raw.get("IMPORTE_TOT")) if raw.get("IMPORTE_TOT") is not None else None
         cod_prov = str(raw.get("OC_COD_PROV")) if raw.get("OC_COD_PROV") is not None else None
+        pedido_id = str(raw["_pedido_id"]) if raw.get("_pedido_id") is not None else None
+        nro_comprobante = raw.get("_nro_comprobante")
+        payload_hash = raw.get("_payload_hash")
 
         link_store.save_link(
             entity="gasto",
@@ -233,6 +373,9 @@ def persist_links(parsed: dict, raw_by_source_key: dict[str, dict], link_store) 
             estado_solic=estado_solic,
             importe_tot=importe_tot,
             cod_prov=cod_prov,
+            pedido_id=pedido_id,
+            nro_comprobante=nro_comprobante,
+            payload_hash=payload_hash,
         )
 
         rafam_ref = _gasto_ref_from_external_id(external_id)
@@ -247,6 +390,9 @@ def persist_links(parsed: dict, raw_by_source_key: dict[str, dict], link_store) 
                 estado_solic=estado_solic,
                 importe_tot=importe_tot,
                 cod_prov=cod_prov,
+                pedido_id=pedido_id,
+                nro_comprobante=nro_comprobante,
+                payload_hash=payload_hash,
             )
 
 

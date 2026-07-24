@@ -162,6 +162,12 @@ class MigratorExporter(BaseExporter):
             self._base_url, self._tenant, self._resolver_endpoint
         )
 
+        # URL del resolvedor de gastos (enriquecimiento por gasto_id, UPDATE-ONLY).
+        self._resolver_gasto_endpoint = _resolver_gasto_endpoint()
+        self._resolver_gasto_url = _build_migrator_url_impl(
+            self._base_url, self._tenant, self._resolver_gasto_endpoint
+        )
+
         self._lookup_payload = fetch_migrator_lookups([
             "unidades_de_medida",
             "tipos_factura",
@@ -177,7 +183,11 @@ class MigratorExporter(BaseExporter):
 
         # ââ Mapper instances âââââââââââââââââââââââââââââââââââââââââââââ
         self._oc_mapper = OcItemsMapper(link_store=self._link_store, lookup_resolver=self._lookup)
-        self._sg_mapper = SolicGastosMapper(link_store=self._link_store, lookup_resolver=self._lookup)
+        self._sg_mapper = SolicGastosMapper(
+            link_store=self._link_store,
+            lookup_resolver=self._lookup,
+            resolve_gastos_fn=self._resolve_gastos_batch,
+        )
         self._op_mapper = OrdenPagoMapper(link_store=self._link_store, lookup_resolver=self._lookup)
         self._ret_mapper = RetencionesMapper(link_store=self._link_store, lookup_resolver=self._lookup)
         self._clasif_mapper = ClasificacionesMapper(link_store=self._link_store, lookup_resolver=self._lookup)
@@ -379,12 +389,7 @@ class MigratorExporter(BaseExporter):
             return
 
         if entity == "solic_gastos":
-            logger.warning(
-                "Migrator [solic_gastos]: entidad deshabilitada en migrator — los gastos NO se migran desde RAFAM. "
-                "En Paxapos los crean los usuarios al subir la factura del proveedor; el endpoint de OP los auto-crea "
-                "si todavia no existen al momento de pagar (via gasto_nro_comprobante PDV-NRO_COMPROB)."
-            )
-            return
+            return self._write_batch_solic_gastos(columns, rows)
 
         if entity == "orden_pago":
             return self._write_batch_orden_pago(columns, rows)
@@ -1100,138 +1105,6 @@ class MigratorExporter(BaseExporter):
         )
         self._log_unresolved_summary("orden_compra")
 
-    def _write_batch_solic_gastos(self, columns: list[str], rows: list[tuple]) -> None:
-        # Solo enviar gastos vinculados a OCs ya enviadas a Paxapos
-        allowed_refs = self._link_store.get_sent_oc_gasto_refs()
-
-        gastos = []
-        raw_by_source_key: dict[str, dict] = {}
-        skipped_no_oc = 0
-        for row in rows:
-            raw = dict(zip(columns, row))
-            gasto = self._map_solic_gasto(raw)
-            if gasto is None:
-                continue
-
-            # Filtrar: solo gastos cuya ref esté vinculada a una OC enviada
-            ext = gasto.get("external_id", {})
-            rafam_ref = self._gasto_ref_from_external_id(ext) if ext else ""
-            if rafam_ref not in allowed_refs:
-                skipped_no_oc += 1
-                continue
-
-            gastos.append(gasto)
-            if ext:
-                sk = json.dumps(ext, sort_keys=True)
-                raw_by_source_key[sk] = raw
-
-        if skipped_no_oc:
-            logger.info(
-                "Migrator [solic_gastos]: %d gastos omitidos (sin OC enviada vinculada)",
-                skipped_no_oc,
-            )
-
-        if not gastos:
-            logger.info("Migrator [solic_gastos]: lote vacío luego del mapeo")
-            return
-
-        payload = {
-            "dry_run": self._dry_run,
-            "options": self._payload_options(),
-            "proveedores": [],
-            "pedidos": [],
-            "ordenes_compra": [],
-            "gastos": gastos,
-            "ordenes_pago": [],
-        }
-
-        url = self._import_url
-        logger.debug(
-            "Migrator request [solic_gastos] POST %s dry_run=%s gastos=%d",
-            url, self._dry_run, len(gastos),
-        )
-        parsed = self._post_json(url, payload)
-
-        stats = parsed.get("stats", {}) if isinstance(parsed, dict) else {}
-        section_stats = stats.get("gastos", {}) if isinstance(stats, dict) else {}
-        ok_count = section_stats.get("ok", 0)
-        error_count = section_stats.get("error", 0)
-
-        self._persist_links("solic_gastos", parsed, raw_by_source_key)
-        self._raise_on_migrator_errors(parsed)
-        logger.info(
-            "Migrator OK [solic_gastos->gastos]: %d ok, %d error, gastos=%d, dry_run=%s",
-            ok_count, error_count, len(gastos), self._dry_run,
-        )
-
-    def _map_solic_gasto(self, raw: dict) -> dict | None:
-        ejercicio = self._to_int(raw.get("EJERCICIO"))
-        deleg_solic = self._to_int(raw.get("DELEG_SOLIC"))
-        nro_solic = self._to_int(raw.get("NRO_SOLIC"))
-        if ejercicio is None or deleg_solic is None or nro_solic is None:
-            return None
-
-        fecha_raw = raw.get("FECH_SOLIC")
-        fecha = self._format_date_only(fecha_raw)
-        if not fecha:
-            return None
-
-        # Excluir anuladas
-        if str(raw.get("ESTADO_SOLIC", "")).strip().upper() == "A":
-            return None
-
-        cta_count = self._to_int(raw.get("CTA_COMPROB_COUNT"))
-        if cta_count != 1:
-            logger.debug(
-                "Migrator [solic_gastos] SG %s-%s-%s omitida: CTA_COMPROB_COUNT=%s",
-                ejercicio, deleg_solic, nro_solic, raw.get("CTA_COMPROB_COUNT"),
-            )
-            return None
-
-        importe_total = self._parse_money(raw.get("CTA_IMPORTE_COMPR"))
-        if importe_total is None:
-            importe_total = self._parse_money(raw.get("IMPORTE_TOT"))
-        if importe_total is None:
-            return None
-
-        importe_neto = self._parse_money(raw.get("CTA_IMPORTE_NETO"))
-        if importe_neto is None:
-            importe_neto = self._parse_money(raw.get("CTA_IMPORTE_SIN_IVA"))
-        if importe_neto is None:
-            importe_neto = importe_total
-
-        gasto_data: dict = {
-            "fecha": fecha,
-            "importe_total": importe_total,
-            "importe_neto": importe_neto,
-        }
-
-        nro_comprob = str(raw.get("CTA_NRO_COMPROB") or "").strip()
-        if not nro_comprob:
-            logger.debug(
-                "Migrator [solic_gastos] SG %s-%s-%s omitida: sin CTA_COMPROB.NRO_COMPROB",
-                ejercicio, deleg_solic, nro_solic,
-            )
-            return None
-
-        tipo_factura_id = self._resolve_tipo_factura_id(raw.get("CTA_TIPO_COMPROB") or raw.get("TIPO_DOC"))
-        if tipo_factura_id is not None:
-            gasto_data["tipo_factura_id"] = tipo_factura_id
-
-        # Parsear NRO_COMPROB: si tiene guion, separar en punto_de_venta + factura_nro
-        dash_pos = nro_comprob.find("-")
-        if dash_pos > 0:
-            gasto_data["punto_de_venta"] = nro_comprob[:dash_pos]
-            gasto_data["factura_nro"] = nro_comprob[dash_pos + 1:]
-        else:
-            raise ValueError(
-                "Modo migrator soporta solo las 5 entidades oficiales: "
-                "proveedores, oc_items, solic_gastos, orden_pago, retenciones. "
-                f"Recibido: {entity!r}"
-            )
-
-        self._record_batch_outcomes(entity, self._last_parsed)
-
     def _write_batch_proveedores(self, columns, rows):
         """Delegado a EntityWriter."""
         writer = self._writers["proveedores"]
@@ -1279,6 +1152,33 @@ class MigratorExporter(BaseExporter):
         )
         if parsed is not None:
             self._last_parsed = parsed
+
+    def _resolve_gastos_batch(self, pedido_ids, comprobantes):
+        """Consulta resolver_gasto: devuelve gastos parciales ya creados por Paxapos.
+
+        UPDATE-ONLY. Paxapos auto-crea un gasto (parcial) cuando el proveedor sube
+        la factura sobre una OC (account_gastos.pedido_id). Este resolver los
+        localiza para enriquecer SOLO sus campos vacios via gasto_id. Nunca crea.
+        Devuelve el dict `resolver` de la respuesta, o {} ante error/no-exito.
+        """
+        pedido_ids = [int(p) for p in (pedido_ids or []) if p is not None]
+        comprobantes = [c for c in (comprobantes or []) if c]
+        if not pedido_ids and not comprobantes:
+            return {}
+        payload = {"pedido_ids": pedido_ids, "comprobantes": comprobantes}
+        try:
+            parsed = self._post_json(self._resolver_gasto_url, payload)
+        except Exception as exc:
+            logger.warning(
+                "Migrator [resolver_gasto]: fallo la consulta (%s); no se enriquecen gastos este lote",
+                exc,
+            )
+            return {}
+        resolver = parsed.get("resolver") if isinstance(parsed, dict) else None
+        if not isinstance(resolver, dict) or not resolver.get("success"):
+            logger.warning("Migrator [resolver_gasto]: respuesta sin resolver.success; %s", resolver)
+            return {}
+        return resolver
 
     def _write_batch_solic_gastos(self, columns, rows):
         """Delegado a EntityWriter."""
@@ -1967,6 +1867,13 @@ def _resolver_mercaderia_endpoint() -> str:
     if endpoint:
         return _resolve_endpoint("PAXAPOS_RAFAM_RESOLVER_MERCADERIA_PATH", endpoint)
     return _resolve_endpoint("PAXAPOS_RAFAM_RESOLVER_PATH", "rafam/migracion/resolver_mercaderia.json")
+
+
+def _resolver_gasto_endpoint() -> str:
+    endpoint = os.getenv("PAXAPOS_RAFAM_RESOLVER_GASTO_PATH", "").strip()
+    if endpoint:
+        return _resolve_endpoint("PAXAPOS_RAFAM_RESOLVER_GASTO_PATH", endpoint)
+    return _resolve_endpoint("PAXAPOS_RAFAM_RESOLVER_GASTO_PATH", "rafam/migracion/resolver_gasto.json")
 
 
 def _fetch_migrator_json(
