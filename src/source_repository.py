@@ -503,7 +503,12 @@ class SourceRepository:
     ) -> Select:
         table = self._reflect_table(cfg.table_name)
         stmt = select(table)
-        return self._apply_incremental_filters(stmt, table, cfg, checkpoint)
+        stmt = self._apply_incremental_filters(stmt, table, cfg, checkpoint)
+        ts_col = self._safe_column(table, cfg.ts_field)
+        if ts_col is not None:
+            pk_cols = [c for c in table.primary_key.columns]
+            stmt = stmt.order_by(ts_col, *pk_cols)
+        return stmt
 
     def _build_clasificaciones_statement(
         self,
@@ -691,7 +696,7 @@ class SourceRepository:
 
         stmt = select(*select_cols).select_from(from_clause)
         stmt = self._apply_incremental_filters(stmt, solic_gastos, cfg, checkpoint)
-        return stmt.order_by(solic_gastos.c.EJERCICIO, solic_gastos.c.DELEG_SOLIC, solic_gastos.c.NRO_SOLIC)
+        return stmt.order_by(solic_gastos.c.FECH_SOLIC, solic_gastos.c.EJERCICIO, solic_gastos.c.DELEG_SOLIC, solic_gastos.c.NRO_SOLIC)
 
     def _build_solic_gastos_comprobantes_subquery(self, reg_comp, cta_comprob):
         if reg_comp is None or cta_comprob is None:
@@ -1171,7 +1176,7 @@ class SourceRepository:
             ])
 
         stmt = select(*select_cols).select_from(from_clause)
-        stmt = self._apply_incremental_filters(stmt, orden_pago, cfg, checkpoint)
+        
         base_filters = []
         estado_col = self._safe_column(orden_pago, "ESTADO_OP")
         confirmado_col = self._safe_column(orden_pago, "CONFIRMADO")
@@ -1182,9 +1187,13 @@ class SourceRepository:
             base_filters.append(confirmado_col == "S")
         if fech_confirm_col is not None:
             base_filters.append(fech_confirm_col.is_not(None))
-        if base_filters:
-            stmt = stmt.where(and_(*base_filters))
-        return stmt.order_by(orden_pago.c.EJERCICIO, orden_pago.c.NRO_OP)
+            
+        base_condition = and_(*base_filters) if base_filters else None
+        
+        stmt = self._apply_incremental_filters(
+            stmt, orden_pago, cfg, checkpoint, base_condition=base_condition
+        )
+        return stmt.order_by(orden_pago.c.FECH_CONFIRM, orden_pago.c.EJERCICIO, orden_pago.c.NRO_OP)
 
     def _ejercicio_boundary_filter(self, table, ejercicio_min: int, ej_col=None):
         """Corte por ejercicio con excepcion de cruce fiscal.
@@ -1221,6 +1230,7 @@ class SourceRepository:
         cp: Checkpoint,
         extra_filters: list | None = None,
         apply_ejercicio_min: bool = True,
+        base_condition=None,
     ) -> Select:
         if apply_ejercicio_min and cfg.ejercicio_min is not None:
             ej_col = self._safe_column(table, "EJERCICIO")
@@ -1230,9 +1240,11 @@ class SourceRepository:
                 )
 
         if cfg.full_load or cp.is_fresh or (cp.last_id is None and cp.last_ts is None):
+            if base_condition is not None:
+                stmt = stmt.where(base_condition)
             return stmt
 
-        filters = []
+        normal_filters = []
 
         # Cursor `>=` (no `>`): si dos filas comparten timestamp en el borde de
         # un batch, `>` las pierde silenciosamente. Con `>=` puede haber un re-envio
@@ -1241,12 +1253,18 @@ class SourceRepository:
         # descarta el duplicado. Trade-off correcto para no perder datos.
         id_col = self._safe_column(table, cfg.id_field)
         if id_col is not None and cp.last_id is not None:
-            filters.append(id_col >= cp.last_id)
+            normal_filters.append(id_col >= cp.last_id)
 
         ts_col = self._safe_column(table, cfg.ts_field)
         if ts_col is not None and cp.last_ts is not None:
-            filters.append(ts_col >= cp.last_ts)
+            normal_filters.append(ts_col >= cp.last_ts)
 
+        if base_condition is not None:
+            normal_filters.append(base_condition)
+
+        normal_clause = and_(*normal_filters) if normal_filters else None
+
+        reprocess_clause = None
         if (
             cfg.pending_reprocess_days
             and cfg.pending_state_field
@@ -1263,15 +1281,19 @@ class SourceRepository:
                     state_filter = state_col.in_(list(pending_value))
                 else:
                     state_filter = state_col == pending_value
-                filters.append(
-                    and_(state_filter, ts_col >= window_start)
-                )
+                reprocess_clause = and_(state_filter, ts_col >= window_start)
+
+        final_or = []
+        if normal_clause is not None:
+            final_or.append(normal_clause)
+        if reprocess_clause is not None:
+            final_or.append(reprocess_clause)
 
         if extra_filters:
-            filters.extend(extra_filters)
+            final_or.extend(extra_filters)
 
-        if filters:
-            stmt = stmt.where(or_(*filters))
+        if final_or:
+            stmt = stmt.where(or_(*final_or))
 
         return stmt
 
