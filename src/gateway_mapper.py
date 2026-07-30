@@ -117,7 +117,7 @@ def resolve_centro_costo_id(jurisdiccion: Any) -> int:
 def _clean(value: Any) -> str | None:
     if value is None:
         return None
-    text = str(value).strip()
+    text = re.sub(r"\s+", " ", str(value)).strip()
     return text if text else None
 
 

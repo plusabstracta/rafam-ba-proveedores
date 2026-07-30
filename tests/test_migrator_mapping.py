@@ -64,6 +64,19 @@ def test_proveedor_rnis_mapea_iva_condicion():
     assert result["Proveedor"]["iva_condicion_id"] == 5
 
 
+def test_proveedor_normaliza_espacios_multiples():
+    result = map_proveedor_migrator_row({
+        "COD_PROV": "15",
+        "FANTASIA": "  GARCIA   ALE  \n  S.R.L. ",
+        "RAZON_SOCIAL": "GARCIA   ALE   S.R.L.",
+        "CUIT": "30-12345678-9",
+    })
+
+    assert result is not None
+    assert result["Proveedor"]["name"] == "GARCIA ALE S.R.L."
+    assert result["Proveedor"]["razon_social"] == "GARCIA ALE S.R.L."
+
+
 def test_proveedor_monot_mapea_a_monotributo():
     result = map_proveedor_migrator_row({
         "COD_PROV": "8",
