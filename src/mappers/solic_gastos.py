@@ -109,9 +109,17 @@ class SolicGastosMapper:
 
         resolved_gastos = resolver.get("gastos", []) if isinstance(resolver, dict) else []
         by_pedido: dict[int, list[dict]] = {}
+        # Indice secundario por identidad de comprobante: cubre los gastos que el
+        # resolver devuelve con matched_by='comprobante' y pedido_id null (no
+        # quedaron vinculados a la OC). Sin esto el fallback del backend era
+        # inalcanzable y esos gastos nunca se enriquecian.
+        by_comprobante: dict[tuple, dict] = {}
         for g in resolved_gastos:
             if not isinstance(g, dict):
                 continue
+            comp_key = _comprobante_key(g)
+            if comp_key is not None:
+                by_comprobante.setdefault(comp_key, g)
             try:
                 gp_int = int(g.get("pedido_id"))
             except (TypeError, ValueError):
@@ -127,14 +135,18 @@ class SolicGastosMapper:
 
         for m in mapped:
             pedido_id = m["pedido_id"]
-            candidates = by_pedido.get(pedido_id) if pedido_id is not None else None
-            if not candidates:
-                skipped_no_match += 1
-                continue
             gd = m["gasto_data"]
-            resolved = _pick_resolved(candidates, gd)
+            candidates = by_pedido.get(pedido_id) if pedido_id is not None else None
+            if candidates:
+                resolved = _pick_resolved(candidates, gd)
+            else:
+                # Fallback: identidad de comprobante (proveedor + pdv + nro + tipo).
+                resolved = by_comprobante.get(_comprobante_key(gd))
             if resolved is None:
-                skipped_ambiguous += 1
+                if candidates:
+                    skipped_ambiguous += 1
+                else:
+                    skipped_no_match += 1
                 continue
 
             empty_fields = resolved.get("empty_fields") or []
@@ -298,6 +310,27 @@ def _norm_factura(value) -> str:
     if value is None:
         return ""
     return str(value).strip().lstrip("0")
+
+
+def _comprobante_key(data: dict) -> tuple | None:
+    """Identidad de comprobante normalizada (proveedor, pdv, nro, tipo).
+
+    Sirve para cruzar el gasto mapeado desde RAFAM con el que devuelve
+    resolver_gasto, que ya viene con pdv/nro paddeados a 5/20 por el backend.
+    """
+    if not isinstance(data, dict):
+        return None
+    factura_nro = _norm_factura(data.get("factura_nro"))
+    if not factura_nro:
+        return None
+    proveedor_id = data.get("proveedor_id")
+    tipo_factura_id = data.get("tipo_factura_id")
+    return (
+        int(proveedor_id) if proveedor_id not in (None, "") else None,
+        _norm_factura(data.get("punto_de_venta")),
+        factura_nro,
+        int(tipo_factura_id) if tipo_factura_id not in (None, "") else None,
+    )
 
 
 def _pick_resolved(candidates: list[dict], gasto_data: dict) -> dict | None:

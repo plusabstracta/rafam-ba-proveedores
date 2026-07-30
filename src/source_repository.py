@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timedelta, timezone
 
@@ -79,18 +80,31 @@ class SourceRepository:
             return present[0]
         return func.coalesce(*present)
 
-    def build_statement(self, entity: str, checkpoint: Checkpoint) -> Select:
+    def build_statement(
+        self,
+        entity: str,
+        checkpoint: Checkpoint,
+        retry_keys: set[str] | None = None,
+    ) -> Select:
+        """Arma la query de la entidad.
+
+        ``retry_keys`` son las claves pendientes en la cola de reintentos
+        (``RetryStore.pending_external_ids``). Se reinyectan como OR en el filtro
+        incremental para que una fila salteada por dependencia faltante vuelva a
+        entrar aunque el watermark ya haya avanzado. Solo aplica a las entidades
+        que encolan (orden_pago / retenciones).
+        """
         cfg = ENTITY_CONFIGS[entity]
         if entity == "oc_items":
             return self._build_oc_items_statement(cfg, checkpoint)
         if entity == "solic_gastos":
             return self._build_solic_gastos_statement(cfg, checkpoint)
         if entity == "orden_pago":
-            return self._build_orden_pago_statement(cfg, checkpoint)
+            return self._build_orden_pago_statement(cfg, checkpoint, retry_keys)
         if entity == "retenciones":
             # Retenciones escanea las mismas OP que orden_pago; el exporter
             # trae las deducciones por OP via fetch_deducciones_for_ops.
-            return self._build_orden_pago_statement(cfg, checkpoint)
+            return self._build_orden_pago_statement(cfg, checkpoint, retry_keys)
         if entity == "clasificaciones":
             return self._build_clasificaciones_statement(cfg, checkpoint)
         return self._build_simple_table_statement(cfg, checkpoint)
@@ -1121,10 +1135,74 @@ class SourceRepository:
             or_(base_filter, required_ocs.c.OC_EJERCICIO.is_not(None))
         )
 
+    # Maximo de claves de la cola de reintentos que se reinyectan por corrida.
+    # Evita generar un predicado gigante si la cola creció mucho; el resto entra
+    # en las corridas siguientes.
+    _RETRY_REQUEUE_MAX = 2000
+    # Oracle limita las listas IN a 1000 elementos.
+    _IN_CHUNK = 900
+
+    @staticmethod
+    def _parse_op_retry_keys(retry_keys) -> list[tuple[int, int]]:
+        """Convierte claves de la cola ('{\"ejercicio\":E,\"nro_op\":N}') a tuplas."""
+        pairs: list[tuple[int, int]] = []
+        for key in retry_keys or ():
+            try:
+                data = json.loads(key)
+                pairs.append((int(data["ejercicio"]), int(data["nro_op"])))
+            except (TypeError, ValueError, KeyError):
+                continue
+        return pairs
+
+    def _op_retry_filter(self, table, retry_keys):
+        """Predicado OR que reinyecta las OP pendientes en la cola de reintentos.
+
+        Sin esto, una OP salteada por dependencia faltante (OC aún no migrada,
+        comprobante ausente) quedaba fuera del cursor para siempre porque el
+        watermark avanza igual.
+        """
+        pairs = self._parse_op_retry_keys(retry_keys)
+        if not pairs:
+            return None
+
+        ej_col = self._safe_column(table, "EJERCICIO")
+        nro_col = self._safe_column(table, "NRO_OP")
+        if ej_col is None or nro_col is None:
+            return None
+
+        if len(pairs) > self._RETRY_REQUEUE_MAX:
+            logger.warning(
+                "Cola de reintentos con %d OPs pendientes; se reinyectan las %d mas "
+                "antiguas en esta corrida (el resto entra en las proximas).",
+                len(pairs), self._RETRY_REQUEUE_MAX,
+            )
+            pairs = sorted(pairs)[: self._RETRY_REQUEUE_MAX]
+
+        by_ejercicio: dict[int, set[int]] = {}
+        for ejercicio, nro_op in pairs:
+            by_ejercicio.setdefault(ejercicio, set()).add(nro_op)
+
+        clauses = []
+        for ejercicio, nros in sorted(by_ejercicio.items()):
+            nros_list = sorted(nros)
+            for start in range(0, len(nros_list), self._IN_CHUNK):
+                chunk = nros_list[start:start + self._IN_CHUNK]
+                clauses.append(and_(ej_col == ejercicio, nro_col.in_(chunk)))
+
+        if not clauses:
+            return None
+
+        logger.info(
+            "Reinyectando %d OPs pendientes de la cola de reintentos en la query",
+            len(pairs),
+        )
+        return or_(*clauses) if len(clauses) > 1 else clauses[0]
+
     def _build_orden_pago_statement(
         self,
         cfg: EntityConfig,
         checkpoint: Checkpoint,
+        retry_keys: set[str] | None = None,
     ) -> Select:
         orden_pago = self._reflect_table("ORDEN_PAGO")
         # NOTE: las deducciones/retenciones NO se joinean acá — se traen aparte
@@ -1176,7 +1254,7 @@ class SourceRepository:
             ])
 
         stmt = select(*select_cols).select_from(from_clause)
-        
+        retry_filter = self._op_retry_filter(orden_pago, retry_keys)
         base_filters = []
         estado_col = self._safe_column(orden_pago, "ESTADO_OP")
         confirmado_col = self._safe_column(orden_pago, "CONFIRMADO")
@@ -1187,11 +1265,16 @@ class SourceRepository:
             base_filters.append(confirmado_col == "S")
         if fech_confirm_col is not None:
             base_filters.append(fech_confirm_col.is_not(None))
-            
+
         base_condition = and_(*base_filters) if base_filters else None
-        
+
         stmt = self._apply_incremental_filters(
-            stmt, orden_pago, cfg, checkpoint, base_condition=base_condition
+            stmt,
+            orden_pago,
+            cfg,
+            checkpoint,
+            extra_filters=[retry_filter] if retry_filter is not None else None,
+            base_condition=base_condition,
         )
         return stmt.order_by(orden_pago.c.FECH_CONFIRM, orden_pago.c.EJERCICIO, orden_pago.c.NRO_OP)
 

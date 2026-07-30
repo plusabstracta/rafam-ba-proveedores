@@ -171,6 +171,7 @@ def _sync_entity(
     batch_size: int,
     limit: int | None,
     dry_run: bool,
+    retry_store=None,
 ) -> tuple[bool, str | None, dict]:
     """Execute the incremental sync for a single entity.
 
@@ -219,7 +220,18 @@ def _sync_entity(
 
     try:
         t_query_start = time.monotonic()
-        stmt = source_repo.build_statement(entity, cp)
+        # Reinyectar lo pendiente en la cola de reintentos: sin esto una fila
+        # salteada por dependencia faltante queda fuera del cursor para siempre
+        # (el watermark avanza igual que si se hubiera migrado).
+        retry_keys = None
+        if retry_store is not None:
+            try:
+                retry_keys = retry_store.pending_external_ids(entity)
+            except Exception as retry_exc:  # pragma: no cover - defensive
+                logger.warning(
+                    "[%s] No se pudo leer la cola de reintentos: %s", entity, retry_exc
+                )
+        stmt = source_repo.build_statement(entity, cp, retry_keys)
         result = source_repo.execute(stmt)
         query_duration = time.monotonic() - t_query_start
         metrics["query_duration_secs"] = query_duration
@@ -480,7 +492,7 @@ def _cmd_run_locked(args) -> None:
             if hasattr(exporter, "attach_source"):
                 exporter.attach_source(source_repo)
             for entity in targets:
-                ok, err_msg, metrics = _sync_entity(source_repo, engine, exporter, entity, args.batch_size, args.limit, args.dry_run)
+                ok, err_msg, metrics = _sync_entity(source_repo, engine, exporter, entity, args.batch_size, args.limit, args.dry_run, retry_store)
                 entity_metrics.append(metrics)
                 if not ok:
                     failed_entities.append(entity)

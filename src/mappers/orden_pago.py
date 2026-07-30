@@ -10,6 +10,7 @@ import json
 import logging
 
 from ..utils import format_date_only, parse_money, to_int
+from ..retry_store import REASON_DEPENDENCY_MISSING
 from ..validation import validate_amount
 from .clasificaciones import code_str as clasif_code_str
 from .clasificaciones import parent_code as clasif_parent_code
@@ -56,6 +57,38 @@ class OrdenPagoMapper:
             if part != "0":
                 depth = i + 1
         return depth
+
+    @staticmethod
+    def _op_source_key(ejercicio: int, nro_op: int) -> str:
+        """Clave estable de la OP (misma forma que usa el link store y la cola)."""
+        return json.dumps({"ejercicio": ejercicio, "nro_op": nro_op}, sort_keys=True)
+
+    def _enqueue_op(self, key: tuple[int, int], reason: str, dry_run: bool) -> None:
+        """Encola una OP salteada por dependencia faltante para reintentarla.
+
+        Sin esto la OP se pierde para siempre: el watermark del checkpoint avanza
+        igual que si se hubiera migrado y la fila nunca vuelve a entrar en la query.
+        """
+        if self._retry_store is None or dry_run:
+            return
+        try:
+            self._retry_store.enqueue(
+                "orden_pago",
+                self._op_source_key(key[0], key[1]),
+                REASON_DEPENDENCY_MISSING,
+                f"OP {key[0]}-{key[1]}: {reason}",
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("No se pudo encolar OP %s-%s: %s", key[0], key[1], exc)
+
+    def _resolve_op(self, key: tuple[int, int], dry_run: bool) -> None:
+        """Saca la OP de la cola de reintentos (ya esta migrada y al dia)."""
+        if self._retry_store is None or dry_run:
+            return
+        try:
+            self._retry_store.resolve("orden_pago", self._op_source_key(key[0], key[1]))
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("No se pudo resolver OP %s-%s en la cola: %s", key[0], key[1], exc)
 
     def _choose_partida_code(self, counts: dict[str, int]) -> str | None:
         """Elige la partida representativa de un comprobante con imputacion repartida.
@@ -228,6 +261,8 @@ class OrdenPagoMapper:
                 )
                 if unchanged:
                     skipped_existing_keys.add(key)
+                    # Ya migrada y al dia: si venia de la cola de reintentos, cerrarla.
+                    self._resolve_op(key, dry_run)
                     continue
                 op_remote_id = existing_op.get("remote_id")
 
@@ -367,12 +402,14 @@ class OrdenPagoMapper:
                 skipped_no_gasto += 1
                 if key not in grouped_has_opi:
                     skipped_no_opi += 1
+                    self._enqueue_op(key, "sin ORDEN_PAGO_IMPUT", dry_run)
                     logger.debug(
                         "Migrator [orden_pago] OP %s-%s omitida: sin ORDEN_PAGO_IMPUT",
                         key[0], key[1],
                     )
                 else:
                     skipped_no_comprobante += 1
+                    self._enqueue_op(key, "sin OPI_NRO_COMPROB", dry_run)
                     logger.debug(
                         "Migrator [orden_pago] OP %s-%s omitida: sin OPI_NRO_COMPROB",
                         key[0], key[1],
@@ -390,6 +427,7 @@ class OrdenPagoMapper:
                 op["pedido_id"] = pedido_id
             elif len(pedido_ids) > 1:
                 skipped_multiple_oc += 1
+                self._enqueue_op(key, f"multiples OCs/pedido_id ({pedido_ids})", dry_run)
                 logger.warning(
                     "Migrator [orden_pago] OP %s-%s omitida: multiples OCs/pedido_id recibidos (%s)",
                     key[0], key[1], pedido_ids,
@@ -400,6 +438,7 @@ class OrdenPagoMapper:
                 internal_ids = grouped_pedido_internal_ids.get(key, [])
                 if not oc_source_keys:
                     skipped_no_oc_canonica += 1
+                    self._enqueue_op(key, "sin OC canonica en REG_COMP", dry_run)
                     logger.debug(
                         "Migrator [orden_pago] OP %s-%s omitida: sin OC canonica en "
                         "REG_COMP imputado por ORDEN_PAGO_IMPUT (pedido_internal_id candidatos=%s)",
@@ -408,6 +447,7 @@ class OrdenPagoMapper:
                     continue
 
                 skipped_no_oc_link += 1
+                self._enqueue_op(key, "OC aun no migrada en Paxapos", dry_run)
                 logger.debug(
                     "Migrator [orden_pago] OP %s-%s omitida: sin OC migrada en link_store "
                     "(oc_source_keys=%s, pedido_internal_id candidatos=%s)",

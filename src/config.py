@@ -78,10 +78,14 @@ ENTITY_CONFIGS: dict[str, EntityConfig] = {
         name="orden_pago",
         table_name="ORDEN_PAGO",
         ts_field="FECH_CONFIRM",
-        # Re-process confirmed normal payments from recent days in case their
-        # linked gastos became available after the first attempt.
+        # Re-process confirmed payments from recent days in case their linked OC
+        # o gastos recien se migraron despues del primer intento.
+        # OJO: el valor DEBE ser "C". _build_orden_pago_statement ANDea un filtro
+        # base ESTADO_OP='C'; con "N" la clausula pending era siempre falsa y la
+        # ventana de reproceso nunca se aplicaba (las OP salteadas se perdian al
+        # avanzar el watermark).
         pending_state_field="ESTADO_OP",
-        pending_state_value="N",
+        pending_state_value="C",
         pending_reprocess_days=30,
         ejercicio_min=_EJERCICIO_MIN,
     ),
@@ -94,8 +98,9 @@ ENTITY_CONFIGS: dict[str, EntityConfig] = {
         name="retenciones",
         table_name="ORDEN_PAGO",
         ts_field="FECH_CONFIRM",
+        # Mismo criterio que orden_pago: "C" (el filtro base exige ESTADO_OP='C').
         pending_state_field="ESTADO_OP",
-        pending_state_value="N",
+        pending_state_value="C",
         pending_reprocess_days=30,
         ejercicio_min=_EJERCICIO_MIN,
     ),

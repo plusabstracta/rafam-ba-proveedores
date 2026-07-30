@@ -370,7 +370,17 @@ class MigratorExporter(BaseExporter):
     def write_batch(self, entity: str, columns: list[str], rows: list[tuple]) -> None:
         self._last_parsed = None
         self._reset_last_batch_migrator_metrics()
+        try:
+            self._dispatch_batch(entity, columns, rows)
+        finally:
+            # Actualiza la cola de reintentos con el resultado por fila. Va en
+            # `finally` para que un batch que termina en excepcion igual registre
+            # lo que el receptor alcanzo a responder. Sin esta llamada la cola
+            # nunca drena (las filas migradas OK no se resuelven) ni se encolan
+            # las rechazadas por el receptor.
+            self._record_batch_outcomes(entity, self._last_parsed)
 
+    def _dispatch_batch(self, entity: str, columns: list[str], rows: list[tuple]) -> None:
         if entity == "proveedores":
             return self._write_batch_proveedores(columns, rows)
 
