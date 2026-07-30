@@ -1,192 +1,234 @@
-# RAFAM ↔ Paxapos — Equivalencias de Tablas (Fuente de verdad)
+# RAFAM ↔ Paxapos — Equivalencias de Tablas y Flujos (Fuente de verdad)
 
-> **Este documento es la única fuente de verdad** sobre qué tablas de RAFAM se migran a Paxapos y cómo se mapean.
+> **Este documento es la única fuente de verdad** sobre qué tablas de RAFAM se migran a Paxapos, sus flujos de sincronización, resiliencia y cómo se mapean contra el schema tenant de Paxapos (CakePHP 2).
 > Cualquier otra documentación que contradiga este archivo está desactualizada y debe corregirse.
 
-El proyecto `rafam-ba-proveedores` migra datos desde Oracle RAFAM (schema `OWNER_RAFAM`) hacia el schema tenant de Paxapos (CakePHP 2) vía el endpoint `POST /{tenant}/rafam/migracion/importar.json`.
-
-La migración se organiza en **5 entidades independientes**. Cada entidad es **1 comando = 1 checkpoint propio**: se ejecuta por separado y avanza su cursor de forma autónoma.
-
-| Entidad (`--entity`) | Comando Makefile | Checkpoint | Tablas RAFAM | Destino Paxapos |
-|---|---|---|---|---|
-| `proveedores` | `make migrate-proveedores` | `proveedores` | `PROVEEDORES` | `account_proveedores` |
-| `oc_items` | `make migrate-oc` | `oc_items` | `ORDEN_COMPRA` + `OC_ITEMS` | `compras_pedidos` + `compras_pedido_mercaderias` |
-| `solic_gastos` | `make migrate-facturas` | `solic_gastos` | `SOLIC_GASTOS` + `CTA_COMPROB` | `account_gastos` |
-| `orden_pago` | `make migrate-op` | `orden_pago` | `ORDEN_PAGO` | `account_egresos` |
-| `retenciones` | `make migrate-retenciones` | `retenciones` | `ORDEN_PAGO_DEDUC` | `account_retenciones` |
-
-> `make migrate-all` ejecuta las 5 en orden de dependencia (FK). Cada comando admite la variante `-dry` (`make migrate-oc-dry`, …) o el flag `--dry-run`: envía `"dry_run": true` y Paxapos **valida sin persistir** (modo preview profesional para revisar payload y conteos antes de escribir).
-
-Una entidad puede combinar varias tablas RAFAM (p. ej. `oc_items` envía cabecera + ítems juntos; `orden_pago` resuelve y embebe gastos y retenciones). Además, hay **tablas de lookup / puente** que se leen para resolver datos (no se migran como entidad propia).
+El proyecto `rafam-ba-proveedores` migra datos desde Oracle RAFAM (schema `OWNER_RAFAM`) hacia el schema tenant de Paxapos (CakePHP 2) vía el endpoint `POST /{tenant}/rafam/migracion/importar.json` (`RafamMigracionesController`).
 
 ---
 
-## 1. Resumen tabla por tabla
+## 1. Resumen de Entidades Migradas
 
-| # | RAFAM (Oracle) | Paxapos (MySQL tenant) | Entidad migrator |
-|---|---|---|---|
-| 1 | `PROVEEDORES` | `account_proveedores` | `proveedores` |
-| 2 | `ORDEN_COMPRA` | `compras_pedidos` (con `tipo='orden_compra'`) | `oc_items` (cabecera + ítems en un payload) |
-| 3 | `OC_ITEMS` | `compras_pedido_mercaderias` | `oc_items` |
-| 4 | `SOLIC_GASTOS` + `CTA_COMPROB` | `account_gastos` | `solic_gastos` |
-| 5 | `ORDEN_PAGO` | `account_egresos` | `orden_pago` |
-| 6 | `ORDEN_PAGO_DEDUC` | `account_retenciones` | `retenciones` |
+La migración se organiza en **6 entidades independientes** (5 del pipeline transaccional en orden de FKs + 1 catálogo del clasificador presupuestario). Cada entidad posee su propio comando, checkpoint y cursor autónomo.
 
-**Tablas RAFAM usadas como lookup / puente (NO se migran como entidad):**
+| Entidad (`--entity`) | Comando Makefile | Checkpoint | Tablas Origen RAFAM | Destino Paxapos (MySQL tenant) | Acción / Modo |
+|---|---|---|---|---|---|
+| `proveedores` | `make migrate-proveedores` | `proveedores` | `PROVEEDORES` | `account_proveedores` | Upsert / Sync por Hash |
+| `oc_items` | `make migrate-oc` | `oc_items` | `ORDEN_COMPRA` + `OC_ITEMS` | `compras_pedidos` + `compras_pedido_mercaderias` | Creación + Anulación |
+| `solic_gastos` | `make migrate-facturas` | `solic_gastos` | `SOLIC_GASTOS` + `CTA_COMPROB` | `account_gastos` | Enriquecimiento (UPDATE-ONLY) |
+| `orden_pago` | `make migrate-op` | `orden_pago` | `ORDEN_PAGO` + `ORDEN_PAGO_IMPUT` + `CTA_COMPROB` + `ORDEN_PAGO_DEDUC` | `account_egresos` (auto-crea `account_gastos` + retenciones) | Creación / Modificación |
+| `retenciones` | `make migrate-retenciones` | `retenciones` | `ORDEN_PAGO_DEDUC` (+ `ORDEN_PAGO`) | `account_retenciones` | Standalone por OP (F3/F4) |
+| `clasificaciones` | `python main.py run --entity clasificaciones` | `clasificaciones` | `GASTOS` (distinct `INCISO..DENOMINACION`) | `account_categorias` | Catálogo arbolado (4 niveles) |
 
-| RAFAM | Uso |
+> `make migrate-all` ejecuta las 5 entidades transaccionales en estricto orden de dependencia (FK). Cada comando admite la variante `-dry` (`make migrate-oc-dry`, …) o el flag `--dry-run`: envía `"dry_run": true` y Paxapos **valida sin persistir** (modo preview para revisar payload y conteos antes de escribir).
+
+### Tablas RAFAM de Lookup / Puente (NO se migran como entidad propia)
+
+| Tabla RAFAM | Uso en el Script |
 |---|---|
-| `ORDEN_PAGO_IMPUT` | **Puente primario** OP ↔ `CTA_COMPROB`. Modela la imputación física de cada OP a uno o más comprobantes (PK incluye `NRO_REG_COMP + TIPO_COMPROB + NRO_COMPROB + COD_PROV`). Reemplaza la lectura de la VIEW `CTA_HOJA_DE_RUTA`. Se usa al migrar `orden_pago` para armar el HABTM `account_egresos_gastos`. |
+| `ORDEN_PAGO_IMPUT` | **Puente primario** OP ↔ `CTA_COMPROB`. Modela la imputación física de cada OP a sus comprobantes (PK `NRO_REG_COMP + TIPO_COMPROB + NRO_COMPROB + COD_PROV`). También provee las columnas de partida presupuestaria (`OPI_INCISO`, `OPI_PAR_PRIN`, `OPI_PAR_PARC`, `OPI_PAR_SUBP`). |
 | `REG_COMP` | Puente `CTA_COMPROB` ↔ `ORDEN_COMPRA` (resuelve `account_gastos.pedido_id`). Comparte `EJERCICIO + NRO_OC + COD_PROV + JURISDICCION`. |
-| `CTA_COMPROB` | Factura fiscal real del proveedor (número AFIP). No es entidad propia: `solic_gastos` la lee (vía `REG_COMP`) para crear `account_gastos`, y `orden_pago` la usa para enriquecer los gastos imputados. |
-| `DEDUCCIONES` | Catálogo de tipos de retención. `ORDEN_PAGO_DEDUC.CODIGO_DEDUC` ↔ `DEDUCCIONES.CODIGO`. Se lee `DEDUCCIONES.DESCRIPCION` para resolver `account_retenciones.tipo_impuesto_id` por heurística. |
-| `JURISDICCION` | Catálogo (`JURISDICCION`, `DENOMINACION`, `SELECCIONABLE`). Se lee la denominación para nombrar centros de costo si no están en `_JURISDICCION_CENTRO_COSTO_MAP`. |
+| `CTA_COMPROB` | Comprobante fiscal del proveedor (número AFIP). `solic_gastos` la lee para enriquecer gastos, y `orden_pago` la utiliza para auto-crear gastos sueltos o desambiguar imputaciones. |
+| `DEDUCCIONES` | Catálogo de tipos de retención. `ORDEN_PAGO_DEDUC.CODIGO_DEDUC` ↔ `DEDUCCIONES.CODIGO`. Se lee `DEDUCCIONES.DESCRIPCION` para resolver `tipo_impuesto_id` por heurística/alias. |
+| `JURISDICCION` | Catálogo de jurisdicciones. Se utiliza `resolve_centro_costo_id()` para mapear a `centros_costo` en Paxapos. |
+| `COMPROBANTES` (vía `EGRESOS`) | Provee la forma de pago real (`ORIGEN_TIPO`: `CA`/`CM`=Cheque, `NO`=Transferencia) para cada OP. |
 
-> **Ya NO se usan:** la VIEW `CTA_HOJA_DE_RUTA` (reemplazada por las tablas reales `ORDEN_PAGO_IMPUT` + `REG_COMP`) ni la tabla `RETENCIONES` (reemplazada por `ORDEN_PAGO_DEDUC`, cuya clave `(EJERCICIO, NRO_OP)` es 1:1 con la OP; la clave `(EJERCICIO, NRO_CANCE)` de `RETENCIONES` es N:1 y asignaba las retenciones a la OP equivocada).
+> **Estructuras obsoletas / NO utilizadas:**
+> - `RETENCIONES` (reemplazada por `ORDEN_PAGO_DEDUC`: su clave `(EJERCICIO, NRO_CANCE)` era N:1 y asignaba retenciones a la OP equivocada).
+> - VIEW `CTA_HOJA_DE_RUTA` (reemplazada por las tablas relacionales reales `ORDEN_PAGO_IMPUT` + `REG_COMP`).
+> - `ORDEN_PAGOEA` / `ORDEN_PAGOEA_DEDUC` (Egresos Adicionales, fuera del alcance).
 
-**Diagrama de vínculos (cadena canónica real):**
+### Diagrama de Vínculos y Flujo Canónico
 
 ```mermaid
-graph LR
+graph TD
     PROV[PROVEEDORES] -->|proveedores| AP[account_proveedores]
     OC[ORDEN_COMPRA] -->|oc_items| CP[compras_pedidos]
     OCI[OC_ITEMS] -->|oc_items| CPM[compras_pedido_mercaderias]
-    SG[SOLIC_GASTOS] -->|solic_gastos| AG[account_gastos]
-    REG[REG_COMP] -. puente CC-OC .-> AG
-    CC[CTA_COMPROB] -. factura fiscal .-> AG
+    
+    SG[SOLIC_GASTOS] -. SG + CTA_COMPROB .-> AG_ENRICH[account_gastos - Enriquecimiento]
+    REG[REG_COMP] -. puente CC-OC .-> AG_ENRICH
+    
     OP[ORDEN_PAGO] -->|orden_pago| AE[account_egresos]
-    OPI[ORDEN_PAGO_IMPUT] -. puente OP-CC .-> AE
-    OPD[ORDEN_PAGO_DEDUC] -->|retenciones| AR[account_retenciones]
-    OP -. ejercicio+nro_op 1:1 .-> OPD
-    DED[DEDUCCIONES] -. catalogo tipo_impuesto .-> AR
+    OPI[ORDEN_PAGO_IMPUT] -. imputacion + partidas .-> AE
+    CC[CTA_COMPROB] -. auto-crea gasto si falta .-> AE
+    OPD[ORDEN_PAGO_DEDUC] -. retenciones embebidas .-> AE
+    
+    OPD -->|retenciones standalone| AR[account_retenciones]
+    DED[DEDUCCIONES] -. catalogo retenciones .-> AR
+    
+    GASTOS[GASTOS - Partidas] -->|clasificaciones| AC[account_categorias]
 ```
-
 
 ---
 
-## 2. Detalle por par de tablas
+## 2. Detalle de Mapeos por Entidad
 
 ### 2.1 `PROVEEDORES` → `account_proveedores`
 
-| RAFAM | Paxapos | Notas |
+- **Filtro / Blocklist (`EXCLUDED_COD_PROV`):** Proveedores de servicios públicos, cajas chicas, viáticos, bancos u organismos (Telefónica, Camuzzi, Edea, Banco Provincia, etc.) definidos en `config.py` y ampliables vía env `RAFAM_EXCLUDED_COD_PROV` se **excluyen totalmente** del pipeline.
+
+| Campo RAFAM | Campo Paxapos | Notas y Reglas |
 |---|---|---|
-| `COD_PROV` | `external_ref` (rafam, proveedores, cod_prov) | Identificador externo idempotente. |
-| `RAZON_SOCIAL` | `razon_social` / `name` | |
-| `CUIT` | `documento_fiscal` | |
-| `COD_IVA` | `iva_responsabilidad_id` | Vía `_IVA_MAP` en `gateway_mapper.py` (RINS=1, EXEN=2, NGAN=3, CF=4, RNI=5, MONOT=6, etc.). |
-| `CALLE_LEGAL` + `NRO_LEGAL` | `direccion` | Concatenados en `_join_address()`. |
-| `LOC`, etc. | `localidad`, ... | |
-| `EMAIL` | `mail` | Truncado a 100 caracteres. |
-| `ING_BRUTOS` | (no mapeado) | **TODO**: pendiente mapear a `numero_ingresos_brutos` en `account_proveedores` cuando el schema lo soporte. |
-| `FECHA_ULT_COMP` | (filtro incremental) | Usado como `ts_field` en `config.py` para cargas incrementales — sólo se reimportan proveedores con compras desde la última corrida. |
+| `COD_PROV` | `external_id.cod_prov` | Identificador externo idempotente. |
+| `FANTASIA` / `RAZON_SOCIAL` | `Proveedor.name` | Preferencia por `FANTASIA`; si falta, `RAZON_SOCIAL`. Truncado a 100 chars. |
+| `RAZON_SOCIAL` | `Proveedor.razon_social` | Truncado a 200 chars. |
+| `CUIT` | `Proveedor.cuit` | Normalizado a 11 dígitos numéricos limpios. |
+| `CUIT` (si presente) | `Proveedor.tipo_documento_id` | Hardcoded `1` (CUIT, AFIP 80). |
+| `COD_IVA` | `Proveedor.iva_condicion_id` | Mapeo vía `_IVA_MAP`: `RINS`→1, `EXEN`→2, `NGAN`→3, `CF`→4, `RNI`/`RNIS`→5, `MONOT`/`M.SOC`/`MSOC`→6. |
+| `CALLE_LEGAL` + `NRO_LEGAL` | `Proveedor.domicilio` | Concatenados con espacio. Fallback a `CALLE_POSTAL` + `NRO_POSTAL`. Truncado a 100. |
+| `LOCA_LEGAL` / `PROV_LEGAL` / `COD_LEGAL` | `localidad` / `provincia` / `codigo_postal` | Con fallback a campos POSTAL. Truncados a 100 (CP a 10). |
+| `NRO_PAIS_TE1`..`TE_CELULAR` | `Proveedor.telefono` | Concatenación inteligente de prefijos y números. Truncado a 100. |
+| `EMAIL` | `Proveedor.mail` | Truncado a 100 chars. |
+| `FECHA_ULT_COMP` | Cursor Incremental (`ts_field`) | Marca de agua para cargas incrementales. |
 
-### 2.2 `ORDEN_COMPRA` → `compras_pedidos` (tipo='orden_compra')
-
-| RAFAM | Paxapos | Notas |
-|---|---|---|
-| `EJERCICIO` + `UNI_COMPRA` + `NRO_OC` | `external_ref` | Identificador externo idempotente. |
-| `COD_PROV` | `proveedor_id` | Resuelto por `external_ref`. |
-| `JURISDICCION` | `centro_costo_id` | Vía `resolve_centro_costo_id()`. |
-| `FECH_EMI` | `fecha` | |
-| `IMPORTE_TOT` | `total` | |
-| (siempre) | `tipo` | Hardcoded `'orden_compra'`. |
-
-### 2.3 `OC_ITEMS` → `compras_pedido_mercaderias`
-
-Ítems de la OC. Se enviarán dentro del payload `ordenes_compra[].items[]`.
-
-| RAFAM | Paxapos | Notas |
-|---|---|---|
-| `EJERCICIO` + `UNI_COMPRA` + `NRO_OC` + `ITEM_OC` | `external_ref` | |
-| `EJERCICIO` + `UNI_COMPRA` + `NRO_OC` | (FK) → OC | Vincula al pedido padre. |
-| `DESCRIPCION` | `mercaderia_id` | El script normaliza la descripción y resuelve la mercadería por link local, lookup limpio o `resolver_mercaderia.json`; el resolver recibe `item.name` con la descripción RAFAM limpia, sin `mercaderia_external_ref`, para que Paxapos cree por nombre y deje la identidad única en `barcode`. Luego envía siempre `mercaderia_id` al importador. |
-| `UNI_MED` | `unidad_de_medida_id` | Vía vínculo local de unidad; si no existe, fallback interno del tenant. |
-| `CANT` | `cantidad` | |
-| `PRECIO_UNIT` | `precio_unitario` | |
-
-El script no envía `mercaderia_external_ref` ni dentro de `ordenes_compra[].items[]` ni al resolver previo: ese campo activa la creación determinística legacy de Paxapos y agrega sufijos `[RAFAM-...]` al nombre visible. Para obtener el `mercaderia_id`, el script llama `resolver_mercaderia.json` con `item.name`/`item.descripcion`/`item.nombre_compra` desde `OC_ITEMS.DESCRIPCION` limpia y persiste el vínculo `name:{descripcion_normalizada}` -> `mercaderia_id` en SQLite. El nombre visible de la mercadería debe quedar igual a `OC_ITEMS.DESCRIPCION` limpia, sin sufijos `[RAFAM-...]` ni `{RAFAM:...}`; la identidad única queda en el `barcode` que devuelve Paxapos (por ejemplo `RAFAM-NAME:{hash}`). Así las corridas siguientes reutilizan el mismo ID de Paxapos y no generan duplicados de mercaderías.
-
-### 2.4 `SOLIC_GASTOS` + `CTA_COMPROB` → `account_gastos` (entidad `solic_gastos`)
-
-Facturas reales del proveedor (con número fiscal AFIP). **Pasada standalone `solic_gastos`** (`make migrate-facturas`): recorre `SOLIC_GASTOS` y, vía `REG_COMP`, trae el comprobante fiscal de `CTA_COMPROB` para crear/actualizar el `Gasto`, resolviendo `pedido_id` contra las OCs ya migradas.
-
-> **Reglas de omisión:** una SG se omite si `CTA_COMPROB_COUNT != 1` (no resuelve a un único comprobante fiscal) o si el comprobante no tiene `NRO_COMPROB`. Así se evitan gastos ambiguos o sin número fiscal.
-
-| RAFAM | Paxapos | Notas |
-|---|---|---|
-| `EJERCICIO` + `NRO_REG_COMP` (vía REG_COMP) | `external_ref` | |
-| `COD_PROV` | `proveedor_id` | |
-| `TIPO` (FAA/FAB/FAC/...) | `tipo_factura_id` | Vía `RAFAM_TIPO_COMPROB_TO_PAXAPOS_NAME` → lookup por `name` en `afip_tipo_facturas`. |
-| `NRO_COMPROB` | `factura_nro` | Número fiscal de la factura. |
-| `FECH_COMPROB` | `fecha` | |
-| `IMPORTE_COMPR` | `importe_total` | Total crudo del comprobante RAFAM. |
-| `IMPORTE_LIQUIDO` / `IMPORTE_NETO` / `IMPORTE_SIN_IVA` | `importe_neto` | Neto/líquido crudo del comprobante. El script prefiere `IMPORTE_LIQUIDO`, luego `IMPORTE_NETO`, luego `IMPORTE_SIN_IVA`; no calcula netos en Python. |
-| `JURISDICCION` | `centro_costo_id` | |
-| (vía REG_COMP → ORDEN_COMPRA) | `pedido_id` | FK a `compras_pedidos.id` cuando la factura tiene OC asociada. |
-
-### 2.5 `ORDEN_PAGO` → `account_egresos`
-
-> **Filtro de migración:** sólo se migran OPs con `ESTADO_OP = 'C'` (cancelada/pagada) **y** `CONFIRMADO = 'S'`. Las OPs en estado `N` sin confirmar o anuladas (`A`) se omiten.
-
-| RAFAM | Paxapos | Notas |
-|---|---|---|
-| `EJERCICIO` + `NRO_OP` | `external_ref` | |
-| `COD_PROV` | `proveedor_id` | |
-| `FECH_CONFIRM` | `fecha` | Sólo cuando `ESTADO_OP='C'` y `CONFIRMADO='S'`. |
-| `IMPORTE_TOTAL` | `importe_total` | Total bruto de la OP. El payload conserva también `Egreso.total` por compatibilidad con el importador actual. |
-| `IMPORTE_LIQUIDO` | `importe_neto` | Neto líquido informativo según RAFAM. **`neto_transferido` NO se envía:** Paxapos lo calcula como `total − retenciones` en `_replaceRetencionesForEgreso`. |
-| `COMPROBANTES.ORIGEN_TIPO` (CA/CM/NO) | `tipo_de_pago_id` | Vía IDs canónicos: CA/CM→9, NO→1. Default `10` (`Otros`). No se resuelve por `name`. |
-| `JURISDICCION` | `centro_costo_id` | |
-| (vía `ORDEN_PAGO_DEDUC`) | `retenciones[]` (embebidas) | `orden_pago` embebe las retenciones de la OP (deducciones 1:1 por `EJERCICIO + NRO_OP`) dentro del payload del egreso. Si la suma supera el `total` de la OP se descartan y se loguea. Ver §2.6. |
-| (vía `ORDEN_PAGO_IMPUT` → `REG_COMP`) | HABTM `account_egresos_gastos` | Vincula el egreso con uno o varios gastos (`CTA_COMPROB`) por la imputación física de la OP. Las OPs sin `ORDEN_PAGO_IMPUT` se omiten. |
-
-### 2.6 `ORDEN_PAGO_DEDUC` → `account_retenciones` (entidad `retenciones`)
-
-Las retenciones se traen de `ORDEN_PAGO_DEDUC` (clave **1:1** `EJERCICIO + NRO_OP`), **no** de la tabla `RETENCIONES` (cuya clave `EJERCICIO + NRO_CANCE` es N:1 con la OP y asignaba mal). `ORDEN_PAGO_DEDUC` corresponde a las Órdenes de Pago normales (`ORDEN_PAGO`); no confundir con `ORDEN_PAGOEA_DEDUC` (Egresos Adicionales, no migrados).
-
-Hay **dos caminos idempotentes** que emiten la misma sección `retenciones`:
-- **`orden_pago`** las embebe inline en el payload del egreso (mismo `external_id`).
-- **`retenciones`** (pasada standalone, `make migrate-retenciones`) recorre `ORDEN_PAGO`, trae las deducciones y emite `retenciones[]` top-level **solo para OPs ya migradas** (con link). Las OPs sin Egreso aún en Paxapos se encolan como `dependency_missing` para reintentar.
-
-| RAFAM (`ORDEN_PAGO_DEDUC`) | Paxapos | Notas |
-|---|---|---|
-| `EJERCICIO` + `NRO_OP` + `CODIGO_DEDUC` | `external_id` | Identificador idempotente de la retención. |
-| (link `orden_pago` por `EJERCICIO + NRO_OP`) | `egreso_id` | FK a `account_egresos.id`. Se resuelve por el link store; si la OP no está migrada, se encola. |
-| `CODIGO_DEDUC` + `DEDUCCIONES.DESCRIPCION` | `tipo_impuesto_id` | Heurística por substring/alias: `"IVA"`→102, `"GANANCIA"`→103, `"INGRESOS BRUTOS"`/`"IIBB"`→104, `"SUSS"`→105, `"MEDICOS"`/`"CAJA MED"`→110. Si no matchea catálogo, se omite y se loguea. |
-| `IMPORTE_RETEN` | `monto_retenido` | Se descarta si es 0 o no numérico. |
-| `ALICUOTA` | `alicuota` | Solo si está disponible y > 0. |
-| `COMPROB_DEDUC` | `numero_certificado` | Si falta, default `RAFAM-RET-{ejercicio}-{nro_op}-{codigo_deduc}`. |
-| `DEDUCCIONES.DESCRIPCION` | `observacion` | `"Deduccion RAFAM {descripcion} OP {ej}/{nro_op}"` cuando hay descripción. |
+- **Detección de Cambios (Update por Hash):** Calcula hash SHA-256 (`_HASH_FIELDS`) de los datos de negocio. En ejecuciones `sync-changes`, si el hash cambió en RAFAM, inyecta `Proveedor.id` local y actualiza Paxapos.
 
 ---
 
-## 3. Alertas y validaciones
+### 2.2 `ORDEN_COMPRA` + `OC_ITEMS` → `compras_pedidos` + `compras_pedido_mercaderias`
 
-- **Idempotencia obligatoria:** todo registro migrado debe llevar `external_ref = {source: "rafam", entity: <tabla>, ...claves naturales}` para que reimportar no genere duplicados.
-- **`compras_pedidos.tipo` siempre `'orden_compra'`** en esta migración. No se sincronizan otros tipos.
-- **Filtro de OPs:** se migran las que tienen `ESTADO_OP IN ('C')` + `CONFIRMADO='S'` + `FECH_CONFIRM` + importe positivo + OC/gasto canónico. Las anuladas (`A`), normales (N), no confirmadas o sin OC linkeada se omiten. Esto se verifica en `exporter.py` y `source_repository.py`.
-- **`pedido_id` en `account_gastos`** debe resolverse desde la cadena `CTA_COMPROB → REG_COMP → ORDEN_COMPRA`. Si no hay OC migrada/linkeada, la OP y su `gastos[]` se omiten para evitar pagos o gastos sueltos.
-- **`RAFAM_EJERCICIO_MIN`:** el filtro de ejercicio aplica a `oc_items`, `orden_pago` y `retenciones`. La excepción para incluir OCs anteriores se limita a OPs confirmadas dentro del alcance actual (`EJERCICIO >= mínimo` o `FECH_CONFIRM` desde el 1/1 del mínimo); OPs históricas no deben arrastrar OCs viejas.
-- **`unidad_de_medida_id` default = 1 (Unidad)**. Antes había un bug que ponía 5 (Paquete); está corregido en `gateway_mapper.py`.
-- **`PROVEEDORES.ING_BRUTOS` no se migra hoy** — pendiente. Si el negocio lo necesita, agregar mapeo en `gateway_mapper.py::map_proveedor()`.
+- **Agrupamiento:** Agrupa `OC_ITEMS` por cabecera `(EJERCICIO, UNI_COMPRA, NRO_OC)`. Se omiten OCs de proveedores en la blocklist o sin link remoto de proveedor en Paxapos.
+
+#### Cabecera (`ORDEN_COMPRA`)
+
+| Campo RAFAM | Campo Paxapos | Notas y Reglas |
+|---|---|---|
+| `EJERCICIO + UNI_COMPRA + NRO_OC` | `external_id` | Identificador externo compuesto. |
+| `EJERCICIO` + `NRO_OC` | `Pedido.internal_id` | Formato `{ejercicio % 100}-{nro_oc}` (ej: `26-104`). |
+| (fijo) | `Pedido.tipo` | Hardcoded `'orden_compra'`. |
+| (fijo) | `Pedido.estado_aprobacion` | Hardcoded `2` (Aprobado). |
+| `COD_PROV` | `Pedido.proveedor_id` | Resuelto desde `link_store` (`proveedores`). |
+| `SG_JURISDICCION` | `centro_costo_id` | Resuelto vía `resolve_centro_costo_id()`. |
+| `OC_FECH_OC` | `Pedido.created` | Formato `YYYY-MM-DD 00:00:00`. |
+| `OC_OBSERVACIONES` | `Pedido.observacion` | Truncado a 255. |
+
+#### Ítems (`OC_ITEMS`)
+
+| Campo RAFAM | Campo Paxapos | Notas y Reglas |
+|---|---|---|
+| `DESCRIPCION` | `item.name` | Descripción limpia de la mercadería. |
+| `CANTIDAD` | `item.cantidad` | Float. |
+| `IMP_UNITARIO` | `item.precio_unitario` | Float redondeado a 2 decimales. |
+| `CANT_RECIB` | `item.recibida_cantidad` | Float. |
+| `UNI_MED` | `item.unidad_de_medida_id` | Mapeo `_UM_DEFAULT = 5` (Unidad). |
+| `SG_JURISDICCION` | `item.centro_costo_id` | Centro de costo del ítem. |
+
+> **Lógica de Mercadería (sin sufijos `[RAFAM-...]`):** El script no envía `mercaderia_external_ref` en el payload de OC para evitar que Paxapos genere nombres visibles con sufijos feos. La mercadería se resuelve vía `resolver_mercaderia.json` por nombre limpio y se persiste el link local `name:{normalizada}` → `mercaderia_id` en SQLite. Paxapos le asigna un `barcode` determinista (`RAFAM-NAME:{hash}`).
+
+#### Reglas de Estado de OC
+- **`OC_ESTADO_OC = 'R'` (Registrada/Emitida):** Se crea o reenvía (si el hash del payload cambió).
+- **`OC_ESTADO_OC = 'A'` (Anulada):** 
+  - Si no tiene OP asociada en Paxapos → Se envía con `Pedido.deleted = 1` para anular en Paxapos.
+  - **Protección de Integridad:** Si la OC ya tiene OP asociada (`has_op = 1` en `link_store`), **NO se elimina** en Paxapos para no romper la trazabilidad del pago.
+- **OCs con Comprobante (`OC_CC_NRO`) o Pago (`has_op`):** Se envían a Paxapos como fallback aunque su estado sea distinto de `'R'`.
 
 ---
 
-## 4. Orden lógico y comandos
+### 2.3 `SOLIC_GASTOS` + `CTA_COMPROB` → `account_gastos` (Entidad `solic_gastos`)
 
-Las 5 entidades son **independientes** (1 comando = 1 checkpoint), pero deben ejecutarse en **orden de dependencia (FK)** porque cada una resuelve enlaces creados por la anterior vía el link store local:
+- **Modo Enriquecimiento (UPDATE-ONLY):** No crea gastos sueltos. Su objetivo es completar campos vacíos de gastos que Paxapos ya creó automáticamente cuando el proveedor subió la factura vinculada a una OC (`account_gastos.pedido_id`).
+- **Filtro de Omisión:** Se saltea la SG si `ESTADO_SOLIC = 'A'`, si `CTA_COMPROB_COUNT != 1` (ambigüedad fiscal), o si `CTA_COMPROB.NRO_COMPROB` viene vacío.
 
-1. `proveedores`: crea/actualiza `account_proveedores` desde `PROVEEDORES`.
-2. `oc_items`: agrupa `ORDEN_COMPRA` + `OC_ITEMS` y envía `ordenes_compra[]` con `items[]` inline. Antes de importar, cada item resuelve su mercadería por descripción normalizada y guarda el vínculo local; el payload final apunta a `mercaderia_id` sin `mercaderia_external_ref`.
-3. `orden_pago`: procesa `ORDEN_PAGO` y, en la misma pasada, resuelve `CTA_COMPROB` para crear/vincular gastos y `RETENCIONES` + `DEDUCCIONES` para crear `account_retenciones`.
-
-`make migrate-all` encadena las 5 en este orden. Cada comando tiene su variante `-dry` (o `--dry-run`) que envía `"dry_run": true` para que Paxapos **valide sin persistir** — método de preview profesional para revisar el payload y los conteos antes de escribir. Los checkpoints se reinician con `make reset-<entidad>` (o `make reset-all`).
+| Campo RAFAM | Campo Paxapos | Notas |
+|---|---|---|
+| `EJERCICIO + DELEG_SOLIC + NRO_SOLIC` | `external_id` | Ref externa `SG-{ejercicio}-{deleg}-{nro}`. |
+| `FECH_SOLIC` | `Gasto.fecha` | Formato `YYYY-MM-DD`. |
+| `CTA_IMPORTE_COMPR` / `IMPORTE_TOT` | `Gasto.importe_total` | Total del comprobante. |
+| `CTA_IMPORTE_NETO` / `CTA_IMPORTE_SIN_IVA` | `Gasto.importe_neto` | Neto del comprobante (fallback a importe_total). |
+| `CTA_TIPO_COMPROB` / `TIPO_DOC` | `Gasto.tipo_factura_id` | Resuelto vía `RAFAM_TIPO_COMPROB_TO_PAXAPOS_ID`. |
+| `CTA_NRO_COMPROB` | `punto_de_venta` + `factura_nro` | Si contiene guion (`0001-00001234`), lo divide en PDV y Número. |
+| `FECH_NECESIDAD` / `FECH_ENTREGA` / `CTA_FECH_VENCIM` | `Gasto.fecha_vencimiento` | Fecha de vencimiento. |
+| `OC_COD_PROV` | `Gasto.proveedor_id` | Resuelto vía `link_store` de `proveedores`. |
 
 ---
 
-## 5. Catálogo de IDs de Paxapos (extraídos de `packages/cakephp/Config/Schema/risto.php`)
+### 2.4 `ORDEN_PAGO` → `account_egresos` (Entidad `orden_pago`)
 
-### 5.1 `tipo_documentos`
+- **Filtro Estricto:** Solo se migran OPs con `ESTADO_OP = 'C'` (Cancelada/Pagada), `CONFIRMADO = 'S'` y `FECH_CONFIRM` válida. Las anuladas (`A`), normales (`N`) o sin confirmar se omiten.
+
+| Campo RAFAM | Campo Paxapos | Notas |
+|---|---|---|
+| `EJERCICIO + NRO_OP` | `external_id` | Ref idempotente `{"ejercicio": ej, "nro_op": nro}`. |
+| `EJERCICIO + NRO_OP` | `Egreso.identificador_pago` | String `RAFAM-OP-{ejercicio}-{nro_op}`. |
+| `FECH_CONFIRM` | `Egreso.fecha` | Formato `YYYY-MM-DD`. |
+| `IMPORTE_TOTAL` | `importe_total` / `Egreso.total` | Validado con `validate_amount` (> 0). |
+| (fijo) | `Egreso.estado` | Hardcoded `3` (Pagado). |
+| `COMPROBANTES.ORIGEN_TIPO` (vía `EGRESOS`) | `Egreso.tipo_de_pago_id` | IDs canónicos: `CA`/`CM`→9 (Cheque), `NO`→1 (Transferencia bancaria), default→10 (Otros). |
+| `CONCEPTO` / `OBSERVACIONES` | `Egreso.observacion` | Truncado a 255. |
+| `ORDEN_PAGO_IMPUT` → `CTA_COMPROB` | `gasto_nro_comprobante` | Nro(s) de comprobante del gasto imputado. |
+
+#### Auto-creación de Gastos y Partidas Presupuestarias
+- **Auto-creación de Gasto:** Si Paxapos no encuentra el gasto vinculado al pago, `orden_pago` embebe los datos de `CTA_COMPROB` en el payload (`gastos[]`) para que Paxapos cree el `Gasto` y el enlace HABTM `account_egresos_gastos` automáticamente.
+- **Mapeo de Clasificación Presupuestaria:** Las columnas `OPI_INCISO`, `OPI_PAR_PRIN`, `OPI_PAR_PARC`, `OPI_PAR_SUBP` de `ORDEN_PAGO_IMPUT` forman la partida `I.PP.PC.SP`. El script resuelve su `clasificacion_id` contra los links de `clasificacion`. Si el código exacto no está migrado, realiza un **fallback ascendente por el árbol** (4→3→2→1) hasta hallar el ancestro migrado.
+- **Retenciones Embebidas:** Trae deducciones de `ORDEN_PAGO_DEDUC` y las incluye en `retenciones[]`. Si la suma de retenciones supera el `total` de la OP, se descartan para evitar rechazos en Paxapos.
+- **Re-envío / Modificación (ABM por ID):** Si una OP ya migrada sufre cambios en RAFAM (`IMPORTE_TOTAL`, fecha, etc.), el script reenvía el Egreso inyectando `Egreso.id` para que Paxapos actualice por ID sin duplicar y preservando los PDFs/adjuntos guardados en la UI.
+- **Marcado `has_op`:** Post-importación exitoso, las OCs vinculadas a la OP quedan marcadas con `has_op = 1` en `link_store` para protegerlas de borrados accidentales.
+
+---
+
+### 2.5 `ORDEN_PAGO_DEDUC` → `account_retenciones` (Entidad `retenciones` - Standalone F3/F4)
+
+- **Propósito:** Sincronización independiente de retenciones para OPs que ya fueron creadas en Paxapos.
+- **Filtro de Dependencia:** Si la OP aún no tiene link en `orden_pago`, la retención no se descarta: se encola en `RetryStore` (`REASON_DEPENDENCY_MISSING`) para reintentarse automáticamente en la siguiente corrida.
+
+| Campo RAFAM (`ORDEN_PAGO_DEDUC`) | Campo Paxapos | Notas |
+|---|---|---|
+| `EJERCICIO + NRO_OP + CODIGO_DEDUC` | `external_id` | Clave 1:1 de la retención. |
+| `CODIGO_DEDUC` + `DEDUCCIONES.DESCRIPCION` | `tipo_impuesto_id` | Match por código, codename o heurística: `"IVA"`→102, `"GANANCIA"`→103, `"IIBB"`/`"INGRESOS BRUTOS"`→104, `"SUSS"`→105, `"CAJA MED"`→110. |
+| `IMPORTE_RETEN` | `monto_retenido` | Validado > 0. |
+| `ALICUOTA` | `alicuota` | Si está disponible y > 0. |
+| `COMPROB_DEDUC` | `numero_certificado` | Fallback: `RAFAM-RET-{ejercicio}-{nro_op}-{codigo_deduc}`. |
+| `DEDUCCIONES.DESCRIPCION` | `observacion` | `"Deduccion RAFAM {descripcion} OP {ej}/{nro_op}"`. |
+
+- **Idempotencia (Fingerprint F4):** Calcula un hash SHA-1 (`_retenciones_fingerprint`) del conjunto de retenciones de la OP. Si la OP ya fue migrada y las retenciones no sufrieron cambios, se omiten (`skip`).
+
+---
+
+### 2.6 `GASTOS` → `account_categorias` (Entidad `clasificaciones`)
+
+- **Objeto:** Construye el catálogo arbolado del Clasificador de Gastos por Objeto desde la tabla `GASTOS` de RAFAM.
+- **Estructura:** Escanea un `DISTINCT` de `(INCISO, PAR_PRIN, PAR_PARC, PAR_SUBP, DENOMINACION)`.
+
+| Estructura RAFAM | Campo Paxapos | Notas |
+|---|---|---|
+| `I.PP.PC.SP` | `external_id.codigo` | Código compuesto (ej: `3.3.6.0`). |
+| Código de nivel superior | `parent_external_id` / `parent_id` | Padre en el árbol (ej: `3.3.0.0` para `3.3.6.0`). |
+| Nivel (1..4) | `Clasificacion.nivel` | 1=Inciso, 2=Principal, 3=Parcial, 4=Subparcial. |
+| `DENOMINACION` | `Clasificacion.name` | Nombre formateado y truncado a 50 chars. |
+
+- **Limpieza de Mojibake:** Corrige caracteres corruptos (`³` → `ü`, `²` → `ó`, `±` → `ñ`).
+- **Truncado Estricto a 50 Caracteres (`NAME_MAX_LEN = 50`):** La columna `name` de `account_categorias` en CakePHP es `varchar(50)`. El script trunca por palabra (o duro si la palabra corta demasiado) para evitar fallos de SQL.
+- **Overrides Canónicos (`CANONICAL_OVERRIDES`):** Si un mismo código `I.PP.PC.SP` posee denominaciones divergentes en las filas transaccionales, se fuerza una única denominación oficial (ej: `3.3.6.0` → `"Mantenimiento y Limpieza"`).
+
+---
+
+## 3. Arquitectura del Script, Resiliencia e Integridad
+
+### 3.1 Almacenamiento de Estado (SQLite Local)
+El proyecto mantiene tres bases SQLite locales en `packages/rafam-ba-proveedores/state/`:
+1. **Checkpoints (`state/checkpoint.db`):** Guarda la marca de agua incremental (`last_id`, `last_ts`, `records_sent`, `status`).
+   - *Watermark Parcial por Batch:* Si la corrida se interrumpe (kill, OOM, timeout), `advance_partial` guarda el progreso del último batch OK para reanudar sin rebobinar.
+2. **Entity Links (`state/entity_links.db`):** Mapeo `(entidad, source_key) → remote_id` en Paxapos. Guarda metadatos como `payload_hash`, `fingerprint`, `has_op`, y referencias de comprobantes.
+3. **Retry Store (`state/retry.db`):** Cola de reintentos para registros salteados por dependencias faltantes (`REASON_DEPENDENCY_MISSING`).
+
+### 3.2 Lock de Ejecución Concurrente
+Para evitar conflictos cuando ejecutan cronjobs o comandos manuales paralelos, `main.py` utiliza un lock exclusivo a nivel de sistema operativo mediante `fcntl.flock` sobre `state/migrator.lock`. Si un proceso intenta ejecutarse mientras otro está activo, se aborta limpiamente con exit code 75 (`EX_TEMPFAIL`).
+
+### 3.3 Reproceso Móvil (30 Días)
+Para paliar despasajes de tiempo en los que una entidad (ej: OP o Gasto) se crea antes que su entidad padre (ej: OC), `config.py` establece `pending_reprocess_days = 30` en OCs y OPs. La query relanza las OCs en estado `N` y OPs confirmadas de los últimos 30 días para re-evaluar si sus dependencias se resolvieron.
+
+### 3.4 Operaciones Especiales y Scripts de Soporte
+- **`sync-changes` (`make sync-proveedores`, `make sync-oc`):** Escanea los datos en RAFAM, recalcula su hash y envía upsert solo para los registros cuyos datos sufrieron modificaciones en origen.
+- **`check-integrity` (`make check-integrity`):** Detecta anulaciones en RAFAM y propaga las bajas a Paxapos (respetando la regla de no borrar si hay OP).
+- **`backfill-gastos` (`make backfill-gastos`):** Escaneo completo de `SOLIC_GASTOS` ignorando la ventana de 30 días y sin alterar el checkpoint incremental, para recuperar links locales de gastos previamente creados en Paxapos.
+- **`reconcile` (`python main.py reconcile`):** Auditoría read-only que compara los registros totales en RAFAM contra los links locales y la cola de reintentos para reportar inconsistencias o drift.
+
+---
+
+## 4. Catálogo de IDs y Tablas Paxapos (Fuente: `packages/cakephp/Config/Schema/risto.php`)
+
+### 4.1 `tipo_documentos`
 
 | id | codigo_fiscal | name | codigo_afip |
 |---|---|---|---|
@@ -199,76 +241,74 @@ Las 5 entidades son **independientes** (1 comando = 1 checkpoint), pero deben ej
 | 7 | 4 | Cédula de Identidad | 0 |
 | 8 | (vacío) | Sin identificar | 99 |
 
-### 5.2 `afip_iva_responsabilidades`
+### 4.2 `afip_iva_responsabilidades`
 
-| id | codigo_fiscal | name |
-|---|---|---|
-| 1 | I | Resp. Inscripto |
-| 2 | E | Exento |
-| 3 | A | No Responsable |
-| 4 | C | Consumidor Final |
-| 5 | T | No Categorizado |
-| 6 | M | Responsable Monotributo |
-
-### 5.3 `account_tipo_impuestos` (sólo retenciones — entidad `retenciones`, fuente `ORDEN_PAGO_DEDUC`)
-
-| id | name | subsistema | tributo_afip_codigo |
+| id | codigo_fiscal | name | Código RAFAM Mapeado |
 |---|---|---|---|
-| 102 | Retención de IVA | tributo | 1 (Nacional) |
-| 103 | Retención de Ganancias | tributo | 1 (Nacional) |
-| 104 | Retención de IIBB | tributo | 2 (Provincial) |
-| 105 | Retención SUSS | tributo | 1 (Nacional) |
-| 110 | Retención Caja de Médicos | tributo | 99 (Otros) |
+| 1 | I | Resp. Inscripto | `RINS` |
+| 2 | E | Exento | `EXEN` |
+| 3 | A | No Responsable | `NGAN` |
+| 4 | C | Consumidor Final | `CF` |
+| 5 | T | No Categorizado | `RNI`, `RNIS` |
+| 6 | M | Responsable Monotributo | `MONOT`, `M.SOC`, `MSOC` |
 
-> Otros IDs (1=IVA 21%, 2=IVA 10.5%, etc.) no se usan en esta migración.
+### 4.3 `account_tipo_impuestos` (Retenciones y Tributos)
 
-### 5.4 `afip_tipo_facturas`
+| id | name | subsistema | naturaleza | tributo_afip_codigo |
+|---|---|---|---|---|
+| 102 | Retención de IVA | tributo | retencion | 1 (Nacional) |
+| 103 | Retención de Ganancias | tributo | retencion | 1 (Nacional) |
+| 104 | Retención de IIBB | tributo | retencion | 2 (Provincial) |
+| 105 | Retención SUSS | tributo | retencion | 1 (Nacional) |
+| 110 | Retención Caja de Médicos | tributo | retencion | 99 (Otros) |
 
-Lookup dinámico por `name` (no se hardcodean IDs). El mapping `RAFAM_TIPO_COMPROB_TO_PAXAPOS_NAME` resuelve el `name` y luego CakePHP busca por nombre.
+### 4.4 `afip_tipo_facturas`
 
-### 5.5 `tipo_de_pagos`
-
-IDs canónicos para `COMPROBANTES.ORIGEN_TIPO`: CA/CM→9, NO→1, default→10. No se usa lookup por `name`.
-
-### 5.6 `centros_costo` (por tenant)
-
-Hardcoded en `_JURISDICCION_CENTRO_COSTO_MAP` (`gateway_mapper.py`):
-
-| CentroCosto.id | Nombre | JURISDICCION RAFAM |
+| id | name | Mapeo desde `CTA_COMPROB.TIPO` |
 |---|---|---|
-| 1 | Salud | 1110104000 |
-| 2 | Obras Públicas | 1110103000 |
-| 3 | Desarrollo | 1110106000 |
-| 4 | Corralón / Mantenimiento | 1110118000 |
-| 5 | Seguridad | 1110113000 |
-| 6 | CASER | 1110111000 |
-| 7 | Administrativo - General | 1110101000, 1110102000, 1110200000, 1110112000, 1110115000, 1110117000, 1110105000, 1110108000, 1110109000 |
-| 8 | Otro | (default) |
+| 1 | Factura A | `FAA`, `FAS`, `REA` |
+| 2 | Factura B | `FAB`, `REB`, `EXB` |
+| 4 | Factura M | `FAM` |
+| 5 | Factura C | `FAC` |
+| 7 | Otros | `TKT`, `LIQ`, `COM`, `VIA`, `REC`, `CEO`, `LIR` (Default) |
+| 8 | NCB | `NCB` |
+| 9 | NCC | `NCC` |
+| 10 | NCA | `NCA` |
+| 11 | NDB | `NDB` |
+| 12 | NDC | `NDC` |
+| 13 | NDA | `NDA` |
+| 14 | NCM | `NCM` |
 
-### 5.7 `compras_unidad_de_medidas`
+### 4.5 `tipo_de_pagos`
 
-| id | name |
-|---|---|
-| 1 | Unidad (default) |
-| 2 | Kilogramo |
-| 3 | Litro |
-| 4 | Metro |
-| 5 | Paquete |
-| 6 | Horas |
-| 7 | Día |
+| id | name | Mapeo desde `COMPROBANTES.ORIGEN_TIPO` |
+|---|---|---|
+| 1 | Transferencia bancaria | `NO` |
+| 9 | Cheque al día / manual | `CA`, `CM` |
+| 10 | Otros | Default para otros orígenes |
+
+### 4.6 `centros_costo` (Mapping Jurisdicción RAFAM)
+
+| CentroCosto.id | Nombre en Paxapos | JURISDICCION RAFAM |
+|---|---|---|
+| 1 | Salud | `1110104000` |
+| 2 | Obras Públicas | `1110103000` |
+| 3 | Desarrollo | `1110106000` |
+| 4 | Corralón / Mantenimiento | `1110118000` |
+| 5 | Seguridad | `1110113000` |
+| 6 | CASER | `1110111000` |
+| 7 | Administrativo - General | `1110101000`, `1110102000`, `1110200000`, `1110112000`, `1110115000`, `1110117000`, `1110105000`, `1110108000`, `1110109000` |
+| 8 | Otro | Default para jurisdicciones no listadas |
+
+### 4.7 `compras_unidad_de_medidas`
+
+| id | name | Mapeo RAFAM |
+|---|---|---|
+| 5 | Unidad | Default (`_UM_DEFAULT = 5`), `UNIDAD`, `METRO`, `HORAS`, `DIA` |
+| 3 | Kilogramo | `KILOGRAMO` |
+| 20 | Litro | `LITRO` |
+| 11 | Paquete | `PAQUETE` |
 
 ---
 
-## 6. Tablas RAFAM que NO se usan
-
-Cualquier referencia en docs viejas a las siguientes tablas/estructuras es **obsoleta** y debe ignorarse:
-
-- **`RETENCIONES`** — reemplazada por `ORDEN_PAGO_DEDUC` (clave 1:1 por `NRO_OP`). La clave `(EJERCICIO, NRO_CANCE)` de `RETENCIONES` es N:1 con la OP y asignaba retenciones a la orden equivocada.
-- **VIEW `CTA_HOJA_DE_RUTA`** — reemplazada por las tablas reales `ORDEN_PAGO_IMPUT` + `REG_COMP`.
-- **`ORDEN_PAGOEA` / `ORDEN_PAGOEA_DEDUC`** — Órdenes de Pago de Egresos Adicionales; fuera del alcance de este pipeline.
-
-> El proyecto cubre exclusivamente las tablas listadas en §1, organizadas en las **5 entidades** (`proveedores`, `oc_items`, `solic_gastos`, `orden_pago`, `retenciones`), más los lookups documentados.
-
----
-
-**Última actualización:** mayo 2026.
+**Última actualización:** julio 2026.
