@@ -107,6 +107,17 @@ class RetencionesMapper:
                 if ret is not None:
                     mapped.append(ret)
             if not mapped:
+                # Hay deducciones pero ninguna mapeo (tipicamente el catalogo
+                # tipos_retencion fallo al cargarse o no matchea). Encolar para
+                # que la proxima corrida las reinyecte: sin esto el cursor
+                # avanza y estas retenciones se pierden en silencio.
+                if self._retry_store is not None and not dry_run:
+                    self._retry_store.enqueue(
+                        "retenciones",
+                        op_sk,
+                        REASON_DEPENDENCY_MISSING,
+                        f"OP {ejercicio}-{nro_op}: {len(deducciones)} deduccion(es) sin tipo de retencion resoluble",
+                    )
                 continue
 
             # Idempotencia

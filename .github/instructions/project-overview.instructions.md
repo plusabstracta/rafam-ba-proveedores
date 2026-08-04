@@ -30,15 +30,17 @@ a un portal de proveedores basado en **Paxapos** (CakePHP 2) a través de APIs R
 3. **Destino:** API REST Paxapos — endpoint migrator (`/rafam/migracion/importar.json`) o gateway directo.
 4. **Dev local:** SQLite (`state/dev_rafam.db`) cargada desde snapshots CSV — reemplaza Oracle sin cambiar lógica.
 
-### Entidades sincronizadas (orden de dependencia)
+### Entidades sincronizadas (orden de dependencia — pipeline oficial de `main.py run`)
 
 1. `proveedores` (tabla RAFAM `PROVEEDORES`)
-2. `orden_compra` + `oc_items` (tablas RAFAM `ORDEN_COMPRA`/`OC_ITEMS`) — requieren proveedor
-3. `cta_comprob` (tabla RAFAM `CTA_COMPROB`) — facturas reales del proveedor; resuelve OC vía `REG_COMP`
-4. `orden_pago` (tabla RAFAM `ORDEN_PAGO`) — requieren gasto/factura ya importado; vincula gastos vía `CTA_HOJA_DE_RUTA`
-5. `retenciones` (tabla RAFAM `RETENCIONES`) — vinculadas al pago; tipo resuelto por `DEDUCCIONES.DESCRIPCION`
+2. `oc_items` (tablas RAFAM `OC_ITEMS` + `ORDEN_COMPRA` + `SOLIC_GASTOS`) — OC completa con items embebidos; requiere proveedor
+3. `solic_gastos` (tablas RAFAM `SOLIC_GASTOS` + `CTA_COMPROB` vía `REG_COMP`) — enriquecimiento UPDATE-ONLY de gastos que Paxapos ya creó
+4. `orden_pago` (tabla RAFAM `ORDEN_PAGO`) — vincula comprobantes vía `ORDEN_PAGO_IMPUT` + `CTA_COMPROB` y la OC canónica vía `REG_COMP`
+5. `retenciones` (tabla RAFAM `ORDEN_PAGO_DEDUC`, escaneando las mismas OP) — tipo resuelto contra el catálogo `tipos_retencion` de Paxapos
 
-**Regla:** el orden de ejecución es estricto. Cada entidad depende de las anteriores. El campo `JURISDICCION` no es una entidad: se mapea a `centro_costo_id` vía `_JURISDICCION_CENTRO_COSTO_MAP` en `gateway_mapper.py`.
+Entidades adicionales invocables con `--entity` pero fuera del pipeline por defecto: `clasificaciones` (catálogo desde `GASTOS`), `orden_compra` (legacy, deshabilitada en el exporter: warning + no-op).
+
+**Regla:** el orden de ejecución es estricto. Cada entidad depende de las anteriores. El campo `JURISDICCION` no es una entidad: se mapea a `centro_costo_id` vía `_JURISDICCION_CENTRO_COSTO_MAP` en `gateway_mapper.py`. La VIEW `CTA_HOJA_DE_RUTA` y la tabla `RETENCIONES` son estructuras obsoletas: el código usa las tablas reales (`ORDEN_PAGO_IMPUT`, `REG_COMP`, `ORDEN_PAGO_DEDUC`).
 
 > Mapeo completo RAFAM ↔ Paxapos: ver [docs/rafam_paxapos_equivalencias.md](../../docs/rafam_paxapos_equivalencias.md) (fuente de verdad).
 
@@ -96,7 +98,7 @@ src/models.py        → dataclasses puros (Checkpoint, EntityConfig, SyncResult
 src/db.py            → factory de engines SQLAlchemy
 src/source_repository.py → construcción de queries SQLAlchemy
 src/sync_engine.py   → lógica incremental (checkpoints, cursores)
-src/exporter.py      → destinos de salida (CSV, Gateway, Migrator, Noop)
+src/exporter.py      → salida al migrator Paxapos (único destino; orquesta mappers + HTTP + links)
 src/gateway_mapper.py → transformación RAFAM → formato Paxapos
 src/checkpoint_store.py → persistencia ORM de checkpoints
 src/entity_link_store.py → vínculos RAFAM_ID ↔ Paxapos_ID
@@ -117,10 +119,12 @@ src/entity_link_store.py → vínculos RAFAM_ID ↔ Paxapos_ID
 | Grupo | Variables | Requeridas para |
 |---|---|---|
 | App | `APP_ENV`, `LOG_LEVEL` | Todos los perfiles |
-| SOURCE RAFAM | `RAFAM_SOURCE_BACKEND`, `RAFAM_SOURCE_HOST`, `RAFAM_SOURCE_PORT`, `RAFAM_SOURCE_SERVICE`, `RAFAM_SOURCE_USER`, `RAFAM_SOURCE_PASSWORD`, `RAFAM_SOURCE_SQLITE_DB_PATH` | Export CSV desde RAFAM y sync/import |
-| LOCAL state | `LOCAL_STATE_DB_PATH` | `main.py run/status/reset`; guarda checkpoints y links RAFAM->Paxapos |
-| DESTINATION Paxapos | `PAXAPOS_URL`, `PAXAPOS_TENANT`, `PAXAPOS_VERIFY_SSL`, `PAXAPOS_TIMEOUT_SECONDS`, `PAXAPOS_JWT`, `PAXAPOS_API_KEY` | Solo gateway/migrator Paxapos |
-| RAFAM en Paxapos | `PAXAPOS_RAFAM_IMPORT_PATH`, `PAXAPOS_RAFAM_SPEC_PATH`, `PAXAPOS_RAFAM_LOOKUPS_PATH`, `PAXAPOS_RAFAM_RESOLVER_MERCADERIA_PATH`, `PAXAPOS_RAFAM_DEFAULT_*_ID`, `RAFAM_SYNC_BATCH_DELAY_SECONDS` | Solo migrator Paxapos |
+| SOURCE RAFAM | `RAFAM_SOURCE_BACKEND`, `RAFAM_SOURCE_HOST`, `RAFAM_SOURCE_PORT`, `RAFAM_SOURCE_SERVICE`, `RAFAM_SOURCE_USER`, `RAFAM_SOURCE_PASSWORD`, `RAFAM_SOURCE_SQLITE_DB_PATH`, `ORACLE_CLIENT_DIR`/`ORACLE_CLIENT_LIB_DIR` | Export CSV desde RAFAM y sync/import |
+| LOCAL state | `LOCAL_STATE_DB_PATH`, `RAFAM_RUN_HISTORY_PATH` | `main.py run/status/reset`; guarda checkpoints, links RAFAM->Paxapos, retry queue e historial |
+| DESTINATION Paxapos | `PAXAPOS_URL`, `PAXAPOS_TENANT`, `PAXAPOS_VERIFY_SSL`, `PAXAPOS_TIMEOUT_SECONDS`, `PAXAPOS_API_KEY` | Solo migrator Paxapos |
+| RAFAM en Paxapos | `PAXAPOS_RAFAM_IMPORT_PATH`, `PAXAPOS_RAFAM_SPEC_PATH`, `PAXAPOS_RAFAM_LOOKUPS_PATH`, `PAXAPOS_RAFAM_RESOLVER_MERCADERIA_PATH`, `PAXAPOS_RAFAM_RESOLVER_GASTO_PATH`, `PAXAPOS_RAFAM_DEFAULT_TIPO_FACTURA_ID`, `PAXAPOS_RAFAM_DEFAULT_TIPO_PAGO_ID`, `RAFAM_SYNC_BATCH_DELAY_SECONDS`, `RAFAM_EJERCICIO_MIN`, `RAFAM_EXCLUDED_COD_PROV`, `RAFAM_STRICT_PARTIAL_ERRORS` | Solo migrator Paxapos |
+| Notificaciones | `NOTIFY_ENABLED`, `NOTIFY_SMTP_HOST`, `NOTIFY_SMTP_PORT`, `NOTIFY_SMTP_USER`, `NOTIFY_SMTP_PASSWORD`, `NOTIFY_FROM`, `NOTIFY_TO`, `NOTIFY_SUBJECT_PREFIX`, `NOTIFY_SMTP_TIMEOUT` | `main.py daily-report` y alertas de integridad |
+| Logs/Debug | `RAFAM_LOG_DIR`, `RAFAM_LOG_FILE`, `RAFAM_LOG_DISABLE`, `DUMP_PAYLOAD`, `DUMP_PAYLOAD_FORCE` | Opcionales |
 
 No agregar aliases ni fallbacks legacy a `DB_*`, `SQLITE_DB_PATH`, `CHECKPOINT_DB_PATH`, `ENTITY_LINK_DB_PATH`, `GATEWAY_*`, `MIGRATOR_*`, `LOCAL_CHECKPOINT_DB_PATH` ni `LOCAL_ENTITY_LINK_DB_PATH`. Si aparece un nombre viejo, migrarlo al nombre canónico y actualizar documentación/tests en el mismo cambio.
 
@@ -201,16 +205,17 @@ OC (compras_pedidos.id) ◄── account_gastos.pedido_id ── Gasto ◄─�
 #### Cadena de vínculos en RAFAM (fuente)
 
 ```
-CTA_COMPROB ◄──(REG_COMP)──► ORDEN_COMPRA
+CTA_COMPROB ◄──(REG_COMP)──► ORDEN_COMPRA / SOLIC_GASTOS
       ▲
-      │ (CTA_HOJA_DE_RUTA: vista desnormalizada)
+      │ (ORDEN_PAGO_IMPUT: bridge físico OP ↔ comprobante)
       │
-  ORDEN_PAGO ──► RETENCIONES (EJERCICIO + NRO_CANCE = ORDEN_PAGO.EJERCICIO + NRO_OP)
+  ORDEN_PAGO ──► ORDEN_PAGO_DEDUC (EJERCICIO + NRO_OP + CODIGO_DEDUC)
 ```
 
-- **CTA_COMPROB ↔ ORDEN_COMPRA:** vía `REG_COMP`. Permite setear `account_gastos.pedido_id`.
-- **ORDEN_PAGO ↔ CTA_COMPROB:** se lee desde `CTA_HOJA_DE_RUTA` para armar el HABTM `account_egresos_gastos`.
-- **RETENCIONES ↔ ORDEN_PAGO:** match directo por `EJERCICIO + NRO_CANCE`. El tipo de retención se resuelve por substring sobre `DEDUCCIONES.DESCRIPCION`.
+- **CTA_COMPROB ↔ ORDEN_COMPRA/SOLIC_GASTOS:** vía `REG_COMP` (por `EJERCICIO + NRO_REG_COMP`). Permite setear `account_gastos.pedido_id`.
+- **ORDEN_PAGO ↔ CTA_COMPROB:** vía `ORDEN_PAGO_IMPUT` (PK incluye `NRO_REG_COMP+TIPO_COMPROB+NRO_COMPROB+COD_PROV`); la OC canónica se resuelve por el mismo `NRO_REG_COMP` imputado (NO usar `ORDEN_PAGO.NRO_CANCE` como puente).
+- **Retenciones ↔ ORDEN_PAGO:** tabla `ORDEN_PAGO_DEDUC`, match por `EJERCICIO + NRO_OP`. El tipo de retención se resuelve contra el catálogo remoto `tipos_retencion` (con alias por `DEDUCCIONES.DESCRIPCION`).
+- **Obsoletas (NO usar):** la VIEW `CTA_HOJA_DE_RUTA` y la tabla `RETENCIONES`.
 
 #### Colisión de columnas en JOINs
 
@@ -226,20 +231,23 @@ Cada entidad tiene una tabla `link_<entity>` en SQLite con columnas base (`sourc
 
 | Entidad | Extras | source_key format |
 |---|---|---|
-| `proveedores` | `cuit`, `cod_estado` | `"<COD_PROV>"` |
-| `orden_compra` | `fech_confirm`, `estado_oc`, `cod_prov`, `importe_tot`, `gasto_refs`, `gasto_linked_refs` | `json({"ejercicio": N, "nro_oc": N, "uni_compra": N})` |
-| `gasto` | `estado_comprob`, `importe_tot`, `cod_prov` | `json({"ejercicio": N, "nro_reg_comp": N})` |
-| `orden_pago` | `estado_op`, `confirmado`, `fech_confirm`, `importe_total` | `json({"ejercicio": N, "nro_op": N})` |
-| `retencion` | `cod_deduc`, `importe` | `json({"ejercicio": N, "nro_cance": N, "cod_deduc": N})` |
+| `proveedores` | `cuit`, `cod_estado`, `payload_hash`, `content_hash`, `deleted_at` | `"<COD_PROV>"` |
+| `orden_compra` | `fech_confirm`, `estado_oc`, `cod_prov`, `importe_tot`, `gasto_refs`, `gasto_linked_refs`, `paxapos_gasto_ids`, `has_op`, `payload_hash`, `deleted_at` | `json({"ejercicio": N, "nro_oc": N, "uni_compra": N})` |
+| `gasto` | `estado_solic`, `importe_tot`, `cod_prov`, `pedido_id`, `nro_comprobante`, `payload_hash`, `deleted_at` | `json({"deleg_solic": N, "ejercicio": N, "nro_solic": N})` (+ alias `json({"rafam_ref": "SG-..."})`) |
+| `orden_pago` | `estado_op`, `confirmado`, `fech_confirm`, `importe_total`, `deleted_at` | `json({"ejercicio": N, "nro_op": N})` |
+| `retenciones` | `fingerprint`, `retenciones_count`, `deleted_at` | `json({"ejercicio": N, "nro_op": N})` (1 fila por OP) |
+| `clasificacion` | `denominacion`, `nivel`, `parent_codigo`, `deleted_at` | código del clasificador |
+| `mercaderia` / `unidad_medida` / `tipo_*` | catálogos auxiliares | ver `DEFAULT_LINK_SCHEMAS` en `src/entity_link_store.py` |
 
-Los extras permiten detectar cambios de estado entre corridas (ej: `estado_oc` guardado vs actual).
+La fuente de verdad del esquema es `DEFAULT_LINK_SCHEMAS` (`src/entity_link_store.py`). Los extras permiten detectar cambios de estado/contenido entre corridas (ej: `estado_oc` o `payload_hash` guardado vs actual).
 
 ### 3.8 Detección de cambio de estado
 
-Implementado para Órdenes de Compra (Sprint 1):
-- `R→N` (Registrada→Normal): la OC aparece con estado N, no existía en link_store → se crea.
-- `N→A` (Normal→Anulada): la OC existía con `estado_oc=N` en link_store, ahora viene con `A` → se envía con `estado_aprobacion: 4`.
-- `pending_reprocess_days=30`: re-consulta OCs con estado N de los últimos 30 días para detectar transiciones.
+Implementado para Órdenes de Compra:
+- OC con estado R sin link previo → se crea en Paxapos.
+- `R→A` (Registrada→Anulada): la OC existía con `estado_oc=R` en link_store, ahora viene con `A` → se envía con `Pedido.deleted = 1` (soft-delete), salvo que tenga OP asociada (`has_op`), en cuyo caso se conserva.
+- Cambio de contenido con mismo estado R: se detecta por `payload_hash` y se re-envía con upsert.
+- `pending_reprocess_days=30`: re-consulta OCs recientes para detectar transiciones.
 
 NO implementado para Gastos ni OPs (el endpoint no soporta anulación ni update post-creación).
 

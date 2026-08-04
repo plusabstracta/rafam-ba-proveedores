@@ -57,7 +57,9 @@ def _exclusive_run_lock():
     automaticamente al cerrar el FD (fin de proceso o context exit).
     """
     _LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
-    fd = open(_LOCK_PATH, "w")
+    # "a" y NO "w": abrir con "w" trunca el archivo ANTES de intentar el flock,
+    # asi que un contendiente que pierde el lock borraba el PID del dueno.
+    fd = open(_LOCK_PATH, "a")
     try:
         try:
             fcntl.flock(fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -309,7 +311,16 @@ def _sync_entity(
             # Watermark incremental: persistir progreso por batch para que un
             # crash a mitad de corrida no rebobine al inicio. Solo cuando la
             # entidad tiene cursor real (no full_load) y no estamos en dry-run.
-            if not dry_run and not cfg.full_load and (bid is not None or bts is not None):
+            # Si YA fallo un batch en esta corrida, el watermark se congela:
+            # avanzarlo con batches posteriores dejaria el cursor por encima de
+            # las filas del batch fallido y no volverian a entrar nunca (el
+            # reintento del receptor solo cubre filas que llegaron a responder).
+            if (
+                not dry_run
+                and not cfg.full_load
+                and failed_batches == 0
+                and (bid is not None or bts is not None)
+            ):
                 try:
                     engine.advance_partial(entity, bid, bts, len(batch))
                 except Exception as cp_exc:  # pragma: no cover - defensive
@@ -587,7 +598,7 @@ def _cmd_sync_changes_locked(args) -> None:
 
     entities = [args.entity] if args.entity else ["proveedores", "oc_items"]
     link_store = EntityLinkStore()
-    exporter = build_exporter(args.export, dry_run=args.dry_run)
+    exporter = build_exporter(dry_run=args.dry_run)
 
     failed = False
     try:
@@ -923,12 +934,6 @@ def main() -> None:
 
     sync_p = sub.add_parser("sync-changes", help="Detecta y re-envía registros modificados en RAFAM")
     sync_p.add_argument("--entity", choices=["proveedores", "oc_items"], help="Filtrar por entidad")
-    sync_p.add_argument(
-        "--export",
-        choices=["csv", "noop", "gateway", "migrator"],
-        default="migrator",
-        help="Destino de salida (default: migrator)",
-    )
     sync_p.add_argument(
         "--dry-run",
         action="store_true",

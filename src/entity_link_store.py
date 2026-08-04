@@ -171,9 +171,15 @@ class EntityLinkStore:
         return dict(row)
 
     def count(self, entity: str) -> int:
-        """Cantidad de links migrados para una entidad (para reconciliacion F4)."""
+        """Cantidad de links migrados ACTIVOS para una entidad (reconciliacion F4).
+
+        Excluye soft-deleted (deleted_at): contarlos inflaba migrated_count y
+        ocultaba drift real contra el origen.
+        """
         table = self._ensure_table(entity)
-        row = self._conn.execute(f"SELECT COUNT(*) AS n FROM [{table}]").fetchone()
+        row = self._conn.execute(
+            f"SELECT COUNT(*) AS n FROM [{table}] WHERE deleted_at IS NULL OR deleted_at = ''"
+        ).fetchone()
         return int(row["n"]) if row else 0
 
     def mark_oc_has_op(self, source_key: str) -> None:

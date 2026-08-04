@@ -45,12 +45,13 @@ dependencia (FK):
 | --- | --- | --- | --- | --- |
 | 1 | `proveedores` | `make migrate-proveedores` | `proveedores[]` | Crea/actualiza proveedores. |
 | 2 | `oc_items` | `make migrate-oc` | `ordenes_compra[]` | Arma cabecera de OC + items embebidos. |
-| 3 | `solic_gastos` | `make migrate-facturas` | `gastos[]` | Crea gastos desde `SOLIC_GASTOS` + `CTA_COMPROB` (via `REG_COMP`), resolviendo `pedido_id` contra OCs migradas. |
+| 3 | `solic_gastos` | `make migrate-facturas` | `gastos[]` | Enriquecimiento UPDATE-ONLY: completa campos vacios de gastos que Paxapos ya creo (via `resolver_gasto`), desde `SOLIC_GASTOS` + `CTA_COMPROB` (via `REG_COMP`), resolviendo `pedido_id` contra OCs migradas. No crea gastos sueltos. |
 | 4 | `orden_pago` | `make migrate-op` | `ordenes_pago[]` + `gastos[]` + retenciones | Crea egresos, vincula gastos y embebe retenciones (`ORDEN_PAGO_DEDUC`). |
 | 5 | `retenciones` | `make migrate-retenciones` | `retenciones[]` | Reenvia retenciones (`ORDEN_PAGO_DEDUC`, 1:1 por `NRO_OP`) de OPs ya migradas. |
 
-La entidad `orden_compra` fue eliminada: queda reemplazada por `oc_items`, que manda la OC
-completa con items. Las retenciones provienen de `ORDEN_PAGO_DEDUC` (no de la tabla `RETENCIONES`).
+La entidad `orden_compra` quedo fuera del pipeline por defecto (el exporter la trata como
+deshabilitada: warning + no-op): la reemplaza `oc_items`, que manda la OC completa con items.
+Las retenciones provienen de `ORDEN_PAGO_DEDUC` (no de la tabla `RETENCIONES`).
 Ver [docs/rafam_paxapos_equivalencias.md](docs/rafam_paxapos_equivalencias.md).
 
 ## Requisitos
@@ -110,7 +111,6 @@ PAXAPOS_RAFAM_IMPORT_PATH=rafam/migracion/importar.json
 PAXAPOS_RAFAM_SPEC_PATH=rafam/migracion/spec.json
 PAXAPOS_RAFAM_LOOKUPS_PATH=rafam/migracion/lookups.json
 PAXAPOS_RAFAM_RESOLVER_MERCADERIA_PATH=rafam/migracion/resolver_mercaderia.json
-PAXAPOS_RAFAM_DEFAULT_UNIDAD_ID=1
 PAXAPOS_RAFAM_DEFAULT_TIPO_FACTURA_ID=
 PAXAPOS_RAFAM_DEFAULT_TIPO_PAGO_ID=10
 RAFAM_SYNC_BATCH_DELAY_SECONDS=0
@@ -129,8 +129,7 @@ Con los snapshots incluidos o generados en `output/rafam_ultimos_3_meses`:
 make load-dev CSV_DIR=output/rafam_ultimos_3_meses DEV_DB=state/dev_rafam.db
 ```
 
-El loader toma el CSV mas reciente de cada entidad, normaliza columnas de joins y crea una vista
-`CTA_HOJA_DE_RUTA` derivada cuando hace falta.
+El loader toma el CSV mas reciente de cada entidad y normaliza columnas de joins.
 
 ### 3. Inspeccionar estado y resetear
 
@@ -253,7 +252,6 @@ PAXAPOS_RAFAM_LOOKUPS_PATH=rafam/migracion/lookups.json
 PAXAPOS_RAFAM_RESOLVER_MERCADERIA_PATH=rafam/migracion/resolver_mercaderia.json
 
 # Confirmar IDs con make migrator-lookups antes de importar.
-PAXAPOS_RAFAM_DEFAULT_UNIDAD_ID=1
 PAXAPOS_RAFAM_DEFAULT_TIPO_FACTURA_ID=
 PAXAPOS_RAFAM_DEFAULT_TIPO_PAGO_ID=10
 
@@ -488,35 +486,8 @@ crontab -e
 Y agregar las siguientes líneas:
 ```cron
 # Detección de cambios y sincronización semanal (Todos los domingos a las 03:00 y 04:00 AM)
-0 3 * * 0 cd "$RAFAM_DIR" && /usr/bin/flock -n state/sync_changes_prov.lock .venv/bin/python main.py sync-changes --entity proveedores --export migrator
-0 4 * * 0 cd "$RAFAM_DIR" && /usr/bin/flock -n state/sync_changes_oc.lock .venv/bin/python main.py sync-changes --entity oc_items --export migrator
-```
-
-## Modo gateway directo legacy
-
-El exporter `gateway` existe para proveedores y usa endpoints JSON directos de Paxapos. Es util para
-mantenimiento puntual, pero el flujo productivo recomendado es `--export migrator`.
-
-Variables necesarias:
-
-```dotenv
-PAXAPOS_URL=https://proveedores.madariaga.gob.ar
-PAXAPOS_TENANT=madariaga
-PAXAPOS_JWT=<jwt>
-PAXAPOS_PROVEEDORES_ENDPOINT=account/proveedores.json
-PAXAPOS_PROVEEDORES_UPDATE_ENDPOINT=account/proveedores/edit/{id}.json
-```
-
-Crear solo proveedores nuevos:
-
-```bash
-.venv/bin/python main.py run --entity proveedores --export gateway
-```
-
-Actualizar proveedores ya vinculados localmente:
-
-```bash
-.venv/bin/python main.py run --entity proveedores --export gateway --force-update
+0 3 * * 0 cd "$RAFAM_DIR" && /usr/bin/flock -n state/sync_changes_prov.lock .venv/bin/python main.py sync-changes --entity proveedores
+0 4 * * 0 cd "$RAFAM_DIR" && /usr/bin/flock -n state/sync_changes_oc.lock .venv/bin/python main.py sync-changes --entity oc_items
 ```
 
 ## Referencia rapida de comandos
@@ -559,7 +530,7 @@ BATCH=500 LIMIT=100 CSV_DIR=output/rafam_ultimos_3_meses DEV_DB=state/dev_rafam.
 | `state/dev_rafam.db` | Snapshot SQLite de RAFAM para desarrollo. |
 | `state/checkpoint.db` | Checkpoints y vinculos RAFAM -> Paxapos. |
 | `state/migrator.lock` | Lock de corridas concurrentes (migrator). |
-| `state/prov.lock`, `oc.lock`, `sg.lock`, `op.lock`, `ret.lock` | Locks de cron por entidad. |
+| `state/locks/pipeline.lock`, `daily_report.lock`, `integrity.lock`, `<entidad>.lock` | Locks de cron (flock) por job/entidad. |
 | `output/rafam_ultimos_3_meses/*.csv` | Snapshots de RAFAM (fuente para dev offline). |
 | `logs/rafam-{entidad}-YYYY-MM.log` | Logs rotativos mensuales por entidad (auto-generados). |
 

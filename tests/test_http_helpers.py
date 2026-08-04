@@ -45,7 +45,7 @@ def _req(url: str = "https://example/x") -> request.Request:
 
 class TestHttpRetries:
     def test_succeeds_first_try(self):
-        with patch("src.exporter.request.urlopen", return_value=_FakeResponse()) as mock:
+        with patch("src.http_client._open_request", return_value=_FakeResponse()) as mock:
             with _http_request_with_retries(_req(), timeout=5):
                 pass
             assert mock.call_count == 1
@@ -59,7 +59,7 @@ class TestHttpRetries:
                 raise v
             return v
 
-        with patch("src.exporter.request.urlopen", side_effect=side), patch(
+        with patch("src.http_client._open_request", side_effect=side), patch(
             "src.exporter.time.sleep"
         ):
             with _http_request_with_retries(_req(), timeout=5, max_attempts=3, base_backoff=0.01):
@@ -76,7 +76,7 @@ class TestHttpRetries:
                 raise v
             return v
 
-        with patch("src.exporter.request.urlopen", side_effect=side), patch(
+        with patch("src.http_client._open_request", side_effect=side), patch(
             "src.exporter.time.sleep"
         ):
             with _http_request_with_retries(_req(), timeout=5, max_attempts=3, base_backoff=0.01):
@@ -85,7 +85,7 @@ class TestHttpRetries:
 
     def test_does_not_retry_on_400(self):
         exc = error.HTTPError("u", 400, "bad", {}, io.BytesIO(b""))
-        with patch("src.exporter.request.urlopen", side_effect=exc), patch(
+        with patch("src.http_client._open_request", side_effect=exc), patch(
             "src.exporter.time.sleep"
         ):
             with pytest.raises(error.HTTPError):
@@ -93,7 +93,7 @@ class TestHttpRetries:
 
     def test_does_not_retry_on_401(self):
         exc = error.HTTPError("u", 401, "unauth", {}, io.BytesIO(b""))
-        with patch("src.exporter.request.urlopen", side_effect=exc), patch(
+        with patch("src.http_client._open_request", side_effect=exc), patch(
             "src.exporter.time.sleep"
         ):
             with pytest.raises(error.HTTPError):
@@ -101,7 +101,7 @@ class TestHttpRetries:
 
     def test_raises_after_max_attempts(self):
         exc = error.URLError("net down")
-        with patch("src.exporter.request.urlopen", side_effect=exc), patch(
+        with patch("src.http_client._open_request", side_effect=exc), patch(
             "src.exporter.time.sleep"
         ):
             with pytest.raises(error.URLError):

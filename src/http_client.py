@@ -19,11 +19,32 @@ import os
 import random
 import ssl
 import time
+from typing import Any
 from urllib import error, parse, request
 
-from .utils import env_bool, redact_payload_for_dump
+from .utils import env_verify_ssl, redact_payload_for_dump
 
 logger = logging.getLogger(__name__)
+
+
+class _NoRedirectHandler(request.HTTPRedirectHandler):
+    """Convierte cualquier redirect (3xx) en HTTPError.
+
+    El handler por defecto de urllib sigue redirects convirtiendo POST en GET
+    sin body y reenviando TODOS los headers (incluida X-Api-Key) al Location,
+    aunque sea otro host. Para un import de datos eso significa: credencial
+    filtrada + un GET 200 que el caller interpreta como "batch importado" y
+    avanza el checkpoint sin haber migrado nada. Preferimos fallar ruidoso.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: N802
+        raise error.HTTPError(
+            req.full_url,
+            code,
+            f"Redirect a {newurl} bloqueado: revisar PAXAPOS_URL (esquema/slash final)",
+            headers,
+            fp,
+        )
 
 # Errores HTTP transitorios que vale la pena reintentar.
 RETRYABLE_HTTP_STATUS = frozenset({408, 425, 429, 500, 502, 503, 504})
@@ -62,8 +83,8 @@ class PaxaposHttpClient:
         if not self._api_key:
             raise ValueError("Falta PAXAPOS_API_KEY en .env")
 
-        self._timeout = timeout if timeout is not None else int(os.getenv("PAXAPOS_TIMEOUT_SECONDS", "20"))
-        self._verify_ssl = verify_ssl if verify_ssl is not None else env_bool("PAXAPOS_VERIFY_SSL", default="true")
+        self._timeout = timeout if timeout is not None else _env_timeout_seconds()
+        self._verify_ssl = verify_ssl if verify_ssl is not None else env_verify_ssl()
         self._max_retries = max_retries
         self._base_backoff = base_backoff
 
@@ -199,6 +220,20 @@ class PaxaposHttpClient:
 
 # ââ Retry engine (standalone function, testeable sin instanciar client) ââ
 
+def _open_request(
+    req: request.Request,
+    *,
+    timeout: float,
+    ssl_context: ssl.SSLContext | None = None,
+):
+    """Abre el request con un opener que NO sigue redirects (seam de tests)."""
+    handlers: list = [_NoRedirectHandler()]
+    if ssl_context is not None:
+        handlers.append(request.HTTPSHandler(context=ssl_context))
+    opener = request.build_opener(*handlers)
+    return opener.open(req, timeout=timeout)
+
+
 def http_request_with_retries(
     req: request.Request,
     *,
@@ -220,7 +255,7 @@ def http_request_with_retries(
     last_exc: Exception | None = None
     for attempt in range(1, max_attempts + 1):
         try:
-            return request.urlopen(req, timeout=timeout, context=ssl_context)
+            return _open_request(req, timeout=timeout, ssl_context=ssl_context)
         except error.HTTPError as exc:
             # Solo reintentamos status transitorios. 4xx no transitorios suben directo.
             if exc.code not in RETRYABLE_HTTP_STATUS or attempt == max_attempts:
@@ -277,10 +312,26 @@ def _resolve_endpoint(endpoint_env: str, default_endpoint: str) -> str:
 
 # ââ Env helpers ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 
+def _env_timeout_seconds() -> int:
+    """PAXAPOS_TIMEOUT_SECONDS tolerante: acepta enteros o floats, y ante un
+    valor invalido usa el default con warning en vez de reventar el arranque."""
+    raw = os.getenv("PAXAPOS_TIMEOUT_SECONDS", "20").strip()
+    try:
+        return max(1, int(float(raw)))
+    except (TypeError, ValueError):
+        logger.warning("PAXAPOS_TIMEOUT_SECONDS=%r invalido; usando 20s", raw)
+        return 20
+
+
 def _env_paxapos_url() -> str:
     base_url = os.getenv("PAXAPOS_URL", "").strip().rstrip("/")
     if not base_url:
         raise ValueError("Falta PAXAPOS_URL en .env para destino Paxapos")
+    if base_url.startswith("http://"):
+        logger.warning(
+            "PAXAPOS_URL usa http:// (sin TLS): la API key viaja en texto plano. "
+            "Usar https:// en produccion."
+        )
     return base_url
 
 

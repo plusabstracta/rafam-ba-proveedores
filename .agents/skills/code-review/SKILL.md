@@ -6,9 +6,11 @@ argument-hint: "<PR URL, diff, or file path>"
 
 # /code-review
 
-> If you see unfamiliar placeholders or need to check which tools are connected, see [CONNECTORS.md](../../CONNECTORS.md).
-
 Review code changes with a structured lens on security, performance, correctness, and maintainability.
+
+> Contexto de este repo (RAFAM → Paxapos sync): prioriza idempotencia (¿re-enviar duplica?),
+> checkpoints (¿avanza el watermark con errores?), manejo de errores parciales HTTP 207,
+> y el invariante "solo stdlib para HTTP (urllib)". Ver `.github/instructions/*.instructions.md`.
 
 ## Usage
 
@@ -100,15 +102,15 @@ If no specific file or URL is provided, ask what to review.
 
 ## If Connectors Available
 
-If **~~source control** is connected:
+If a source-control connector (e.g. GitHub) is connected:
 - Pull the PR diff automatically from the URL
 - Check CI status and test results
 
-If **~~project tracker** is connected:
+If a project tracker is connected:
 - Link findings to related tickets
 - Verify the PR addresses the stated requirements
 
-If **~~knowledge base** is connected:
+If a knowledge base is connected:
 - Check changes against team coding standards and style guides
 
 ## Tips

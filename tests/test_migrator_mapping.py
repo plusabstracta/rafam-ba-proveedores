@@ -520,7 +520,9 @@ class TestWriteBatchOrdenPago:
         assert op["gasto_nro_comprobante"] == "0001-00012345"
         assert op["pedido_id"] == 789
         assert op["importe_total"] == 12100.00
-        assert op["importe_neto"] == 315814.05
+        # El importe_neto NO se envia a nivel de OP: viaja por comprobante
+        # (gasto). Ver comentario en OrdenPagoMapper.build_payload.
+        assert "importe_neto" not in op
         assert "neto_transferido" not in op["Egreso"]
         # Gasto enviado con todos los datos fiscales reales
         assert len(payload["gastos"]) == 1
@@ -968,134 +970,50 @@ class TestWriteBatchOcItems:
         assert "descripcion" not in item
         assert "observacion" not in item
 
-    def test_item_resuelve_por_api_y_guarda_link_sin_external_ref(self):
+    def test_item_envia_name_sin_llamar_resolver(self):
+        """El item viaja con `name` y la mercaderia la resuelve/crea Paxapos
+        (options.auto_create_mercaderia=true). El mapper NO llama al resolver
+        HTTP por item: eso generaba N llamadas por batch y duplicados si el
+        import posterior fallaba."""
+        exp = self._make_exporter_with_prov(dry_run=False, mercaderias=[])
+
+        def fail_if_called(url, payload):
+            raise RuntimeError("no debe llamar resolver durante el mapeo")
+
+        exp._post_json = fail_if_called
+
+        item = exp._map_oc_item(dict(zip(OC_COLUMNS, _oc_row(descripcion="Papel A4 resma 500 hojas"))))
+        assert item is not None
+        assert item["name"] == "Papel A4 resma 500 hojas"
+        assert "mercaderia_id" not in item
+        assert "mercaderia_external_ref" not in item
+
+    def test_payload_oc_items_declara_auto_create_mercaderia(self):
+        """El payload enviado incluye options.auto_create_mercaderia=true para
+        que el receptor cree/reutilice mercaderias por nombre en forma
+        idempotente (server-side)."""
         exp = self._make_exporter_with_prov(dry_run=False, mercaderias=[])
         rows = [_oc_row(descripcion="Papel A4 resma 500 hojas")]
 
         sent = []
-        resolver_calls = []
-
-        def fake_post(url, payload):
-            if url == exp._resolver_url:
-                resolver_calls.append(payload)
-                return {
-                    "resolver": {
-                        "success": True,
-                        "mercaderia_id": 188,
-                        "mode": "create_from_name",
-                        "barcode": "RAFAM-NAME:abc",
-                        "nombre_compra": "Papel A4 resma 500 hojas",
-                    }
-                }
-            sent.append(payload)
-            return {"stats": {"ordenes_compra": {"ok": 1, "error": 0}}}
-
-        exp._post_json = fake_post
+        exp._post_json = lambda url, p: (
+            sent.append(p)
+            or {"stats": {"ordenes_compra": {"ok": 1, "error": 0}}}
+        )
         exp.write_batch("oc_items", OC_COLUMNS, rows)
 
+        assert len(sent) == 1
+        assert sent[0]["options"]["auto_create_mercaderia"] is True
         item = sent[0]["ordenes_compra"][0]["items"][0]
-        assert item["mercaderia_id"] == 188
-        assert "name" not in item
-        assert "mercaderia_external_ref" not in item
-        assert "mercaderia_external_ref" not in resolver_calls[0]
-        assert resolver_calls[0]["item"]["name"] == "Papel A4 resma 500 hojas"
-        assert resolver_calls[0]["item"]["descripcion"] == "Papel A4 resma 500 hojas"
-        assert resolver_calls[0]["item"]["nombre_compra"] == "Papel A4 resma 500 hojas"
-        assert resolver_calls[0]["item"]["producto_nombre"] == "Papel A4 resma 500 hojas"
-        assert "barcode" not in resolver_calls[0]["item"]
-        link = exp._link_store.get_link("mercaderia", "name:papel a4 resma 500 hojas")
-        assert link["remote_id"] == "188"
-        assert link["barcode"] == "RAFAM-NAME:abc"
-        assert link["nombre_compra"] == "Papel A4 resma 500 hojas"
+        assert item["name"] == "Papel A4 resma 500 hojas"
+        assert "mercaderia_id" not in item
 
-        exp._mercaderia_resolved.clear()
-
-        def fail_if_called(url, payload):
-            raise RuntimeError("no debe llamar resolver")
-
-        exp._post_json = fail_if_called
-        remapped = exp._map_oc_item(dict(zip(OC_COLUMNS, _oc_row(descripcion="Papel A4 resma 500 hojas"))))
-        assert remapped is not None
-        assert remapped["mercaderia_id"] == 188
-
-    def test_mercaderia_rafam_autocreada_se_resuelve_por_api_sin_fallback(self):
-        with patch("src.exporter.fetch_migrator_lookups") as mock_lookups:
-            mock_lookups.return_value = {
-                "unidades_de_medida": [{"id": "1", "name": "Unidad"}],
-                "tipos_factura": [],
-                "tipos_de_pago": [],
-                "mercaderias": [
-                    {"id": "99", "nombre_compra": "Papel A4 [RAFAM-316ca8e3e0]", "barcode": "RAFAM:abc"},
-                ],
-            }
-            with patch.dict("os.environ", {
-                "PAXAPOS_URL": "https://example.com",
-                "PAXAPOS_TENANT": "test",
-                "PAXAPOS_API_KEY": "key",
-                "PAXAPOS_RAFAM_DEFAULT_UNIDAD_ID": "1",
-                "PAXAPOS_RAFAM_DEFAULT_TIPO_PAGO_ID": "4",
-                "LOCAL_STATE_DB_PATH": ":memory:",
-            }, clear=True):
-                exp = MigratorExporter(dry_run=False)
-
-        resolver_calls = []
-
-        def fake_post(url, payload):
-            resolver_calls.append(payload)
-            return {
-                "resolver": {
-                    "success": True,
-                    "mercaderia_id": 123,
-                    "mode": "create_from_name",
-                    "barcode": "RAFAM-NAME:def",
-                    "nombre_compra": "Papel A4",
-                }
-            }
-
-        exp._post_json = fake_post
-
-        item = exp._map_oc_item(dict(zip(OC_COLUMNS, _oc_row(descripcion="Papel A4"))))
-        assert item is not None
-        assert item["mercaderia_id"] == 123
-        assert "name" not in item
-        assert "mercaderia_external_ref" not in item
-        assert "mercaderia_external_ref" not in resolver_calls[0]
-        assert resolver_calls[0]["item"]["name"] == "Papel A4"
-        assert "barcode" not in resolver_calls[0]["item"]
-
-    def test_mercaderia_con_barcode_rafam_y_nombre_limpio_se_reutiliza(self):
-        exp = self._make_exporter_with_prov(
-            dry_run=False,
-            mercaderias=[{"id": "99", "nombre_compra": "Papel A4", "barcode": "RAFAM:abc"}],
-        )
-
-        def fail_if_called(url, payload):
-            raise RuntimeError("no debe llamar resolver")
-
-        exp._post_json = fail_if_called
-
-        item = exp._map_oc_item(dict(zip(OC_COLUMNS, _oc_row(descripcion="Papel A4"))))
-
-        assert item is not None
-        assert item["mercaderia_id"] == 99
-        link = exp._link_store.get_link("mercaderia", "name:papel a4")
-        assert link["barcode"] == "RAFAM:abc"
-        assert link["nombre_compra"] == "Papel A4"
-
-    def test_resolver_rechaza_nombre_generado_con_hash_rafam(self):
+    def test_item_name_se_trunca_a_255(self):
         exp = self._make_exporter_with_prov(dry_run=False, mercaderias=[])
-        exp._post_json = lambda url, payload: {
-            "resolver": {
-                "success": True,
-                "mercaderia_id": 123,
-                "mode": "create_deterministic",
-                "barcode": "RAFAM:def",
-                "nombre_compra": "Papel A4 [RAFAM-def]",
-            }
-        }
-
-        with pytest.raises(RuntimeError, match="nombre generado"):
-            exp._map_oc_item(dict(zip(OC_COLUMNS, _oc_row(descripcion="Papel A4"))))
+        descripcion = "X" * 300
+        item = exp._map_oc_item(dict(zip(OC_COLUMNS, _oc_row(descripcion=descripcion))))
+        assert item is not None
+        assert item["name"] == "X" * 255
 
     def test_item_tiene_campos_basicos(self):
         exp = self._make_exporter_with_prov()

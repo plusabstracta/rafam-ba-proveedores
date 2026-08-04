@@ -27,7 +27,23 @@ SCHEMA = "OWNER_RAFAM"
 # ademas una excepcion de cruce fiscal: entidades del ejercicio anterior
 # (min-1) confirmadas ya en el ejercicio nuevo (FECH_CONFIRM >= min-01-01)
 # tambien se migran.
-_EJERCICIO_MIN = int(os.getenv("RAFAM_EJERCICIO_MIN", "2026")) or None
+def _parse_ejercicio_min() -> int | None:
+    """Parseo tolerante: un valor invalido en el env no debe romper el import
+    de este modulo (lo importa hasta `main.py status`). Vacio/0 -> sin filtro."""
+    raw = os.getenv("RAFAM_EJERCICIO_MIN", "2026").strip()
+    if not raw:
+        return None
+    try:
+        return int(raw) or None
+    except ValueError:
+        import logging
+        logging.getLogger(__name__).warning(
+            "RAFAM_EJERCICIO_MIN=%r invalido; usando 2026", raw
+        )
+        return 2026
+
+
+_EJERCICIO_MIN = _parse_ejercicio_min()
 
 ENTITY_CONFIGS: dict[str, EntityConfig] = {
     "proveedores": EntityConfig(
@@ -109,7 +125,8 @@ ENTITY_CONFIGS: dict[str, EntityConfig] = {
     # (INCISO, PAR_PRIN, PAR_PARC, PAR_SUBP, DENOMINACION) — ver
     # SourceRepository._build_clasificaciones_statement. Sin filtro de
     # ejercicio: es un catalogo atemporal. NO corre en el run por defecto
-    # (main.py: solo proveedores + oc_items); se invoca con --entity clasificaciones.
+    # (pipeline oficial: proveedores, oc_items, solic_gastos, orden_pago,
+    # retenciones); se invoca con --entity clasificaciones.
     "clasificaciones": EntityConfig(
         name="clasificaciones",
         table_name="GASTOS",

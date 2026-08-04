@@ -41,14 +41,27 @@ class SyncEngine:
         last_ts: Optional[datetime],
         count: int,
     ) -> None:
-        """Advance the checkpoint after a successful sync run."""
+        """Advance the checkpoint after a successful sync run.
+
+        El cursor es monotonico: solo avanza si el valor observado es mayor al
+        persistido. Sin esta guarda, una corrida cuyas unicas filas sean
+        reinyecciones viejas de la cola de reintentos rebobinaria el watermark
+        y la corrida siguiente re-escanearia (y re-enviaria) meses de datos.
+        """
         existing = self._store.get(entity)
+        new_id = existing.last_id
+        if last_id is not None and (existing.last_id is None or last_id > existing.last_id):
+            new_id = last_id
+        new_ts = existing.last_ts
+        norm_existing_ts = self._normalize_utc(existing.last_ts)
+        norm_new_ts = self._normalize_utc(last_ts)
+        if norm_new_ts is not None and (norm_existing_ts is None or norm_new_ts > norm_existing_ts):
+            new_ts = norm_new_ts
         self._store.save(
             Checkpoint(
                 entity=entity,
-                # Only advance if a new value was observed; keep old value otherwise.
-                last_id=last_id if last_id is not None else existing.last_id,
-                last_ts=last_ts if last_ts is not None else existing.last_ts,
+                last_id=new_id,
+                last_ts=new_ts,
                 last_run=datetime.now(timezone.utc),
                 records_sent=count,
                 status="ok",

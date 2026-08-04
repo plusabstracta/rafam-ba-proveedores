@@ -32,7 +32,7 @@ help:
 	@echo "  make setup              Crea .venv, instala deps y genera .env si no existe"
 	@echo "  make load-dev           Carga snapshot CSV a SQLite local (solo DEV)"
 	@echo "  make update-mapping     Regenera docs/field_mapping.md desde la DB (SQLite o Oracle)"
-	@echo "  make explore-schema     Genera docs/rafam_schema.md desde Oracle"
+	@echo "  make explore-schema     Genera docs/rafam_schema_and_joins.md desde Oracle"
 	@echo "  make dump-full-schema   Genera output/rafam_context/full_schema.{md,json} de toda la DB"
 	@echo "  make explore-clasificaciones  Detecta tablas de clasificaciones/partidas (inciso/par_prin/par_parc)"
 	@echo "  make extract-cat-uni-med  Extrae CAT_UNI_MED de Oracle a docs/cat_uni_med.md"
@@ -169,10 +169,10 @@ migrate-retenciones-dry:
 
 # Detección de cambios (Updates por Hash)
 sync-proveedores:
-	$(PY) main.py sync-changes --entity proveedores --export migrator $(if $(BACKFILL),--backfill-only,) $(if $(DRY),--dry-run,)
+	$(PY) main.py sync-changes --entity proveedores $(if $(BACKFILL),--backfill-only,) $(if $(DRY),--dry-run,)
 
 sync-oc:
-	$(PY) main.py sync-changes --entity oc_items --export migrator $(if $(BACKFILL),--backfill-only,) $(if $(DRY),--dry-run,)
+	$(PY) main.py sync-changes --entity oc_items $(if $(BACKFILL),--backfill-only,) $(if $(DRY),--dry-run,)
 
 sync-all: sync-proveedores sync-oc
 

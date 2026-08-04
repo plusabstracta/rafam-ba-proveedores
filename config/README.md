@@ -3,23 +3,16 @@
 Esta carpeta contiene las plantillas de configuración para los distintos
 componentes del pipeline RAFAM → Paxapos.
 
-## Archivos
+## Configuración de notificaciones
 
-### `notify.env.example`
-Plantilla de configuración para el sistema de **notificaciones por email**.
-
-Contiene todas las variables de entorno necesarias para que `check_integrity.py`
-envíe alertas automáticas por email cuando detecta anomalías.
+Las variables `NOTIFY_*` viven en el `.env` del proyecto (plantilla:
+`.env.example`, sección NOTIFICACIONES). No hay un archivo de env separado
+en esta carpeta.
 
 **Setup:**
-1. Copiar los valores de `notify.env.example` al archivo `.env` del proyecto
-2. Reemplazar `tu_usuario@gnucleo.net` y `tu_contraseña_aqui` con credenciales reales
+1. Completar la sección `NOTIFY_*` del `.env` del proyecto
+2. Reemplazar usuario y contraseña SMTP con credenciales reales
 3. Completar `NOTIFY_TO` con los destinatarios de las alertas
-
-```bash
-# Ver las variables disponibles
-cat config/notify.env.example
-```
 
 ## Variables de entorno de notificaciones
 

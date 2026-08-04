@@ -22,16 +22,29 @@ fi
 #   KEY=valor
 # El valor entre comillas se toma tal cual; cualquier comentario inline
 # posterior a las comillas se ignora (NO debe filtrarse al schedule del cron).
+# WHITELIST: solo se aceptan las 3 claves de schedule. Un cron.conf con una
+# línea PROJECT_DIR=... o RUN=... (por error o merge) redefiniría variables
+# internas del script y corrompería el crontab instalado.
+_assign_schedule() {
+    case "$1" in
+        PIPELINE_SCHEDULE|DAILY_REPORT_SCHEDULE|INTEGRITY_SCHEDULE)
+            declare -g "$1=$2"
+            ;;
+        *)
+            echo "⚠️  cron.conf: clave '$1' ignorada (solo se aceptan *_SCHEDULE)" >&2
+            ;;
+    esac
+}
 while IFS= read -r line || [[ -n "$line" ]]; do
     # Ignorar líneas vacías y comentarios de línea completa
     [[ -z "${line//[[:space:]]/}" ]] && continue
     [[ "$line" =~ ^[[:space:]]*# ]] && continue
     # KEY="valor entre comillas"  (el comentario inline queda fuera de la captura)
     if [[ "$line" =~ ^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*)=\"([^\"]*)\" ]]; then
-        declare "${BASH_REMATCH[1]}=${BASH_REMATCH[2]}"
+        _assign_schedule "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
     # KEY=valor  (sin comillas: se corta en el primer espacio o '#')
     elif [[ "$line" =~ ^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*)=([^[:space:]#]+) ]]; then
-        declare "${BASH_REMATCH[1]}=${BASH_REMATCH[2]}"
+        _assign_schedule "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
     fi
 done < "$PROJECT_DIR/cron.conf"
 
@@ -43,9 +56,23 @@ done < "$PROJECT_DIR/cron.conf"
 : "${DAILY_REPORT_SCHEDULE:=55 23 * * *}"
 : "${INTEGRITY_SCHEDULE:=0 2 * * *}"
 
-# Quitar entradas previas de este proyecto (por PROJECT_DIR) y registrar
+# Quitar entradas previas de este proyecto (por PROJECT_DIR) y registrar.
+# IMPORTANTE: distinguir "sin crontab" (OK, se arranca vacío) de un fallo real
+# de `crontab -l`. Si el fallo se silenciara, el `crontab "$TMP"` de abajo
+# REEMPLAZARÍA el crontab completo del usuario solo con nuestras 3 entradas.
 TMP=$(mktemp)
-( crontab -l 2>/dev/null | grep -v "$PROJECT_DIR" || true ) > "$TMP"
+CRON_CURRENT=""
+if ! CRON_CURRENT=$(crontab -l 2>&1); then
+    if ! grep -qi "no crontab" <<< "$CRON_CURRENT"; then
+        echo "❌ Error leyendo el crontab actual (no se toca nada): $CRON_CURRENT" >&2
+        rm -f "$TMP"
+        exit 1
+    fi
+    CRON_CURRENT=""
+fi
+# grep -F: PROJECT_DIR es un path literal, no una regex (los '.' matcheaban
+# cualquier caracter y podían borrar líneas de otros proyectos).
+( grep -vF -- "$PROJECT_DIR" <<< "$CRON_CURRENT" || true ) > "$TMP"
 
 # ── Pipeline completo cada 10 min: todas las entidades en orden, sin mail ──
 # run_entity.sh all -> main.py run (proveedores -> oc_items -> solic_gastos
@@ -57,7 +84,9 @@ DAILY_LOG="$LOG_DIR/daily_report.log"
 echo "$DAILY_REPORT_SCHEDULE flock -n $PROJECT_DIR/state/locks/daily_report.lock bash -c 'cd $PROJECT_DIR && $PY main.py daily-report >> $DAILY_LOG 2>&1'" >> "$TMP"
 
 # ── check_integrity (diario off-hours con lock) ──
-echo "$INTEGRITY_SCHEDULE flock -n $PROJECT_DIR/state/locks/integrity.lock $PY $INTEGRITY --apply >> $INTEGRITY_LOG 2>&1" >> "$TMP"
+# cd al proyecto: el script usa paths relativos (state/checkpoint.db); sin el
+# cd, corría contra una DB vacía en $HOME y la verificación era un no-op.
+echo "$INTEGRITY_SCHEDULE flock -n $PROJECT_DIR/state/locks/integrity.lock bash -c 'cd $PROJECT_DIR && $PY $INTEGRITY --apply >> $INTEGRITY_LOG 2>&1'" >> "$TMP"
 
 crontab "$TMP"
 rm -f "$TMP"

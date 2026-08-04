@@ -9,7 +9,9 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+from typing import Any
 
+from ..change_detection import compute_payload_hash
 from ..gateway_mapper import map_proveedor_migrator_row
 from ..utils import normalize_cuit
 
@@ -60,7 +62,6 @@ def build_payload(
     Returns:
         (payload, raw_by_source_key) o (None, {}) si no hay datos.
     """
-    from typing import Any
     proveedores, raw_by_source_key = map_rows(columns, rows, link_store=link_store)
 
     if not proveedores:
@@ -116,6 +117,14 @@ def persist_links(parsed: dict, raw_by_source_key: dict[str, dict], link_store) 
         cuit = normalize_cuit(raw.get("CUIT")) if raw else None
         cod_estado = str(raw.get("COD_ESTADO")) if raw and raw.get("COD_ESTADO") is not None else None
         content_hash = compute_content_hash(raw) if raw else None
+        # payload_hash: hash del payload SIN el id inyectado, para que
+        # sync-changes (que hashea map_proveedor_migrator_row crudo) pueda
+        # comparar y no re-envie todo en cada corrida.
+        payload_hash = None
+        if raw:
+            mapped = map_proveedor_migrator_row(raw)
+            if mapped:
+                payload_hash = compute_payload_hash(mapped.get("Proveedor", {}))
         link_store.save_link(
             entity="proveedores",
             source_key=str(source_key),
@@ -123,6 +132,7 @@ def persist_links(parsed: dict, raw_by_source_key: dict[str, dict], link_store) 
             cuit=cuit,
             cod_estado=cod_estado,
             content_hash=content_hash,
+            payload_hash=payload_hash,
         )
 
 
