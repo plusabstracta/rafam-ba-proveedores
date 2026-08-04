@@ -39,6 +39,15 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
+OFFICIAL_ENTITIES = (
+    "clasificaciones",
+    "proveedores",
+    "oc_items",
+    "solic_gastos",
+    "orden_pago",
+    "retenciones",
+)
+
 
 
 def _build_engine() -> SyncEngine:
@@ -233,8 +242,7 @@ def _sync_entity(
                 logger.warning(
                     "[%s] No se pudo leer la cola de reintentos: %s", entity, retry_exc
                 )
-        stmt = source_repo.build_statement(entity, cp, retry_keys)
-        result = source_repo.execute(stmt)
+        result = source_repo.fetch_entity(entity, cp, retry_keys)
         query_duration = time.monotonic() - t_query_start
         metrics["query_duration_secs"] = query_duration
 
@@ -469,7 +477,7 @@ def _cmd_run_locked(args) -> None:
         # Determinar las entidades a procesar ANTES de loguear la cola de reintentos,
         # para filtrar el snapshot por lo que realmente corre esta vez (un run
         # `--entity retenciones` no debe loguear pendientes de orden_pago/oc_items).
-        # Sin --entity explicito, ejecutar las 5 entidades oficiales en orden de FKs.
+        # Sin --entity explicito, ejecutar las entidades oficiales en orden de FKs.
         # Las demas no se migran:
         #   - orden_compra (header) → reemplazado por oc_items (incluye items embebidos)
         #   - pedidos / ped_items   → deshabilitados, los pedidos llegan como OCs via oc_items
@@ -478,8 +486,7 @@ def _cmd_run_locked(args) -> None:
         if args.entity:
             targets = [args.entity]
         else:
-            official = ["proveedores", "oc_items", "solic_gastos", "orden_pago", "retenciones"]
-            targets = [e for e in official if e in ENTITY_CONFIGS]
+            targets = [entity for entity in OFFICIAL_ENTITIES if entity in ENTITY_CONFIGS]
             logger.info("Ejecutando entidades oficiales en orden FK → %s", targets)
 
         # Cola de reintentos (F1): captura filas rechazadas por el receptor para

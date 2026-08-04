@@ -112,6 +112,14 @@ class SourceRepository:
     def execute(self, stmt: Select):
         return self._conn.execution_options(stream_results=True).execute(stmt)
 
+    def fetch_entity(
+        self,
+        entity: str,
+        checkpoint: Checkpoint,
+        retry_keys: set[str] | None = None,
+    ):
+        return self.execute(self.build_statement(entity, checkpoint, retry_keys))
+
     def count_rows(
         self,
         table_name: str,

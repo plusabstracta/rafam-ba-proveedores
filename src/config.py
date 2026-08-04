@@ -123,10 +123,10 @@ ENTITY_CONFIGS: dict[str, EntityConfig] = {
     # Clasificador por objeto del gasto: la jerarquia de 4 niveles vive
     # desnormalizada en GASTOS (no hay tabla maestra). Se escanea DISTINCT de
     # (INCISO, PAR_PRIN, PAR_PARC, PAR_SUBP, DENOMINACION) — ver
-    # SourceRepository._build_clasificaciones_statement. Sin filtro de
-    # ejercicio: es un catalogo atemporal. NO corre en el run por defecto
-    # (pipeline oficial: proveedores, oc_items, solic_gastos, orden_pago,
-    # retenciones); se invoca con --entity clasificaciones.
+    # SourceRepository._build_clasificaciones_statement. Sin filtro de ejercicio:
+    # es atemporal y corre primero para incorporar faltantes antes de resolver
+    # ordenes de pago. El codigo RAFAM -> id Paxapos se conserva en links locales;
+    # Paxapos mantiene intacto su schema y hace upsert por name + parent_id.
     "clasificaciones": EntityConfig(
         name="clasificaciones",
         table_name="GASTOS",

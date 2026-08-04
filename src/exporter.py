@@ -441,7 +441,7 @@ class MigratorExporter(BaseExporter):
             return
 
         raise ValueError(
-            "Modo migrator soporta solo 3 entidades oficiales: proveedores, oc_items, orden_pago. "
+            "Entidad no soportada por el migrator. "
             f"Recibido: {entity!r}"
         )
 

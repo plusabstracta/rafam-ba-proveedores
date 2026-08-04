@@ -12,16 +12,9 @@ niveles vive desnormalizada y repetida en las tablas transaccionales.
 Este mapper reconstruye ese arbol como categorias anidadas (parent_id) para la
 tabla de categorias de gasto de Paxapos (nested set: parent_id + lft/rght).
 
-Restricciones de la tabla destino (NO se toca schema):
-  - `name` es varchar(50)  -> se trunca (ver NOTA_DEV mas abajo).
-  - No hay columna de codigo -> el vinculo codigo RAFAM (I.PP.PC.SP) <-> id de
-    categoria Paxapos se persiste FUERA de Paxapos, en EntityLinkStore
-    (entidad "clasificacion").
-
-NOTA_DEV (truncado a 50):
-  Hoy truncamos `name` a 50 chars SOLO PARA PROBAR EN DESARROLLO, porque la
-  columna destino es varchar(50) y varias denominaciones RAFAM la superan.
-  Cuando se amplie la columna en Paxapos (issue B2), subir NAME_MAX_LEN.
+Identidad y cache:
+    - Paxapos conserva su estructura existente y hace upsert por name + parent_id.
+    - EntityLinkStore persiste localmente codigo RAFAM -> id Paxapos.
 """
 
 from __future__ import annotations
@@ -39,8 +32,8 @@ logger = logging.getLogger(__name__)
 LEVEL_FIELDS: tuple[str, ...] = ("INCISO", "PAR_PRIN", "PAR_PARC", "PAR_SUBP")
 NAME_FIELD = "DENOMINACION"
 
-# Limite de `name` en la tabla destino (varchar(50)). Ver NOTA_DEV.
-NAME_MAX_LEN = 50
+# Largo real de account_clasificaciones.name en el schema existente de Paxapos.
+NAME_MAX_LEN = 150
 
 # Seccion del payload / results del migrator para esta entidad.
 RESULT_SECTION = "clasificaciones"
@@ -143,7 +136,7 @@ def build_nodes(
     Args:
         columns: nombres de columna del batch (deben incluir LEVEL_FIELDS + NAME_FIELD).
         rows: filas crudas (tuplas alineadas con `columns`).
-        name_max_len: limite de truncado de `name` (dev: 50).
+        name_max_len: limite de truncado de `name` en Paxapos.
 
     Returns:
         (nodes, discarded)

@@ -38,16 +38,17 @@ Principios operativos:
 El contrato funcional migra estas tablas RAFAM: `PROVEEDORES`, `ORDEN_COMPRA`, `OC_ITEMS`,
 `SOLIC_GASTOS`, `CTA_COMPROB`, `ORDEN_PAGO` y `ORDEN_PAGO_DEDUC`.
 
-El migrator se ejecuta en 5 entidades independientes (1 comando = 1 checkpoint), en orden de
+El migrator se ejecuta en 6 entidades independientes (1 comando = 1 checkpoint), en orden de
 dependencia (FK):
 
 | Paso | Entidad CLI | Comando | Payload Paxapos | Notas |
 | --- | --- | --- | --- | --- |
-| 1 | `proveedores` | `make migrate-proveedores` | `proveedores[]` | Crea/actualiza proveedores. |
-| 2 | `oc_items` | `make migrate-oc` | `ordenes_compra[]` | Arma cabecera de OC + items embebidos. |
-| 3 | `solic_gastos` | `make migrate-facturas` | `gastos[]` | Enriquecimiento UPDATE-ONLY: completa campos vacios de gastos que Paxapos ya creo (via `resolver_gasto`), desde `SOLIC_GASTOS` + `CTA_COMPROB` (via `REG_COMP`), resolviendo `pedido_id` contra OCs migradas. No crea gastos sueltos. |
-| 4 | `orden_pago` | `make migrate-op` | `ordenes_pago[]` + `gastos[]` + retenciones | Crea egresos, vincula gastos y embebe retenciones (`ORDEN_PAGO_DEDUC`). |
-| 5 | `retenciones` | `make migrate-retenciones` | `retenciones[]` | Reenvia retenciones (`ORDEN_PAGO_DEDUC`, 1:1 por `NRO_OP`) de OPs ya migradas. |
+| 1 | `clasificaciones` | `make migrate-clasificaciones` | `clasificaciones[]` | Consulta directamente `GASTOS` sin filtro temporal, arma el arbol por `INCISO`, `PAR_PRIN`, `PAR_PARC`, `PAR_SUBP` y guarda localmente cada codigo RAFAM vinculado al ID devuelto por Paxapos. No modifica el schema de Paxapos. |
+| 2 | `proveedores` | `make migrate-proveedores` | `proveedores[]` | Crea/actualiza proveedores. |
+| 3 | `oc_items` | `make migrate-oc` | `ordenes_compra[]` | Arma cabecera de OC + items embebidos. |
+| 4 | `solic_gastos` | `make migrate-facturas` | `gastos[]` | Enriquecimiento UPDATE-ONLY: completa campos vacios de gastos que Paxapos ya creo (via `resolver_gasto`), desde `SOLIC_GASTOS` + `CTA_COMPROB` (via `REG_COMP`), resolviendo `pedido_id` contra OCs migradas. No crea gastos sueltos. |
+| 5 | `orden_pago` | `make migrate-op` | `ordenes_pago[]` + `gastos[]` + retenciones | Crea egresos, vincula gastos y embebe retenciones (`ORDEN_PAGO_DEDUC`). |
+| 6 | `retenciones` | `make migrate-retenciones` | `retenciones[]` | Reenvia retenciones (`ORDEN_PAGO_DEDUC`, 1:1 por `NRO_OP`) de OPs ya migradas. |
 
 La entidad `orden_compra` quedo fuera del pipeline por defecto (el exporter la trata como
 deshabilitada: warning + no-op): la reemplaza `oc_items`, que manda la OC completa con items.
@@ -326,8 +327,9 @@ Para una corrida completa incremental:
 .venv/bin/python main.py run --batch-size 500
 ```
 
-Ese comando, sin `--entity`, ejecuta las 5 entidades oficiales del migrator en orden de
-dependencia: `proveedores`, `oc_items`, `solic_gastos`, `orden_pago`, `retenciones`.
+Ese comando, sin `--entity`, ejecuta las 6 entidades oficiales del migrator en orden de
+dependencia: `clasificaciones`, `proveedores`, `oc_items`, `solic_gastos`, `orden_pago`,
+`retenciones`.
 
 Tambien se puede usar:
 

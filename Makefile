@@ -14,6 +14,7 @@ LIMIT ?=
 .PHONY: help setup install env load-dev update-mapping update-mapping-oracle explore-schema dump-full-schema \
 	explore-clasificaciones \
 	extract-cat-uni-med rafam-context status migrator-spec migrator-lookups \
+	migrate-clasificaciones migrate-clasificaciones-dry \
 	migrate-proveedores migrate-proveedores-dry \
 	migrate-oc migrate-oc-dry \
 	migrate-facturas migrate-facturas-dry \
@@ -21,7 +22,7 @@ LIMIT ?=
 	migrate-retenciones migrate-retenciones-dry \
 	migrate-all migrate-all-dry \
 	sync-proveedores sync-oc sync-all \
-	reset-all reset-proveedores reset-oc_items reset-solic_gastos reset-orden_pago reset-retenciones \
+	reset-all reset-clasificaciones reset-proveedores reset-oc_items reset-solic_gastos reset-orden_pago reset-retenciones \
 	check-integrity-dry check-integrity install-cron show-cron uninstall-cron \
 	backfill-gastos backfill-gastos-dry \
 	test coverage
@@ -41,15 +42,17 @@ help:
 	@echo "  make migrator-spec      Consulta spec.json del migrator RAFAM"
 	@echo "  make migrator-lookups   Consulta lookups.json del migrator RAFAM"
 	@echo ""
-	@echo "  --- Migracion RAFAM -> Paxapos (5 migradores, en orden de FKs) ---"
-	@echo "  make migrate-proveedores       1. Migra PROVEEDORES"
-	@echo "  make migrate-oc                2. Migra ORDEN_COMPRA + OC_ITEMS"
-	@echo "  make migrate-facturas          3. Migra FACTURAS/GASTOS (SOLIC_GASTOS)"
-	@echo "  make migrate-op                4. Migra ORDENES DE PAGO (auto-crea gastos si faltan)"
-	@echo "  make migrate-retenciones       5. Migra RETENCIONES (ORDEN_PAGO_DEDUC)"
-	@echo "  make migrate-all               Pipeline completo (los 5 en orden)"
+	@echo "  --- Migracion RAFAM -> Paxapos (6 migradores, en orden de FKs) ---"
+	@echo "  make migrate-clasificaciones   1. Migra CLASIFICACIONES DE GASTOS"
+	@echo "  make migrate-proveedores       2. Migra PROVEEDORES"
+	@echo "  make migrate-oc                3. Migra ORDEN_COMPRA + OC_ITEMS"
+	@echo "  make migrate-facturas          4. Migra FACTURAS/GASTOS (SOLIC_GASTOS)"
+	@echo "  make migrate-op                5. Migra ORDENES DE PAGO (auto-crea gastos si faltan)"
+	@echo "  make migrate-retenciones       6. Migra RETENCIONES (ORDEN_PAGO_DEDUC)"
+	@echo "  make migrate-all               Pipeline completo (los 6 en orden)"
 	@echo "  make migrate-<x>-dry           Cualquiera de los anteriores en dry-run (preview, no escribe)"
 	@echo ""
+	@echo "  make reset-clasificaciones Resetea checkpoint de clasificaciones"
 	@echo "  make reset-proveedores  Resetea checkpoint de proveedores"
 	@echo "  make reset-oc_items     Resetea checkpoint de oc_items"
 	@echo "  make reset-solic_gastos Resetea checkpoint de solic_gastos (facturas)"
@@ -114,24 +117,31 @@ migrator-lookups:
 	$(PY) main.py lookups
 
 # ───────────────────────────────────────────────────────────────────────────
-# Migracion RAFAM -> Paxapos (5 migradores independientes)
+# Migracion RAFAM -> Paxapos (6 migradores independientes)
 #
 # Cada target migra exactamente UN dominio del flujo RAFAM -> Paxapos via
 # POST /:tenant/rafam/migracion/importar.json (RafamMigracionesController).
 # El destino siempre es el migrator (no hay otros exporters). Agregar -dry a
 # cualquier target para previsualizar sin escribir en Paxapos (--dry-run).
-# Orden de FKs: proveedores -> oc -> facturas -> op -> retenciones.
+# Orden de FKs: clasificaciones -> proveedores -> oc -> facturas -> op -> retenciones.
 # Ver docs/rafam_paxapos_equivalencias.md para el detalle de mapeos.
 # ───────────────────────────────────────────────────────────────────────────
 
-# 1. PROVEEDORES (PROVEEDORES -> account_proveedores)
+# 1. CLASIFICACIONES DE GASTOS (consulta directa GASTOS -> account_clasificaciones)
+migrate-clasificaciones:
+	$(PY) main.py run --entity clasificaciones --batch-size $(BATCH) $(if $(LIMIT),--limit $(LIMIT),)
+
+migrate-clasificaciones-dry:
+	$(PY) main.py run --entity clasificaciones --batch-size $(BATCH) $(if $(LIMIT),--limit $(LIMIT),) --dry-run
+
+# 2. PROVEEDORES (PROVEEDORES -> account_proveedores)
 migrate-proveedores:
 	$(PY) main.py run --entity proveedores --batch-size $(BATCH) $(if $(LIMIT),--limit $(LIMIT),)
 
 migrate-proveedores-dry:
 	$(PY) main.py run --entity proveedores --batch-size $(BATCH) $(if $(LIMIT),--limit $(LIMIT),) --dry-run
 
-# 2. ORDENES DE COMPRA (ORDEN_COMPRA + OC_ITEMS -> compras_pedidos + items)
+# 3. ORDENES DE COMPRA (ORDEN_COMPRA + OC_ITEMS -> compras_pedidos + items)
 #    El exporter despacha por --entity oc_items y arma el payload ordenes_compra[]
 #    con items embebidos (un POST por OC). Sin pagos ni gastos.
 migrate-oc:
@@ -140,7 +150,7 @@ migrate-oc:
 migrate-oc-dry:
 	$(PY) main.py run --entity oc_items --batch-size $(BATCH) $(if $(LIMIT),--limit $(LIMIT),) --dry-run
 
-# 3. FACTURAS / GASTOS (SOLIC_GASTOS + CTA_COMPROB -> account_gastos)
+# 4. FACTURAS / GASTOS (SOLIC_GASTOS + CTA_COMPROB -> account_gastos)
 #    Migra comprobantes de proveedores (facturas recibidas) como gastos en Paxapos.
 #    Requiere que los proveedores y OCs ya estén migrados (usa links para resolver FKs).
 migrate-facturas:
@@ -149,7 +159,7 @@ migrate-facturas:
 migrate-facturas-dry:
 	$(PY) main.py run --entity solic_gastos --batch-size $(BATCH) $(if $(LIMIT),--limit $(LIMIT),) --dry-run
 
-# 4. ORDENES DE PAGO (ORDEN_PAGO -> account_egresos)
+# 5. ORDENES DE PAGO (ORDEN_PAGO -> account_egresos)
 #    Envia gasto_nro_comprobante (PDV-NRO_COMPROB) por OP. Si Paxapos no encuentra
 #    el gasto, lo auto-crea desde los datos de CTA_COMPROB embebidos en gastos[].
 migrate-op:
@@ -158,7 +168,7 @@ migrate-op:
 migrate-op-dry:
 	$(PY) main.py run --entity orden_pago --batch-size $(BATCH) $(if $(LIMIT),--limit $(LIMIT),) --dry-run
 
-# 5. RETENCIONES (ORDEN_PAGO_DEDUC -> retenciones vinculadas a OPs)
+# 6. RETENCIONES (ORDEN_PAGO_DEDUC -> retenciones vinculadas a OPs)
 #    Escanea las mismas OPs confirmadas y trae deducciones de ORDEN_PAGO_DEDUC.
 #    Requiere que las OPs ya estén migradas (usa link de orden_pago para vincular).
 migrate-retenciones:
@@ -176,13 +186,16 @@ sync-oc:
 
 sync-all: sync-proveedores sync-oc
 
-# Pipeline completo: respeta orden de FKs (proveedores -> OC -> facturas -> OP -> retenciones)
-migrate-all: migrate-proveedores migrate-oc migrate-facturas migrate-op migrate-retenciones
+# Pipeline completo: respeta orden de FKs (clasificaciones -> proveedores -> OC -> facturas -> OP -> retenciones)
+migrate-all: migrate-clasificaciones migrate-proveedores migrate-oc migrate-facturas migrate-op migrate-retenciones
 
-migrate-all-dry: migrate-proveedores-dry migrate-oc-dry migrate-facturas-dry migrate-op-dry migrate-retenciones-dry
+migrate-all-dry: migrate-clasificaciones-dry migrate-proveedores-dry migrate-oc-dry migrate-facturas-dry migrate-op-dry migrate-retenciones-dry
 
 reset-all:
 	$(PY) main.py reset --all
+
+reset-clasificaciones:
+	$(PY) main.py reset --entity clasificaciones
 
 reset-proveedores:
 	$(PY) main.py reset --entity proveedores

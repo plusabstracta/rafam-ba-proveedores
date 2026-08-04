@@ -25,6 +25,7 @@ GROUPED_BATCH_FIELDS: dict[str, list[str]] = {
 # Usado por cmd_reset para saber qué links borrar cuando se resetea
 # una entidad.
 ENTITY_LINK_NAMES: dict[str, str] = {
+    "clasificaciones": "clasificacion",
     "proveedores": "proveedores",
     "oc_items": "orden_compra",
     "solic_gastos": "gasto",

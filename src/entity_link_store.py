@@ -19,9 +19,8 @@ DEFAULT_LINK_SCHEMAS: dict[str, list[str]] = {
     "gasto": ["estado_solic", "importe_tot", "cod_prov", "pedido_id", "nro_comprobante", "payload_hash", "deleted_at"],
     "orden_pago": ["estado_op", "confirmado", "fech_confirm", "importe_total", "deleted_at"],
     "retenciones": ["fingerprint", "retenciones_count", "deleted_at"],
-    # Clasificador por objeto del gasto (RAFAM 4 niveles -> categorias Paxapos).
-    # source_key = codigo compuesto "I.PP.PC.SP"; el vinculo vive aca (fuera de
-    # Paxapos) porque la tabla destino no tiene columna de codigo.
+    # Vinculo local del clasificador: source_key = codigo "I.PP.PC.SP" y
+    # remote_id = id existente de account_clasificaciones en Paxapos.
     "clasificacion": ["denominacion", "nivel", "parent_codigo", "deleted_at"],
 }
 

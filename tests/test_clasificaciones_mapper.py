@@ -1,9 +1,14 @@
 """Tests del mapper de clasificaciones (clasificador por objeto del gasto RAFAM).
 
-Validan normalizacion (mojibake + truncado dev a 50), jerarquia de 4 niveles,
+Validan normalizacion (mojibake + limite de 150), jerarquia de 4 niveles,
 dedup de colisiones (3.3.6.0) y armado del payload `clasificaciones`.
 """
 
+from datetime import datetime
+
+from sqlalchemy import create_engine, text
+
+from main import OFFICIAL_ENTITIES
 from src.entity_link_store import EntityLinkStore
 from src.mappers.clasificaciones import (
     ClasificacionesMapper,
@@ -15,8 +20,50 @@ from src.mappers.clasificaciones import (
     persist_links,
     truncate_name,
 )
+from src.models import Checkpoint
+from src.source_repository import SourceRepository
 
 COLUMNS = ["INCISO", "PAR_PRIN", "PAR_PARC", "PAR_SUBP", "DENOMINACION"]
+
+
+def test_clasificaciones_corren_antes_que_proveedores():
+    assert OFFICIAL_ENTITIES[:2] == ("clasificaciones", "proveedores")
+
+
+def test_query_clasificaciones_es_completa_atemporal_y_ordenada():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    with engine.begin() as conn:
+        conn.execute(text("""
+            CREATE TABLE GASTOS (
+                INCISO INTEGER,
+                PAR_PRIN INTEGER,
+                PAR_PARC INTEGER,
+                PAR_SUBP INTEGER,
+                DENOMINACION TEXT,
+                EJERCICIO INTEGER
+            )
+        """))
+        conn.execute(text("""
+            INSERT INTO GASTOS VALUES
+                (2, 1, 1, 0, 'Productos alimenticios', 2021),
+                (2, 0, 0, 0, 'Bienes de consumo', 2021),
+                (2, 1, 1, 0, 'Productos alimenticios', 2021),
+                (3, 3, 2, 0, 'Alquiler de maquinaria', 2026)
+        """))
+
+        repo = SourceRepository(conn)
+        old_checkpoint = Checkpoint(
+            entity="clasificaciones",
+            last_run=datetime(2026, 1, 1),
+        )
+        result = repo.fetch_entity("clasificaciones", old_checkpoint)
+
+        assert list(result.keys()) == COLUMNS
+        assert result.fetchall() == [
+            (2, 0, 0, 0, "Bienes de consumo"),
+            (2, 1, 1, 0, "Productos alimenticios"),
+            (3, 3, 2, 0, "Alquiler de maquinaria"),
+        ]
 
 
 # ── Normalizacion ──────────────────────────────────────────────────────────
@@ -121,14 +168,15 @@ def test_build_nodes_ignora_filas_sin_inciso():
     assert [n["code"] for n in nodes] == ["2.0.0.0"]
 
 
-def test_build_nodes_trunca_nombre_largo_a_50():
+def test_build_nodes_respeta_largo_real_de_account_clasificaciones():
     largo = (
         "Transferencias al Sector Público Nacional, al Sector Público "
         "Provincial y al Sector Público Municipal para financiar gastos corrientes"
     )
     rows = [(5, 3, 0, 0, largo)]
     nodes, _ = build_nodes(COLUMNS, rows)
-    assert len(nodes[0]["name"]) <= 50
+    assert len(nodes[0]["name"]) <= 150
+    assert len(nodes[0]["name"]) > 50
     assert nodes[0]["denominacion"] == clean_text(largo)  # denominacion full preservada
 
 
