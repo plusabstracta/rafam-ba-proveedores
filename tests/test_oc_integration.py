@@ -52,24 +52,14 @@ def exporter_with_links(dev_engine):
             exp = MigratorExporter(dry_run=True)
 
     with dev_engine.connect() as conn:
-        # Pre-linkear proveedores
+        # Pre-linkear proveedores. Las mercaderias NO se pre-linkean: el diseno
+        # vigente envia el item con `name` y options.auto_create_mercaderia=true
+        # (la resolucion/creacion es server-side en Paxapos).
         for (cod,) in conn.execute(text("SELECT COD_PROV FROM PROVEEDORES")).fetchall():
             exp._link_store.save_link(
                 entity="proveedores",
                 source_key=str(cod),
                 remote_id=str(10000 + int(cod)),
-            )
-        # En dry-run no llamamos al resolver remoto; simulamos mercaderías ya linkeadas
-        # por la identidad RAFAM basada en la descripción normalizada.
-        descriptions = conn.execute(text("SELECT DISTINCT DESCRIPCION FROM OC_ITEMS WHERE DESCRIPCION IS NOT NULL")).fetchall()
-        for idx, (description,) in enumerate(descriptions, start=1):
-            normalized = exp._normalize_text(description)
-            if not normalized:
-                continue
-            exp._link_store.save_link(
-                entity="mercaderia",
-                source_key=exp._mercaderia_description_source_key(normalized),
-                remote_id=str(200000 + idx),
             )
     return exp
 
@@ -153,15 +143,16 @@ class TestOcIntegration:
                 assert "descripcion" not in item, f"Item con descripcion en {oc['external_id']}"
                 assert "observacion" not in item, f"Item con observacion en {oc['external_id']}"
 
-    def test_items_envian_mercaderia_id_sin_external_ref(self, oc_payloads):
-        """Los items llegan al importador con mercaderia_id resuelto localmente."""
+    def test_items_envian_name_sin_external_ref(self, oc_payloads):
+        """Los items viajan con `name`; la mercaderia la resuelve/crea Paxapos
+        (options.auto_create_mercaderia=true), sin mercaderia_id local."""
         _, all_ocs = oc_payloads
         total_items = 0
         for oc in all_ocs:
             for item in oc.get("items", []):
                 total_items += 1
-                assert isinstance(item.get("mercaderia_id"), int)
-                assert "name" not in item
+                assert item.get("name"), f"Item sin name en {oc['external_id']}"
+                assert "mercaderia_id" not in item
                 assert "mercaderia_external_ref" not in item
         assert total_items > 0
 

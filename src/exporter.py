@@ -247,6 +247,9 @@ class MigratorExporter(BaseExporter):
         self._source_repo = source_repo
         self._op_mapper._source_repo = source_repo
         self._ret_mapper._source_repo = source_repo
+        # solic_gastos lo usa para expandir SGs con 2+ comprobantes (la query
+        # principal agrega con MIN() y solo trae uno).
+        self._sg_mapper._source_repo = source_repo
 
     def attach_retry_store(self, retry_store) -> None:
         """Inyecta la cola de reintentos (F1)."""

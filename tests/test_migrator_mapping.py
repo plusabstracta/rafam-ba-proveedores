@@ -374,7 +374,57 @@ class TestWriteBatchOrdenPago:
         assert op["gasto_nro_comprobante"] == "0001-00000100"
         assert op["pedido_id"] == 789
 
-    def test_op_sin_oc_en_regcomp_imputado_no_se_envia(self):
+    def test_op_gasto_directo_se_envia_con_gasto_sin_pedido_id(self):
+        """OP con factura imputada (OPI+CTA) pero sin OC en REG_COMP: con
+        RAFAM_MIGRAR_OP_SIN_OC=true (default) se envia sin pedido_id y el
+        gasto viaja completo, tambien sin pedido_id."""
+        exp = self._make_exporter()
+        exp._link_store.save_link("proveedores", "100", remote_id="1000")
+
+        columns = [
+            "EJERCICIO", "NRO_OP", "ESTADO_OP", "CONFIRMADO", "FECH_CONFIRM",
+            "IMPORTE_TOTAL", "CONCEPTO", "NRO_CANCE", "COD_PROV",
+            "OPI_NRO_REG_COMP", "OPI_NRO_COMPROB", "OPI_TIPO_COMPROB", "OPI_COD_PROV",
+            "CTA_IMPORTE_COMPR", "CTA_IMPORTE_SIN_IVA", "CTA_FECH_COMPROB", "CTA_FECH_VENCIM",
+        ]
+        vals = {
+            "EJERCICIO": "2026", "NRO_OP": "245",
+            "ESTADO_OP": "C", "CONFIRMADO": "S",
+            "FECH_CONFIRM": "2026-01-22 00:00:00",
+            "IMPORTE_TOTAL": "1750", "CONCEPTO": "Reg.Comp. 236",
+            "NRO_CANCE": "372", "COD_PROV": "100",
+            "OPI_NRO_REG_COMP": "236",
+            "OPI_NRO_COMPROB": "0021-00100640",
+            "OPI_TIPO_COMPROB": "TKT",
+            "OPI_COD_PROV": "100",
+            "CTA_IMPORTE_COMPR": "1750.00",
+            "CTA_IMPORTE_SIN_IVA": "1750.00",
+            "CTA_FECH_COMPROB": "2026-01-22 00:00:00",
+            "CTA_FECH_VENCIM": "2026-01-22 00:00:00",
+        }
+        rows = [tuple(vals.get(c, "") for c in columns)]
+
+        sent = []
+        exp._post_json = lambda url, p: sent.append(p) or {
+            "stats": {"ordenes_pago": {"ok": 1, "error": 0}, "gastos": {"ok": 1, "error": 0}}
+        }
+        exp.write_batch("orden_pago", columns, rows)
+
+        assert len(sent) == 1
+        op = sent[0]["ordenes_pago"][0]
+        assert "pedido_id" not in op
+        assert op["gasto_nro_comprobante"] == "0021-00100640"
+        gastos = sent[0]["gastos"]
+        assert len(gastos) == 1
+        gasto = gastos[0]["Gasto"]
+        assert gasto["proveedor_id"] == 1000
+        assert gasto["importe_total"] == 1750.00
+        assert "pedido_id" not in gasto
+
+    def test_op_sin_oc_en_regcomp_imputado_no_se_envia_con_flag_off(self, monkeypatch):
+        """Con RAFAM_MIGRAR_OP_SIN_OC=false se conserva el comportamiento
+        historico: solo se migran pagos respaldados por OC."""
+        monkeypatch.setenv("RAFAM_MIGRAR_OP_SIN_OC", "false")
         exp = self._make_exporter()
         exp._link_store.save_link("proveedores", "100", remote_id="1000")
 

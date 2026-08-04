@@ -318,12 +318,25 @@ class TestPedidoInternalIdEnOrdenPago:
         # Cuando ya hay pedido_id resuelto, no se envia internal_id (evita ambiguedad)
         assert "pedido_internal_id" not in op
 
-    def test_omite_pedido_internal_id_si_falta_alguna_columna_oc(self):
-        """Sin SG_OC_* completo no se puede resolver OC, entonces se omite."""
+    def test_omite_pedido_internal_id_si_falta_alguna_columna_oc(self, monkeypatch):
+        """Sin SG_OC_* completo no se puede resolver OC. Con el flag de gasto
+        directo apagado, la OP se omite (comportamiento historico)."""
+        monkeypatch.setenv("RAFAM_MIGRAR_OP_SIN_OC", "false")
         exp = self._make_exporter()
         rows = [self._row(self._columns(), SG_OC_NRO="")]
         sent = self._send_and_capture(exp, rows)
         assert sent == []
+
+    def test_sin_oc_resoluble_con_flag_envia_sin_pedido_id(self):
+        """Con RAFAM_MIGRAR_OP_SIN_OC=true (default), la misma OP se envia
+        como gasto directo: sin pedido_id ni pedido_internal_id."""
+        exp = self._make_exporter()
+        rows = [self._row(self._columns(), SG_OC_NRO="")]
+        sent = self._send_and_capture(exp, rows)
+        assert len(sent) == 1
+        op = sent[0]["ordenes_pago"][0]
+        assert "pedido_id" not in op
+        assert "pedido_internal_id" not in op
 
     def test_op_con_oc_vieja_linkeada_envia_pedido_id(self):
         """Una OC vieja incluida por dependencia se vincula por pedido_id local."""

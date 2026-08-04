@@ -96,9 +96,11 @@ class SourceRepository:
         """
         cfg = ENTITY_CONFIGS[entity]
         if entity == "oc_items":
+            # oc_items es full_load: cada corrida escanea todo, asi que las
+            # filas rechazadas re-entran naturalmente (no necesita reinyeccion).
             return self._build_oc_items_statement(cfg, checkpoint)
         if entity == "solic_gastos":
-            return self._build_solic_gastos_statement(cfg, checkpoint)
+            return self._build_solic_gastos_statement(cfg, checkpoint, retry_keys)
         if entity == "orden_pago":
             return self._build_orden_pago_statement(cfg, checkpoint, retry_keys)
         if entity == "retenciones":
@@ -107,7 +109,7 @@ class SourceRepository:
             return self._build_orden_pago_statement(cfg, checkpoint, retry_keys)
         if entity == "clasificaciones":
             return self._build_clasificaciones_statement(cfg, checkpoint)
-        return self._build_simple_table_statement(cfg, checkpoint)
+        return self._build_simple_table_statement(cfg, checkpoint, retry_keys)
 
     def execute(self, stmt: Select):
         return self._conn.execution_options(stream_results=True).execute(stmt)
@@ -522,15 +524,98 @@ class SourceRepository:
         self,
         cfg: EntityConfig,
         checkpoint: Checkpoint,
+        retry_keys: set[str] | None = None,
     ) -> Select:
         table = self._reflect_table(cfg.table_name)
         stmt = select(table)
-        stmt = self._apply_incremental_filters(stmt, table, cfg, checkpoint)
+        # Reinyeccion de la cola de reintentos (hoy solo aplica a proveedores:
+        # las demas entidades "simples" son full_load o no encolan). Sin esto,
+        # un proveedor rechazado por el receptor quedaba fuera del cursor
+        # FECHA_ULT_COMP para siempre.
+        retry_filter = None
+        if cfg.name == "proveedores":
+            retry_filter = self._proveedores_retry_filter(table, retry_keys)
+        stmt = self._apply_incremental_filters(
+            stmt,
+            table,
+            cfg,
+            checkpoint,
+            extra_filters=[retry_filter] if retry_filter is not None else None,
+        )
         ts_col = self._safe_column(table, cfg.ts_field)
         if ts_col is not None:
             pk_cols = [c for c in table.primary_key.columns]
             stmt = stmt.order_by(ts_col, *pk_cols)
         return stmt
+
+    def _proveedores_retry_filter(self, table, retry_keys):
+        """Predicado que reinyecta proveedores pendientes de la cola.
+
+        Las claves son ``str(COD_PROV)`` (mismo formato que el link store y
+        ``exporter._outcome_key``).
+        """
+        cods: list[int] = []
+        for key in retry_keys or ():
+            try:
+                cods.append(int(str(key).strip()))
+            except (TypeError, ValueError):
+                continue
+        if not cods:
+            return None
+        cod_col = self._safe_column(table, "COD_PROV")
+        if cod_col is None:
+            return None
+        if len(cods) > self._RETRY_REQUEUE_MAX:
+            logger.warning(
+                "Cola de reintentos con %d proveedores pendientes; se reinyectan %d en esta corrida.",
+                len(cods), self._RETRY_REQUEUE_MAX,
+            )
+            cods = sorted(cods)[: self._RETRY_REQUEUE_MAX]
+        cods = sorted(set(cods))
+        clauses = [
+            cod_col.in_(cods[start:start + self._IN_CHUNK])
+            for start in range(0, len(cods), self._IN_CHUNK)
+        ]
+        logger.info("Reinyectando %d proveedores pendientes de la cola de reintentos", len(cods))
+        return or_(*clauses) if len(clauses) > 1 else clauses[0]
+
+    def _sg_retry_filter(self, table, retry_keys):
+        """Predicado que reinyecta solicitudes de gasto pendientes de la cola.
+
+        Las claves son ``json({"deleg_solic": D, "ejercicio": E, "nro_solic": N})``
+        (el external_id del gasto; se toleran campos extra como ``nro_comprob``).
+        """
+        triples: set[tuple[int, int, int]] = set()
+        for key in retry_keys or ():
+            try:
+                data = json.loads(key)
+                triples.add((
+                    int(data["ejercicio"]),
+                    int(data["deleg_solic"]),
+                    int(data["nro_solic"]),
+                ))
+            except (TypeError, ValueError, KeyError):
+                continue
+        if not triples:
+            return None
+        ej_col = self._safe_column(table, "EJERCICIO")
+        deleg_col = self._safe_column(table, "DELEG_SOLIC")
+        nro_col = self._safe_column(table, "NRO_SOLIC")
+        if ej_col is None or deleg_col is None or nro_col is None:
+            return None
+        items = sorted(triples)
+        if len(items) > self._RETRY_REQUEUE_MAX:
+            logger.warning(
+                "Cola de reintentos con %d gastos pendientes; se reinyectan %d en esta corrida.",
+                len(items), self._RETRY_REQUEUE_MAX,
+            )
+            items = items[: self._RETRY_REQUEUE_MAX]
+        clauses = [
+            and_(ej_col == ej, deleg_col == deleg, nro_col == nro)
+            for ej, deleg, nro in items
+        ]
+        logger.info("Reinyectando %d gastos pendientes de la cola de reintentos", len(items))
+        return or_(*clauses) if len(clauses) > 1 else clauses[0]
 
     def _build_clasificaciones_statement(
         self,
@@ -648,6 +733,7 @@ class SourceRepository:
         self,
         cfg: EntityConfig,
         checkpoint: Checkpoint,
+        retry_keys: set[str] | None = None,
     ) -> Select:
         solic_gastos = self._reflect_table("SOLIC_GASTOS")
         oc_items = self._reflect_table("OC_ITEMS")
@@ -717,8 +803,99 @@ class SourceRepository:
             )
 
         stmt = select(*select_cols).select_from(from_clause)
-        stmt = self._apply_incremental_filters(stmt, solic_gastos, cfg, checkpoint)
+        retry_filter = self._sg_retry_filter(solic_gastos, retry_keys)
+        stmt = self._apply_incremental_filters(
+            stmt,
+            solic_gastos,
+            cfg,
+            checkpoint,
+            extra_filters=[retry_filter] if retry_filter is not None else None,
+        )
         return stmt.order_by(solic_gastos.c.FECH_SOLIC, solic_gastos.c.EJERCICIO, solic_gastos.c.DELEG_SOLIC, solic_gastos.c.NRO_SOLIC)
+
+    def fetch_cta_comprob_for_sgs(
+        self, sg_keys: list[tuple[int, int, int]]
+    ) -> dict[tuple[int, int, int], list[dict]] | None:
+        """Comprobantes individuales de cada SG (sin agrupar).
+
+        La query principal de solic_gastos agrega los comprobantes con MIN()
+        (una fila por SG). Para las SG con 2+ comprobantes eso pierde los
+        demas; este fetch trae TODOS los comprobantes de las SG pedidas para
+        que el mapper emita un candidato de enriquecimiento por comprobante.
+
+        Devuelve {(ejercicio, deleg_solic, nro_solic): [dict CTA_*...]} o None
+        si REG_COMP/CTA_COMPROB no estan disponibles.
+        """
+        if not sg_keys:
+            return {}
+        reg_comp = self._reflect_optional_table("REG_COMP")
+        cta_comprob = self._reflect_optional_table("CTA_COMPROB")
+        if reg_comp is None or cta_comprob is None:
+            return None
+
+        cols = {
+            "rc_ej": self._safe_column(reg_comp, "EJERCICIO"),
+            "rc_nro_rc": self._safe_column(reg_comp, "NRO_REG_COMP"),
+            "rc_deleg": self._safe_column(reg_comp, "DELEG_SOLIC"),
+            "rc_nro_sol": self._safe_column(reg_comp, "NRO_SOLIC"),
+            "cc_ej": self._safe_column(cta_comprob, "EJERCICIO"),
+            "cc_rc": self._safe_column(cta_comprob, "NRO_REG_COMP"),
+            "cc_tipo": self._safe_column(cta_comprob, "TIPO"),
+            "cc_nro": self._safe_column(cta_comprob, "NRO_COMPROB"),
+            "cc_fec": self._safe_column(cta_comprob, "FECH_COMPROB"),
+        }
+        if any(v is None for v in cols.values()):
+            return None
+
+        cc_imp = self._safe_column(cta_comprob, "IMPORTE_COMPR")
+        cc_sin_iva = self._safe_column(cta_comprob, "IMPORTE_SIN_IVA")
+        cc_neto = self._coalesce_optional_columns(
+            self._safe_column(cta_comprob, "IMPORTE_LIQUIDO"),
+            self._safe_column(cta_comprob, "IMPORTE_NETO"),
+            cc_sin_iva,
+        )
+        cc_venc = self._safe_column(cta_comprob, "FECH_VENCIM")
+
+        select_cols = [
+            cols["rc_ej"].label("EJERCICIO"),
+            cols["rc_deleg"].label("DELEG_SOLIC"),
+            cols["rc_nro_sol"].label("NRO_SOLIC"),
+            cols["cc_nro"].label("CTA_NRO_COMPROB"),
+            cols["cc_tipo"].label("CTA_TIPO_COMPROB"),
+            cols["cc_fec"].label("CTA_FECH_COMPROB"),
+            (cc_venc if cc_venc is not None else literal_column("NULL")).label("CTA_FECH_VENCIM"),
+            (cc_imp if cc_imp is not None else literal_column("NULL")).label("CTA_IMPORTE_COMPR"),
+            cc_neto.label("CTA_IMPORTE_NETO"),
+            (cc_sin_iva if cc_sin_iva is not None else literal_column("NULL")).label("CTA_IMPORTE_SIN_IVA"),
+        ]
+
+        out: dict[tuple[int, int, int], list[dict]] = {}
+        keys = sorted({(int(e), int(d), int(n)) for e, d, n in sg_keys})
+        for start in range(0, len(keys), self._IN_CHUNK):
+            chunk = keys[start:start + self._IN_CHUNK]
+            key_clauses = [
+                and_(cols["rc_ej"] == ej, cols["rc_deleg"] == deleg, cols["rc_nro_sol"] == nro)
+                for ej, deleg, nro in chunk
+            ]
+            stmt = (
+                select(*select_cols)
+                .select_from(
+                    reg_comp.join(
+                        cta_comprob,
+                        and_(
+                            cols["rc_ej"] == cols["cc_ej"],
+                            cols["rc_nro_rc"] == cols["cc_rc"],
+                        ),
+                    )
+                )
+                .where(or_(*key_clauses) if len(key_clauses) > 1 else key_clauses[0])
+            )
+            for row in self._conn.execute(stmt).mappings():
+                ej = int(row["EJERCICIO"])
+                deleg = int(row["DELEG_SOLIC"])
+                nro = int(row["NRO_SOLIC"])
+                out.setdefault((ej, deleg, nro), []).append(dict(row))
+        return out
 
     def _build_solic_gastos_comprobantes_subquery(self, reg_comp, cta_comprob):
         if reg_comp is None or cta_comprob is None:

@@ -634,7 +634,7 @@ identidad de la solicitud de gasto:
 
 `importe_total` e `importe_neto` son los nombres Paxapos para los dos importes de la OP. `Egreso.total` y `Egreso.neto_transferido` se conservan en el payload por compatibilidad con el importador actual.
 
-> Solo enviar OPs con `ESTADO_OP='C'`, `CONFIRMADO='S'`, `FECH_CONFIRM` presente, `gasto_nro_comprobante` y `pedido_id` resuelto. En Paxapos se crean con `fecha=FECH_CONFIRM` y `estado=3`. OPs anuladas, pendientes, no confirmadas, sin comprobante o sin OC migrada se omiten completamente del envío.
+> Solo enviar OPs con `ESTADO_OP='C'`, `CONFIRMADO='S'`, `FECH_CONFIRM` presente y `gasto_nro_comprobante`. En Paxapos se crean con `fecha=FECH_CONFIRM` y `estado=3`. OPs anuladas, pendientes, no confirmadas o sin comprobante se omiten. `pedido_id` viaja cuando la OC está linkeada; los pagos de gasto directo (factura real sin OC en `REG_COMP`) se envían SIN `pedido_id` cuando `RAFAM_MIGRAR_OP_SIN_OC=true` (default) — Paxapos deduplica el Gasto por `proveedor + factura_nro`. Con la OC existente pero aún no migrada, la OP se encola y reintenta.
 
 ---
 

@@ -144,10 +144,48 @@ class TestOrdenPagoEnqueue:
         exporter = self._make_exporter(tmp_path, retry_store)
         exporter._post_json = lambda url, payload: {"stats": {}}
 
-        # Sin link de OC ni OC canonica: la OP se saltea, pero debe quedar
-        # registrada para reintentarla en la proxima corrida.
+        # La OC canonica EXISTE en RAFAM (SG_OC_*) pero aun no esta migrada en
+        # el link store: la OP se saltea y queda encolada para la proxima
+        # corrida (dependencia legitima, independiente de RAFAM_MIGRAR_OP_SIN_OC).
+        row = self._row(SG_OC_EJERCICIO="2026", SG_OC_UNI_COMPRA="1", SG_OC_NRO="88")
+        exporter.write_batch("orden_pago", self.COLUMNS, [row])
+
+        assert _op_key(2026, 1001) in retry_store.pending_external_ids("orden_pago")
+        retry_store.close()
+
+    def test_op_gasto_directo_sin_oc_se_envia_con_flag(self, tmp_path):
+        """OP con factura imputada pero sin OC en REG_COMP (gasto directo):
+        con RAFAM_MIGRAR_OP_SIN_OC=true (default) se envia sin pedido_id y NO
+        queda encolada."""
+        retry_store = RetryStore(db_path=str(tmp_path / "retry.db"))
+        exporter = self._make_exporter(tmp_path, retry_store)
+        exporter._link_store.save_link("proveedores", "555", remote_id="42")
+        sent = []
+        exporter._post_json = lambda url, payload: sent.append(payload) or {
+            "stats": {"ordenes_pago": {"ok": 1, "error": 0}}
+        }
+
         exporter.write_batch("orden_pago", self.COLUMNS, [self._row()])
 
+        assert len(sent) == 1
+        op = sent[0]["ordenes_pago"][0]
+        assert "pedido_id" not in op
+        assert op["gasto_nro_comprobante"] == "0001-00000100"
+        assert retry_store.pending_external_ids("orden_pago") == set()
+        retry_store.close()
+
+    def test_op_gasto_directo_sin_oc_se_omite_sin_flag(self, tmp_path, monkeypatch):
+        """Con RAFAM_MIGRAR_OP_SIN_OC=false se conserva el comportamiento
+        historico: omitir y encolar."""
+        monkeypatch.setenv("RAFAM_MIGRAR_OP_SIN_OC", "false")
+        retry_store = RetryStore(db_path=str(tmp_path / "retry.db"))
+        exporter = self._make_exporter(tmp_path, retry_store)
+        sent = []
+        exporter._post_json = lambda url, payload: sent.append(payload) or {"stats": {}}
+
+        exporter.write_batch("orden_pago", self.COLUMNS, [self._row()])
+
+        assert sent == []
         assert _op_key(2026, 1001) in retry_store.pending_external_ids("orden_pago")
         retry_store.close()
 

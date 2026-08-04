@@ -442,6 +442,7 @@ def _cmd_run_locked(args) -> None:
     run_start_dt = datetime.now()
     start_time_str = run_start_dt.strftime("%Y-%m-%d %H:%M:%S")
     retry_counts_start = {}
+    retry_counts_end = {}
     entity_metrics = []
 
     if _EJERCICIO_MIN:
@@ -516,6 +517,13 @@ def _cmd_run_locked(args) -> None:
                     failed_entities.append(entity)
                     entity_errors[entity] = err_msg or "Error desconocido"
 
+        # Snapshot final de la cola de reintentos (para el resumen diario).
+        try:
+            if retry_store:
+                retry_counts_end = dict(retry_store.counts_by_entity(entities=targets))
+        except Exception:  # pragma: no cover - defensive
+            pass
+
         # Calcular duración total
         run_duration_secs = time.monotonic() - run_t0
         hours, rem = divmod(int(run_duration_secs), 3600)
@@ -540,6 +548,8 @@ def _cmd_run_locked(args) -> None:
                 "duration_formatted": duration_formatted,
                 "success": False,
                 "error_msg": f"Las siguientes entidades fallaron: {', '.join(failed_entities)}",
+                "retry_counts_start": retry_counts_start,
+                "retry_counts_end": retry_counts_end,
             }
             record_run(summary_data, entity_metrics)
         else:
@@ -550,6 +560,8 @@ def _cmd_run_locked(args) -> None:
                 "duration_formatted": duration_formatted,
                 "success": True,
                 "error_msg": None,
+                "retry_counts_start": retry_counts_start,
+                "retry_counts_end": retry_counts_end,
             }
             record_run(summary_data, entity_metrics)
 
