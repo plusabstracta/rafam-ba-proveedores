@@ -6,7 +6,7 @@ applyTo: "src/exporter.py,src/gateway_mapper.py,src/entity_link_store.py,README.
 # Contrato Paxapos + Flujo RAFAM — Referencia Completa
 
 > **Fuente de verdad de qué tablas se migran:** [docs/rafam_paxapos_equivalencias.md](../../docs/rafam_paxapos_equivalencias.md).
-> Este documento profundiza en contrato HTTP, schema Paxapos y mapeo de payloads de las **6 tablas migradas**.
+> Este documento profundiza en contrato HTTP, schema Paxapos y mapeo de payloads de las tablas migradas (`PROVEEDORES`, `ORDEN_COMPRA`, `OC_ITEMS`, `SOLIC_GASTOS`, `CTA_COMPROB`, `ORDEN_PAGO`, `ORDEN_PAGO_DEDUC`, con puentes `REG_COMP` y `ORDEN_PAGO_IMPUT`).
 
 ## 1. Ciclo de vida real (sólo tablas migradas)
 
@@ -16,10 +16,10 @@ applyTo: "src/exporter.py,src/gateway_mapper.py,src/entity_link_store.py,README.
 PROVEEDORES ──► ORDEN_COMPRA ──► OC_ITEMS
                      │
                      ▼
-              CTA_COMPROB (factura del proveedor)
+              CTA_COMPROB (factura del proveedor, vía REG_COMP)
                      │
-                     ▼
-              ORDEN_PAGO ──► RETENCIONES
+                     ▼ (ORDEN_PAGO_IMPUT)
+              ORDEN_PAGO ──► ORDEN_PAGO_DEDUC (retenciones)
 ```
 
 ### 1.2 Conexiones FK en el flujo
@@ -31,9 +31,9 @@ PROVEEDORES ──► ORDEN_COMPRA ──► OC_ITEMS
 | 3 | CTA_COMPROB | PROVEEDORES | `COD_PROV` | `COD_PROV` | Factura del proveedor |
 | 4 | CTA_COMPROB → ORDEN_COMPRA | (vía `REG_COMP`) | `EJERCICIO + NRO_REG_COMP` | `EJERCICIO + UNI_COMPRA + NRO_OC` | Vincula factura con la OC originante |
 | 5 | ORDEN_PAGO | PROVEEDORES | `COD_PROV` | `COD_PROV` | Proveedor que cobra |
-| 6 | ORDEN_PAGO ↔ CTA_COMPROB | (vía `CTA_HOJA_DE_RUTA`) | `EJERCICIO + NRO_OP` | `EJERCICIO + NRO_REG_COMP` | Pago vinculado a una o varias facturas |
-| 7 | RETENCIONES | ORDEN_PAGO | `EJERCICIO` + `NRO_CANCE` | `EJERCICIO` + `NRO_OP` | Retención asociada al pago |
-| 8 | RETENCIONES | DEDUCCIONES | `COD_DEDUC` | `COD_DEDUC` | Catálogo del tipo de retención (lookup, no se migra) |
+| 6 | ORDEN_PAGO ↔ CTA_COMPROB | (vía `ORDEN_PAGO_IMPUT`) | `EJERCICIO + NRO_OP` | `EJERCICIO + TIPO + NRO_COMPROB + COD_PROV` | Pago vinculado a una o varias facturas |
+| 7 | ORDEN_PAGO_DEDUC | ORDEN_PAGO | `EJERCICIO` + `NRO_OP` | `EJERCICIO` + `NRO_OP` | Retención asociada al pago |
+| 8 | ORDEN_PAGO_DEDUC | DEDUCCIONES | `CODIGO_DEDUC` | `COD_DEDUC` | Catálogo del tipo de retención (lookup, no se migra) |
 
 > `EJERCICIO` (año fiscal) es el hilo conductor que atraviesa todas las tablas. `JURISDICCION` es **un campo** en cabeceras (no una tabla migrada): se usa para resolver `centro_costo_id` en Paxapos.
 
@@ -68,17 +68,18 @@ OC (compras_pedidos.id) ◄── account_gastos.pedido_id ── Gasto ◄─�
 ### 2.2 Cadena de vínculos en RAFAM (fuente)
 
 ```
-CTA_COMPROB ◄──(REG_COMP)──► ORDEN_COMPRA
+CTA_COMPROB ◄──(REG_COMP)──► ORDEN_COMPRA / SOLIC_GASTOS
       ▲
-      │ (CTA_HOJA_DE_RUTA: vista desnormalizada)
+      │ (ORDEN_PAGO_IMPUT: bridge físico OP ↔ comprobante)
       │
-  ORDEN_PAGO ──► RETENCIONES (EJERCICIO + NRO_CANCE = ORDEN_PAGO.EJERCICIO + NRO_OP)
+  ORDEN_PAGO ──► ORDEN_PAGO_DEDUC (EJERCICIO + NRO_OP + CODIGO_DEDUC)
 ```
 
-- **CTA_COMPROB ↔ ORDEN_COMPRA:** se resuelve por `REG_COMP` (tabla puente). Permite setear `account_gastos.pedido_id` al migrar la factura.
-- **ORDEN_PAGO ↔ CTA_COMPROB:** se lee desde la vista `CTA_HOJA_DE_RUTA` para armar el HABTM `account_egresos_gastos` al crear el egreso en Paxapos.
-- **RETENCIONES ↔ ORDEN_PAGO:** match directo por `EJERCICIO + NRO_CANCE`.
-- **DEDUCCIONES:** sólo lookup; resuelve `tipo_impuesto_id` de la retención por substring en `DESCRIPCION` (IVA→102, GANANCIAS→103, IIBB→104, SUSS→105, MEDICOS→110).
+- **CTA_COMPROB ↔ ORDEN_COMPRA/SOLIC_GASTOS:** se resuelve por `REG_COMP` (tabla puente, `EJERCICIO + NRO_REG_COMP`). Permite setear `account_gastos.pedido_id` al migrar la factura.
+- **ORDEN_PAGO ↔ CTA_COMPROB:** vía `ORDEN_PAGO_IMPUT` (una fila por comprobante imputado). La OC canónica de la OP se resuelve por el mismo `NRO_REG_COMP` imputado; **NO** usar `ORDEN_PAGO.NRO_CANCE` como puente (puede apuntar a otra solicitud).
+- **Retenciones ↔ ORDEN_PAGO:** tabla `ORDEN_PAGO_DEDUC`, match por `EJERCICIO + NRO_OP`.
+- **DEDUCCIONES:** sólo lookup; el tipo de retención se resuelve contra el catálogo remoto `tipos_retencion` (con alias por descripción: IVA, GANANCIAS, IIBB, SUSS, etc.).
+- **Obsoletas (NO usar):** la VIEW `CTA_HOJA_DE_RUTA` y la tabla `RETENCIONES`.
 
 ---
 
@@ -227,7 +228,7 @@ La tabla `compras_pedidos` se usa con `tipo='orden_compra'`. Otros valores de `t
 | `es_ajuste_precio` | tinyint(1) | — | default 0 |
 | `proveedor_id` | int | SÍ | hereda de cabecera |
 | `pedido_estado_id` | int | — | default 1. 1=Pendiente, 2=Completado, 3=Pedido |
-| `unidad_de_medida_id` | int | NO | Default `1` (Unidad). Antes había un bug que enviaba `5` (Paquete); corregido en `gateway_mapper.py`. |
+| `unidad_de_medida_id` | int | NO | Default `5` (Unidad en seeds legacy — ver §14.1; `_UM_DEFAULT=5` en `gateway_mapper.py`). Confirmar el ID real del tenant con `make migrator-lookups`. |
 | `cantidad` | decimal(10,2) | NO | Obligatorio |
 | `observacion` | text | SÍ | |
 | `recibida_unidad_de_medida_id` | int | SÍ | |
@@ -375,7 +376,7 @@ El gasto puede vincularse a la OC con `pedido_id` (`account_gastos.pedido_id`). 
 | 21 | Docena |
 | 22 | Maple |
 
-> Esta tabla corresponde a seeds legacy donde `id=1` es "Planta" y `id=5` es "Unidad". No asumir que esos IDs son iguales en todos los tenants: confirmar con `GET /{tenant}/rafam/migracion/lookups.json?only=unidades_de_medida` o `make migrator-lookups` y configurar `PAXAPOS_RAFAM_DEFAULT_UNIDAD_ID`.
+> Esta tabla corresponde a seeds legacy donde `id=1` es "Planta" y `id=5` es "Unidad". No asumir que esos IDs son iguales en todos los tenants: confirmar con `GET /{tenant}/rafam/migracion/lookups.json?only=unidades_de_medida` o `make migrator-lookups`. El default del código es `_UM_DEFAULT=5` en `gateway_mapper.py` (no hay variable de entorno para esto).
 
 ### 6.3 IVA condiciones
 
@@ -523,10 +524,10 @@ Filtrable con `?only=proveedores,tipos_factura` (CSV). Gastos paginados con `?pa
 
 ```
 1. proveedores  → escribe `proveedores` en entity_link_store
-2. orden_compra → lee `proveedores` + escribe `orden_compra` (cabecera + OC_ITEMS)
-3. cta_comprob  → lee `proveedores` + (vía REG_COMP) `orden_compra` + escribe `gasto`
-4. orden_pago   → lee `gasto` + escribe `orden_pago` (con HABTM gastos vía CTA_HOJA_DE_RUTA)
-5. retenciones  → lee `orden_pago` + escribe `retenciones`
+2. oc_items     → lee `proveedores` + escribe `orden_compra` (cabecera + items embebidos)
+3. solic_gastos → lee `orden_compra` (gasto_refs) + enriquece gastos existentes (UPDATE-ONLY) + escribe `gasto`
+4. orden_pago   → lee `orden_compra`/`gasto` + escribe `orden_pago` (comprobantes vía ORDEN_PAGO_IMPUT)
+5. retenciones  → lee `orden_pago` + escribe `retenciones` (desde ORDEN_PAGO_DEDUC)
 ```
 
 > El orden es **estricto**. Cada entidad depende de que las anteriores ya hayan sido importadas y sus IDs remotos guardados en el entity_link_store. El campo `JURISDICCION` se resuelve a `centro_costo_id` por mapeo hardcodeado en `gateway_mapper.py`.
@@ -568,10 +569,10 @@ El mapping debe coincidir con los IDs reales de `centros_costo` del tenant desti
 {
   "external_id": { "ejercicio": int, "uni_compra": int, "nro_oc": int },
   "Pedido": {
-    "internal_id": "{ejercicio}-{nro_oc}",
+    "internal_id": "{ejercicio % 100}-{nro_oc}",
     "tipo": "orden_compra",
     "proveedor_id": int(lookup COD_PROV),
-    "observacion": "Migrado RAFAM OC {ejercicio}-{uni_compra}-{nro_oc}"
+    "observacion": "solo si la OC tiene OBSERVACIONES reales en RAFAM (nunca fabricar traza)"
   },
   "items": [{
     "name": "DESCRIPCION limpia",
@@ -583,11 +584,17 @@ El mapping debe coincidir con los IDs reales de `centros_costo` del tenant desti
 }
 ```
 
-### 12.4 Gastos (facturas reales del proveedor — `CTA_COMPROB`)
+### 12.4 Gastos (facturas reales del proveedor — `SOLIC_GASTOS` + `CTA_COMPROB` vía `REG_COMP`)
+
+**Modo UPDATE-ONLY (enriquecimiento):** el script NO crea gastos. Consulta
+`resolver_gasto.json` para localizar gastos parciales que Paxapos ya creó
+(cuando el proveedor subió la factura sobre una OC) y envía solo los campos
+vacíos (`Gasto: {id, merge: "fill_empty", ...}`). El `external_id` usa la
+identidad de la solicitud de gasto:
 
 ```json
 {
-  "external_id": { "ejercicio": int, "nro_reg_comp": int },
+  "external_id": { "ejercicio": int, "deleg_solic": int, "nro_solic": int },
   "Gasto": {
     "fecha": "YYYY-MM-DD",
     "importe_total": float(CTA_COMPROB.IMPORTE_COMPR),
@@ -642,12 +649,14 @@ El mapping debe coincidir con los IDs reales de `centros_costo` del tenant desti
 | `PAXAPOS_RAFAM_SPEC_PATH` | Path relativo o URL absoluta de spec RAFAM dentro de Paxapos | `rafam/migracion/spec.json` |
 | `PAXAPOS_RAFAM_LOOKUPS_PATH` | Path relativo o URL absoluta de lookups RAFAM dentro de Paxapos | `rafam/migracion/lookups.json` |
 | `PAXAPOS_RAFAM_RESOLVER_MERCADERIA_PATH` | Path relativo o URL absoluta del resolver determinístico de mercaderías RAFAM dentro de Paxapos | `rafam/migracion/resolver_mercaderia.json` |
-| `PAXAPOS_RAFAM_DEFAULT_UNIDAD_ID` | ID unidad de medida Paxapos default | Verificar contra `lookups`; ejemplo `.env`: `1` |
+| `PAXAPOS_RAFAM_RESOLVER_GASTO_PATH` | Path relativo o URL absoluta del resolver de gastos (enriquecimiento UPDATE-ONLY) | `rafam/migracion/resolver_gasto.json` |
 | `PAXAPOS_RAFAM_DEFAULT_TIPO_FACTURA_ID` | ID tipo factura Paxapos default | (vacío) |
 | `PAXAPOS_RAFAM_DEFAULT_TIPO_PAGO_ID` | ID tipo de pago Paxapos default (`Otros`) | `10` |
 | `RAFAM_SYNC_BATCH_DELAY_SECONDS` | Delay local entre batches | `2` |
-| `PAXAPOS_VERIFY_SSL` | Verificación SSL | `false` en dev |
+| `PAXAPOS_VERIFY_SSL` | Verificación SSL (default de código: `true`; solo apagar en dev) | `true` |
 | `PAXAPOS_TIMEOUT_SECONDS` | Timeout HTTP | `20` |
+
+> `PAXAPOS_RAFAM_DEFAULT_UNIDAD_ID` NO existe en el código: la unidad default está hardcodeada (`_UM_DEFAULT=5` en `gateway_mapper.py`) y se resuelve primero por link/lookup remoto.
 
 ---
 
@@ -657,7 +666,7 @@ Reglas que no se deducen de la documentación estándar pero causan bugs si se i
 
 ### 14.1 Unidad de medida default depende del tenant
 
-No asumir que `id=1` es "Unidad" en todos los tenants. En seeds legacy de gastronomía, `id=1` era **"Planta"** y **"Unidad" era `id=5`**. El script resuelve primero por `link_unidad_medida`, luego por lookup remoto con nombre `Unidad`, luego usa `PAXAPOS_RAFAM_DEFAULT_UNIDAD_ID` y finalmente fallback interno. Antes de una importación real, consultar `make migrator-lookups` y configurar `PAXAPOS_RAFAM_DEFAULT_UNIDAD_ID` con el ID correcto del tenant.
+No asumir que `id=1` es "Unidad" en todos los tenants. En seeds legacy de gastronomía, `id=1` era **"Planta"** y **"Unidad" era `id=5`**. El script resuelve primero por `link_unidad_medida`, luego por lookup remoto con nombre `Unidad` y finalmente el fallback interno `_UM_DEFAULT=5` (`gateway_mapper.py`). Antes de una importación real, consultar `make migrator-lookups` y verificar que el ID de 'Unidad' del tenant coincida (si no, ajustar `_UM_DEFAULT`).
 
 ### 14.2 CUIT se limpia automáticamente — dedup por dígitos
 

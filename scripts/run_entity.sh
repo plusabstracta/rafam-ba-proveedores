@@ -35,43 +35,23 @@ if [[ "$ENTITY" == "all" ]]; then
     T0=$(date +%s)
     cd "$PROJECT_DIR"
 
-    ENTITIES=(proveedores oc_items solic_gastos orden_pago retenciones)
-    TOTAL=${#ENTITIES[@]}
-    FAIL_COUNT=0
-
-    for IDX in "${!ENTITIES[@]}"; do
-        E="${ENTITIES[$IDX]}"
-        POS=$((IDX + 1))
-        ET0=$(date +%s)
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] [PROGRESS] [$POS/$TOTAL] START entidad=$E" | tee -a "$LOG_FILE"
-
-        if .venv/bin/python main.py run --entity "$E" >> "$LOG_FILE" 2>&1; then
-            ERC=0
-        else
-            ERC=$?
-        fi
-        EELAPSED=$(( $(date +%s) - ET0 ))
-
-        if [[ $ERC -eq 0 ]]; then
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] [PROGRESS] [$POS/$TOTAL] OK entidad=$E rc=$ERC duracion=${EELAPSED}s" | tee -a "$LOG_FILE"
-        elif [[ $ERC -eq 75 ]]; then
-            # 75 = EX_TEMPFAIL: otro proceso tiene el lock global de main.py.
-            # No es un fallo; la proxima corrida del cron lo retoma.
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] [PROGRESS] [$POS/$TOTAL] SKIP entidad=$E rc=$ERC (lock ocupado) duracion=${EELAPSED}s" | tee -a "$LOG_FILE"
-        else
-            FAIL_COUNT=$((FAIL_COUNT + 1))
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] [PROGRESS] [$POS/$TOTAL] FAIL entidad=$E rc=$ERC duracion=${EELAPSED}s" | tee -a "$LOG_FILE"
-        fi
-    done
-
+    # UN solo proceso, como documenta README/cron.conf: main.py run sin
+    # --entity ejecuta las 5 entidades en orden de FK (una entidad que falla
+    # se registra y las demas siguen). Un proceso por entidad multiplicaba
+    # x5 conexiones Oracle, fetch de lookups y registros de run_history.
+    if .venv/bin/python main.py run --batch-size 500 >> "$LOG_FILE" 2>&1; then
+        RC=0
+    else
+        RC=$?
+    fi
     ELAPSED=$(( $(date +%s) - T0 ))
-    if [[ $FAIL_COUNT -eq 0 ]]; then
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] [END] all: rc=0 duracion=${ELAPSED}s" | tee -a "$LOG_FILE"
+
+    if [[ $RC -eq 75 ]]; then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] [END] all: SKIP rc=$RC (lock ocupado) duracion=${ELAPSED}s" | tee -a "$LOG_FILE"
         exit 0
     fi
-
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [END] all: rc=1 duracion=${ELAPSED}s fallas=$FAIL_COUNT" | tee -a "$LOG_FILE"
-    exit 1
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [END] all: rc=$RC duracion=${ELAPSED}s" | tee -a "$LOG_FILE"
+    exit $RC
 fi
 
 echo "[$TS_START] [START] ${ENTITY}" | tee -a "$LOG_FILE"

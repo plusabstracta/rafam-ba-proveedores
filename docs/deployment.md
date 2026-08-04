@@ -4,7 +4,7 @@
 
 | Requisito | Detalle |
 |-----------|---------|
-| Python | 3.10 o superior |
+| Python | 3.11 o superior |
 | Oracle Instant Client | Descargado en `C:\oracle\instantclient` (ver más abajo) |
 | Acceso de red a Oracle | VPN / red interna de la municipalidad activa |
 | Usuario Oracle de solo lectura | Creado por el DBA (ver sección Permisos) |
@@ -71,7 +71,6 @@ PAXAPOS_RAFAM_IMPORT_PATH=rafam/migracion/importar.json
 PAXAPOS_RAFAM_SPEC_PATH=rafam/migracion/spec.json
 PAXAPOS_RAFAM_LOOKUPS_PATH=rafam/migracion/lookups.json
 PAXAPOS_RAFAM_RESOLVER_MERCADERIA_PATH=rafam/migracion/resolver_mercaderia.json
-PAXAPOS_RAFAM_DEFAULT_UNIDAD_ID=<id de Unidad segun lookups>
 PAXAPOS_RAFAM_DEFAULT_TIPO_FACTURA_ID=
 PAXAPOS_RAFAM_DEFAULT_TIPO_PAGO_ID=10
 RAFAM_SYNC_BATCH_DELAY_SECONDS=2
@@ -172,7 +171,7 @@ Dependiendo del volumen puede tardar. Se recomienda:
 
 ## Exploración del esquema Oracle
 
-Para regenerar `docs/rafam_schema.md` con la estructura real de las tablas:
+Para regenerar `docs/rafam_schema_and_joins.md` con la estructura real de las tablas:
 
 ```bash
 python scripts/explore_schema.py

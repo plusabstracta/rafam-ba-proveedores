@@ -206,11 +206,11 @@ graph TD
 ## 3. Arquitectura del Script, Resiliencia e Integridad
 
 ### 3.1 Almacenamiento de Estado (SQLite Local)
-El proyecto mantiene tres bases SQLite locales en `packages/rafam-ba-proveedores/state/`:
-1. **Checkpoints (`state/checkpoint.db`):** Guarda la marca de agua incremental (`last_id`, `last_ts`, `records_sent`, `status`).
-   - *Watermark Parcial por Batch:* Si la corrida se interrumpe (kill, OOM, timeout), `advance_partial` guarda el progreso del último batch OK para reanudar sin rebobinar.
-2. **Entity Links (`state/entity_links.db`):** Mapeo `(entidad, source_key) → remote_id` en Paxapos. Guarda metadatos como `payload_hash`, `fingerprint`, `has_op`, y referencias de comprobantes.
-3. **Retry Store (`state/retry.db`):** Cola de reintentos para registros salteados por dependencias faltantes (`REASON_DEPENDENCY_MISSING`).
+Todo el estado local vive en **una unica base SQLite** (`LOCAL_STATE_DB_PATH`, default `state/checkpoint.db`), con tres grupos de tablas:
+1. **Checkpoints:** Guarda la marca de agua incremental (`last_id`, `last_ts`, `records_sent`, `status`).
+   - *Watermark Parcial por Batch:* Si la corrida se interrumpe (kill, OOM, timeout), `advance_partial` guarda el progreso del último batch OK para reanudar sin rebobinar. Si un batch falla, el watermark se congela en el último batch OK anterior al fallo.
+2. **Entity Links (tablas `link_<entidad>`):** Mapeo `(entidad, source_key) → remote_id` en Paxapos. Guarda metadatos como `payload_hash`, `fingerprint`, `has_op`, y referencias de comprobantes.
+3. **Retry Queue (tabla `retry_queue`):** Cola de reintentos para registros salteados por dependencias faltantes (`REASON_DEPENDENCY_MISSING`) o rechazados por el receptor (`REASON_BACKEND_REJECTED`).
 
 ### 3.2 Lock de Ejecución Concurrente
 Para evitar conflictos cuando ejecutan cronjobs o comandos manuales paralelos, `main.py` utiliza un lock exclusivo a nivel de sistema operativo mediante `fcntl.flock` sobre `state/migrator.lock`. Si un proceso intenta ejecutarse mientras otro está activo, se aborta limpiamente con exit code 75 (`EX_TEMPFAIL`).

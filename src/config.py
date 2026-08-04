@@ -125,7 +125,8 @@ ENTITY_CONFIGS: dict[str, EntityConfig] = {
     # (INCISO, PAR_PRIN, PAR_PARC, PAR_SUBP, DENOMINACION) — ver
     # SourceRepository._build_clasificaciones_statement. Sin filtro de
     # ejercicio: es un catalogo atemporal. NO corre en el run por defecto
-    # (main.py: solo proveedores + oc_items); se invoca con --entity clasificaciones.
+    # (pipeline oficial: proveedores, oc_items, solic_gastos, orden_pago,
+    # retenciones); se invoca con --entity clasificaciones.
     "clasificaciones": EntityConfig(
         name="clasificaciones",
         table_name="GASTOS",

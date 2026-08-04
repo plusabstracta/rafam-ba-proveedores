@@ -8,6 +8,12 @@ origin: ECC
 
 Idiomatic Python patterns and best practices for building robust, efficient, and maintainable applications.
 
+> **Invariantes de ESTE repo que prevalecen sobre los ejemplos genéricos de abajo:**
+> - HTTP solo con stdlib (`urllib.request`/`urllib.error`). PROHIBIDO `requests`, `httpx`, `aiohttp`.
+> - Sin frameworks web (nada de FastAPI/Flask): esto es un script CLI.
+> - Acceso a datos únicamente vía SQLAlchemy 2.x.
+> Ver `.github/instructions/project-overview.instructions.md` §2.
+
 ## When to Activate
 
 - Writing new Python code

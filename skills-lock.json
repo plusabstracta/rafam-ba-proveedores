@@ -5,18 +5,21 @@
       "source": "anthropics/knowledge-work-plugins",
       "sourceType": "github",
       "skillPath": "engineering/skills/code-review/SKILL.md",
-      "computedHash": "919719020590499db120437b53defa7dcb05e138aa5ce9e55034b88dbad7fff8"
+      "computedHash": "93d89ef2010822a93b0afe0d68fca2db713877ffddfce1d793071213b77b5e00",
+      "localizedForProject": true
     },
     "memory-management": {
       "source": "anthropics/knowledge-work-plugins",
       "sourceType": "github",
       "skillPath": "productivity/skills/memory-management/SKILL.md",
-      "computedHash": "8178769b6efe5ef38b1e0eeea682b83ff79a1e3b93acb96aa203ebcfb96d9b98"
+      "computedHash": "ad42fd09cbab585b8ae8fcce54e711d37105d5d5b7d9ceaf9b29bf6441f7a88d"
     },
     "python-patterns": {
       "source": "affaan-m/everything-claude-code",
       "sourceType": "github",
-      "computedHash": "16fa370e24821a211eff44d9deb129e05f4ccebfaa8c14277824fd4103635af5"
+      "skillPath": "skills/python-patterns/SKILL.md",
+      "computedHash": "27a8bed3cf152244a5be8169866642f0977365d019f240eddd6961dce35501c5",
+      "localizedForProject": true
     }
   }
 }
