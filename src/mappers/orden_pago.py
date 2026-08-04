@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import logging
 
-from ..utils import format_date_only, parse_money, to_int
+from ..utils import env_bool, format_date_only, parse_money, to_int
 from ..retry_store import REASON_DEPENDENCY_MISSING
 from ..validation import validate_amount
 from .clasificaciones import code_str as clasif_code_str
@@ -395,7 +395,14 @@ class OrdenPagoMapper:
         skipped_no_oc_canonica = 0
         skipped_no_oc_link = 0
         skipped_multiple_oc = 0
+        sent_sin_oc = 0
         warned_facturas_exceed_oc = 0
+        # Pagos de gasto directo (con factura real en CTA_COMPROB pero sin OC
+        # en REG_COMP: servicios, etc.). Con el flag activo se envian SIN
+        # pedido_id: Paxapos crea/deduplica el Gasto por proveedor+factura_nro
+        # y vincula el Egreso igual. Con el flag apagado se omiten (solo pagos
+        # respaldados por OC), comportamiento historico.
+        migrar_sin_oc = env_bool("RAFAM_MIGRAR_OP_SIN_OC", "true")
 
         for key, op in grouped.items():
             cc_nros = grouped_cc_nros.get(key, [])
@@ -423,6 +430,7 @@ class OrdenPagoMapper:
                 op["gasto_nro_comprobante"] = cc_nros
 
             pedido_ids = grouped_pedido_ids.get(key, [])
+            pedido_id: int | None = None
             if len(pedido_ids) == 1:
                 pedido_id = pedido_ids[0]
                 op["pedido_id"] = pedido_id
@@ -438,29 +446,41 @@ class OrdenPagoMapper:
                 oc_source_keys = grouped_oc_source_keys.get(key, [])
                 internal_ids = grouped_pedido_internal_ids.get(key, [])
                 if not oc_source_keys:
-                    skipped_no_oc_canonica += 1
-                    self._enqueue_op(key, "sin OC canonica en REG_COMP", dry_run)
+                    # Gasto directo: la OP tiene factura imputada (paso el check
+                    # de cc_nros arriba) pero su REG_COMP no referencia OC — la
+                    # OC no va a existir nunca. Con el flag activo se envia sin
+                    # pedido_id; sin flag, se omite y encola (historico).
+                    if migrar_sin_oc:
+                        sent_sin_oc += 1
+                        logger.debug(
+                            "Migrator [orden_pago] OP %s-%s: gasto directo sin OC — se envia sin pedido_id",
+                            key[0], key[1],
+                        )
+                    else:
+                        skipped_no_oc_canonica += 1
+                        self._enqueue_op(key, "sin OC canonica en REG_COMP", dry_run)
+                        logger.debug(
+                            "Migrator [orden_pago] OP %s-%s omitida: sin OC canonica en "
+                            "REG_COMP imputado por ORDEN_PAGO_IMPUT (pedido_internal_id candidatos=%s)",
+                            key[0], key[1], internal_ids,
+                        )
+                        continue
+                else:
+                    skipped_no_oc_link += 1
+                    self._enqueue_op(key, "OC aun no migrada en Paxapos", dry_run)
                     logger.debug(
-                        "Migrator [orden_pago] OP %s-%s omitida: sin OC canonica en "
-                        "REG_COMP imputado por ORDEN_PAGO_IMPUT (pedido_internal_id candidatos=%s)",
-                        key[0], key[1], internal_ids,
+                        "Migrator [orden_pago] OP %s-%s omitida: sin OC migrada en link_store "
+                        "(oc_source_keys=%s, pedido_internal_id candidatos=%s)",
+                        key[0], key[1], oc_source_keys, internal_ids,
                     )
                     continue
-
-                skipped_no_oc_link += 1
-                self._enqueue_op(key, "OC aun no migrada en Paxapos", dry_run)
-                logger.debug(
-                    "Migrator [orden_pago] OP %s-%s omitida: sin OC migrada en link_store "
-                    "(oc_source_keys=%s, pedido_internal_id candidatos=%s)",
-                    key[0], key[1], oc_source_keys, internal_ids,
-                )
-                continue
 
             for cc_key in grouped_cc_keys.get(key, []):
                 if cc_key not in included_cc_key_set:
                     included_cc_key_set.add(cc_key)
                     included_cc_keys.append(cc_key)
-                cc_key_to_pedido_id.setdefault(cc_key, pedido_id)
+                if pedido_id is not None:
+                    cc_key_to_pedido_id.setdefault(cc_key, pedido_id)
 
             # Mapear deducciones
             ret_payload: list[dict] = []
@@ -533,10 +553,16 @@ class OrdenPagoMapper:
                 "(sin ORDEN_PAGO_IMPUT=%d, sin OPI_NRO_COMPROB=%d)",
                 skipped_no_gasto, skipped_no_opi, skipped_no_comprobante,
             )
+        if sent_sin_oc:
+            logger.info(
+                "Migrator [orden_pago]: %d OPs de gasto directo (sin OC) enviadas sin pedido_id "
+                "(RAFAM_MIGRAR_OP_SIN_OC=true)",
+                sent_sin_oc,
+            )
         if skipped_no_oc_canonica:
             logger.warning(
                 "Migrator [orden_pago]: %d OPs omitidas sin OC canonica en RAFAM; "
-                "no se crean pagos ni gastos sueltos",
+                "no se crean pagos ni gastos sueltos (RAFAM_MIGRAR_OP_SIN_OC=false)",
                 skipped_no_oc_canonica,
             )
         if skipped_no_oc_link:

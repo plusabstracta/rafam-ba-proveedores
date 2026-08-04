@@ -47,7 +47,7 @@ dependencia (FK):
 | 2 | `proveedores` | `make migrate-proveedores` | `proveedores[]` | Crea/actualiza proveedores. |
 | 3 | `oc_items` | `make migrate-oc` | `ordenes_compra[]` | Arma cabecera de OC + items embebidos. |
 | 4 | `solic_gastos` | `make migrate-facturas` | `gastos[]` | Enriquecimiento UPDATE-ONLY: completa campos vacios de gastos que Paxapos ya creo (via `resolver_gasto`), desde `SOLIC_GASTOS` + `CTA_COMPROB` (via `REG_COMP`), resolviendo `pedido_id` contra OCs migradas. No crea gastos sueltos. |
-| 5 | `orden_pago` | `make migrate-op` | `ordenes_pago[]` + `gastos[]` + retenciones | Crea egresos, vincula gastos y embebe retenciones (`ORDEN_PAGO_DEDUC`). |
+| 5 | `orden_pago` | `make migrate-op` | `ordenes_pago[]` + `gastos[]` + retenciones | Crea egresos, vincula gastos y embebe retenciones (`ORDEN_PAGO_DEDUC`). Los pagos de gasto directo (factura real sin OC) se envian sin `pedido_id` cuando `RAFAM_MIGRAR_OP_SIN_OC=true` (default). |
 | 6 | `retenciones` | `make migrate-retenciones` | `retenciones[]` | Reenvia retenciones (`ORDEN_PAGO_DEDUC`, 1:1 por `NRO_OP`) de OPs ya migradas. |
 
 La entidad `orden_compra` quedo fuera del pipeline por defecto (el exporter la trata como
@@ -413,6 +413,27 @@ make status
 ```
 
 Revisar tambien los logs del portal Paxapos si el migrator devuelve errores parciales.
+
+## Fiabilidad: cola de reintentos, reportes y backups
+
+- **Cola de reintentos**: las filas salteadas por dependencia faltante o rechazadas por el
+  receptor (207 por fila) se encolan en `retry_queue` y se **reinyectan en la query** de la
+  proxima corrida para `proveedores`, `solic_gastos`, `orden_pago` y `retenciones`
+  (`oc_items` es full-scan y se auto-recupera). Las filas esperando una dependencia no
+  "queman" intentos; las rechazadas pasan a `permanent` tras 10 intentos.
+- **Mail diario**: la seccion "COLA DE REINTENTOS" muestra el estado real de la cola al
+  inicio y fin del dia por entidad (antes siempre figuraba vacia).
+- **OPs sin orden de compra** (`RAFAM_MIGRAR_OP_SIN_OC`, default `true`): los pagos de gasto
+  directo — con factura imputada en `ORDEN_PAGO_IMPUT`/`CTA_COMPROB` pero sin OC en
+  `REG_COMP` — se envian sin `pedido_id`; Paxapos deduplica el gasto por
+  `proveedor + factura_nro`. Con `false` se migran solo pagos respaldados por OC.
+- **Gastos con varios comprobantes**: las solicitudes de gasto con 2+ facturas se expanden
+  en un enriquecimiento por comprobante (antes se omitian por completo).
+- **Anulaciones**: `check_integrity` alerta por email cuando detecta registros anulados o
+  eliminados en RAFAM ya migrados a Paxapos (el endpoint no soporta anular egresos: hay que
+  corregirlos a mano en el portal).
+- **Backups**: `check_integrity` deja un backup diario de `state/checkpoint.db` en
+  `state/backups/` (retencion 7 dias) antes de operar.
 
 ## Recuperacion y re-ejecucion
 

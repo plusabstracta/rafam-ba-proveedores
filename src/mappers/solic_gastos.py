@@ -36,10 +36,13 @@ ENRICHABLE_GASTO_FIELDS = frozenset({
 class SolicGastosMapper:
     """Mapper para gastos de solicitud (SOLIC_GASTOS + CTA_COMPROB)."""
 
-    def __init__(self, *, link_store, lookup_resolver, resolve_gastos_fn=None):
+    def __init__(self, *, link_store, lookup_resolver, resolve_gastos_fn=None, source_repo=None):
         self._link_store = link_store
         self._lookup = lookup_resolver
         self._resolve_gastos_fn = resolve_gastos_fn
+        # Inyectado por exporter.attach_source: se usa para expandir SGs con
+        # multiples comprobantes (fetch_cta_comprob_for_sgs).
+        self._source_repo = source_repo
 
     def build_payload(
         self,
@@ -75,13 +78,26 @@ class SolicGastosMapper:
                 if ref:
                     oc_ref_to_pedido.setdefault(ref, pedido_id)
 
-        mapped: list[dict] = []
-        skipped_no_oc = 0
+        # Mapear cada fila. Las SGs con 2+ comprobantes no caben en la fila
+        # agregada (MIN() trae uno solo): se juntan y se expanden despues en un
+        # candidato por comprobante via fetch_cta_comprob_for_sgs.
+        candidates: list[tuple[dict, dict]] = []
+        multi_pending: list[dict] = []
         for row in rows:
             raw = dict(zip(columns, row))
-            gasto = self._map_solic_gasto(raw)
-            if gasto is None:
+            cta_count = to_int(raw.get("CTA_COMPROB_COUNT"))
+            if cta_count is not None and cta_count > 1:
+                multi_pending.append(raw)
                 continue
+            gasto = self._map_solic_gasto(raw)
+            if gasto is not None:
+                candidates.append((gasto, raw))
+
+        candidates.extend(self._expand_multi_comprobante(multi_pending))
+
+        mapped: list[dict] = []
+        skipped_no_oc = 0
+        for gasto, raw in candidates:
             ext = gasto.get("external_id", {})
             rafam_ref = _gasto_ref_from_external_id(ext) if ext else ""
             if rafam_ref not in allowed_refs:
@@ -234,6 +250,86 @@ class SolicGastosMapper:
             "ordenes_pago": [],
         }
         return payload, raw_by_source_key
+
+    # Campos de comprobante que se sobreescriben al expandir una SG multi.
+    _CTA_FIELDS = (
+        "CTA_NRO_COMPROB", "CTA_TIPO_COMPROB", "CTA_FECH_COMPROB",
+        "CTA_FECH_VENCIM", "CTA_IMPORTE_COMPR", "CTA_IMPORTE_NETO",
+        "CTA_IMPORTE_SIN_IVA",
+    )
+
+    def _expand_multi_comprobante(self, pending: list[dict]) -> list[tuple[dict, dict]]:
+        """Expande SGs con 2+ comprobantes en un candidato por comprobante.
+
+        Antes estas SGs se OMITIAN por completo (CTA_COMPROB_COUNT != 1) y sus
+        gastos nunca se enriquecian. Cada candidato lleva el external_id
+        extendido con ``nro_comprob`` para que los links locales no colisionen
+        entre comprobantes de la misma SG; el resolver los matchea por
+        identidad de comprobante (proveedor + pdv + nro + tipo).
+        """
+        if not pending:
+            return []
+        if self._source_repo is None:
+            logger.info(
+                "Migrator [solic_gastos]: %d SGs con multiples comprobantes omitidas "
+                "(sin source_repo para expandirlas)",
+                len(pending),
+            )
+            return []
+
+        raw_by_key: dict[tuple[int, int, int], dict] = {}
+        for raw in pending:
+            ej = to_int(raw.get("EJERCICIO"))
+            deleg = to_int(raw.get("DELEG_SOLIC"))
+            nro = to_int(raw.get("NRO_SOLIC"))
+            if ej is None or deleg is None or nro is None:
+                continue
+            raw_by_key.setdefault((ej, deleg, nro), raw)
+
+        if not raw_by_key:
+            return []
+
+        try:
+            comps = self._source_repo.fetch_cta_comprob_for_sgs(list(raw_by_key.keys()))
+        except Exception as exc:
+            logger.warning(
+                "Migrator [solic_gastos]: fallo el fetch de comprobantes multiples (%s); "
+                "%d SGs quedan sin enriquecer este lote",
+                exc, len(raw_by_key),
+            )
+            return []
+        if comps is None:
+            logger.warning(
+                "Migrator [solic_gastos]: REG_COMP/CTA_COMPROB no disponibles; "
+                "%d SGs multi-comprobante sin enriquecer",
+                len(raw_by_key),
+            )
+            return []
+
+        out: list[tuple[dict, dict]] = []
+        for key, comp_rows in comps.items():
+            base = raw_by_key.get(key)
+            if base is None:
+                continue
+            for comp in comp_rows:
+                candidate = dict(base)
+                for field in self._CTA_FIELDS:
+                    candidate[field] = comp.get(field)
+                candidate["CTA_COMPROB_COUNT"] = 1
+                gasto = self._map_solic_gasto(candidate)
+                if gasto is None:
+                    continue
+                nro_comprob = str(comp.get("CTA_NRO_COMPROB") or "").strip()
+                gasto["external_id"] = {**gasto["external_id"], "nro_comprob": nro_comprob}
+                out.append((gasto, candidate))
+
+        if out:
+            logger.info(
+                "Migrator [solic_gastos]: %d SGs con multiples comprobantes expandidas "
+                "en %d candidatos de enriquecimiento",
+                len(raw_by_key), len(out),
+            )
+        return out
 
     def _map_solic_gasto(self, raw: dict) -> dict | None:
         """Mapea una fila de SOLIC_GASTOS + CTA_COMPROB al formato Paxapos."""

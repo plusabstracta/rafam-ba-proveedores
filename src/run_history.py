@@ -61,6 +61,11 @@ def record_run(summary_data: dict, entity_metrics: list[dict]) -> None:
         "duration_formatted": summary_data.get("duration_formatted"),
         "success": summary_data.get("success", False),
         "error_msg": summary_data.get("error_msg"),
+        # Snapshot de la cola de reintentos al inicio/fin de la corrida.
+        # El resumen diario los agrega para que la cola sea visible en el mail
+        # (sin esto, filas encoladas se acumulaban invisiblemente).
+        "retry_counts_start": summary_data.get("retry_counts_start") or {},
+        "retry_counts_end": summary_data.get("retry_counts_end") or {},
         "entities": [
             {
                 "entity": m.get("entity"),
@@ -193,6 +198,19 @@ def aggregate_runs(runs: list[dict], date_str: str) -> tuple[dict, list[dict]]:
     mm, ss = divmod(rem, 60)
     duration_formatted = f"{h:02d}:{mm:02d}:{ss:02d}"
 
+    # Cola de reintentos: el estado del dia es "como arranco la primera corrida"
+    # vs "como termino la ultima" (los snapshots intermedios no aportan).
+    retry_start: dict = {}
+    retry_end: dict = {}
+    for r in runs:
+        if r.get("retry_counts_start"):
+            retry_start = r["retry_counts_start"]
+            break
+    for r in reversed(runs):
+        if r.get("retry_counts_end"):
+            retry_end = r["retry_counts_end"]
+            break
+
     summary_data = {
         "subject": f"Resumen diario RAFAM {date_str} — {status_label}",
         "hostname": (runs[-1].get("hostname") if runs else None) or "—",
@@ -202,7 +220,7 @@ def aggregate_runs(runs: list[dict], date_str: str) -> tuple[dict, list[dict]]:
         "success": not any_fail,
         "error_msg": (f"Entidades con error en el día: {', '.join(failed)}" if failed else None),
         "runs_count": len(runs),
-        "retry_counts_start": {},
-        "retry_counts_end": {},
+        "retry_counts_start": retry_start,
+        "retry_counts_end": retry_end,
     }
     return summary_data, entity_metrics

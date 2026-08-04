@@ -93,6 +93,47 @@ class EntityResult:
 
 # ── Lógica de verificación ────────────────────────────────────────────────────
 
+_BACKUP_RETENTION = 7
+
+
+def _backup_state_db(db_path: str) -> None:
+    """Backup diario de la SQLite de estado (checkpoints + links + retry queue).
+
+    Esa base es el unico registro de los vinculos RAFAM -> Paxapos: perderla
+    obliga a backfills manuales. Un backup por dia via sqlite3 .backup (copia
+    consistente aunque haya escrituras), reteniendo los ultimos
+    _BACKUP_RETENTION dias. Corre junto al check de integridad diario.
+    """
+    import sqlite3
+    from datetime import date
+
+    src = Path(db_path)
+    if not src.exists():
+        return
+    backup_dir = src.parent / "backups"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    dest = backup_dir / f"{src.stem}-{date.today():%Y%m%d}{src.suffix or '.db'}"
+    if dest.exists():
+        logger.debug("Backup del dia ya existe: %s", dest)
+        return
+    try:
+        with sqlite3.connect(str(src)) as source_conn, sqlite3.connect(str(dest)) as dest_conn:
+            source_conn.backup(dest_conn)
+        logger.info("Backup del estado local creado: %s", dest)
+    except Exception as exc:
+        logger.warning("No se pudo crear el backup del estado local: %s", exc)
+        dest.unlink(missing_ok=True)
+        return
+    # Retencion: borrar los mas viejos
+    backups = sorted(backup_dir.glob(f"{src.stem}-*{src.suffix or '.db'}"))
+    for old in backups[:-_BACKUP_RETENTION]:
+        try:
+            old.unlink()
+            logger.debug("Backup viejo eliminado: %s", old)
+        except OSError:
+            pass
+
+
 def check_anulaciones(
     entity: str,
     link_store: EntityLinkStore,
@@ -430,6 +471,9 @@ def main() -> int:
     # resto del sistema). El alias LINK_STORE_PATH apuntaba a otra DB y dejaba
     # la verificacion corriendo contra un store distinto al real.
     link_store_path = os.environ.get("LOCAL_STATE_DB_PATH", "state/checkpoint.db")
+    # Backup diario del estado local ANTES de tocarlo (unico registro de los
+    # vinculos RAFAM -> Paxapos).
+    _backup_state_db(link_store_path)
     link_store = EntityLinkStore(db_path=link_store_path)
 
     # Exporter solo se necesita en modo apply para proveedores
@@ -487,10 +531,17 @@ def main() -> int:
     # ── Notificación por email ────────────────────────────────────────────
     total_actualizados = sum(r.actualizados for r in results)
     total_anulados = sum(r.anulados for r in results)
+    total_fisicos = sum(r.fisicamente_eliminados for r in results)
     total_errores = sum(r.errores for r in results)
 
-    # Solo notificar por mail si hay errores reales (total_errores > 0)
-    if total_errores > 0 and not getattr(args, "no_notify", False):
+    # Notificar si hay errores O anulaciones/eliminaciones fisicas detectadas.
+    # Las anulaciones (en especial de ordenes_pago) NO se pueden propagar a
+    # Paxapos automaticamente (el endpoint no soporta update post-creacion):
+    # el Egreso queda "Pagado" alla aunque en RAFAM este anulado, asi que un
+    # humano debe enterarse y corregirlo a mano. Antes esto era invisible
+    # (solo se mailaba con errores).
+    debe_notificar = (total_errores > 0 or total_anulados > 0 or total_fisicos > 0)
+    if debe_notificar and not getattr(args, "no_notify", False):
         # Construir resumen tabular como texto para el cuerpo del email
         summary_lines: list[str] = []
         header = f"  {'Entidad':<16} {'Verif':>7} {'OK':>7} {'Actualiz':>9} {'Anulados':>9} {'Físicos':>8} {'Errores':>8}"
@@ -518,8 +569,8 @@ def main() -> int:
         )
         if sent:
             logger.info("Notificación por email enviada exitosamente")
-    elif total_errores == 0:
-        logger.debug("Notificaciones omitidas: no se registraron errores (total_errores=0)")
+    elif not debe_notificar:
+        logger.debug("Notificaciones omitidas: sin errores ni anulaciones detectadas")
     else:
         logger.debug("Notificaciones suprimidas por --no-notify")
 
