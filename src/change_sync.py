@@ -230,6 +230,19 @@ class ChangeSyncService:
             temp_exporter = MigratorExporter(dry_run=True)
             grouped, grouped_raw, grouped_gasto_refs, unresolved_items = temp_exporter._group_oc_rows(columns, all_rows)
 
+        # Indexar filas crudas por clave de OC una sola vez: recorrer all_rows
+        # dentro del loop de OCs era O(cambiadas x filas_totales) y se volvia
+        # cuadratico con miles de links.
+        rows_by_key: dict[tuple, list[tuple]] = {}
+        for row in all_rows:
+            raw = dict(zip(columns, row))
+            row_key = (
+                _to_int(raw.get("EJERCICIO")),
+                _to_int(raw.get("UNI_COMPRA")),
+                _to_int(raw.get("NRO_OC")),
+            )
+            rows_by_key.setdefault(row_key, []).append(row)
+
         # Hashear, comparar
         to_send: list[tuple] = []
         raw_by_source_key: dict[str, dict] = {}
@@ -271,13 +284,8 @@ class ChangeSyncService:
                         payload_hash=current_hash,
                     )
             else:
-                # Recolectar filas crudas de esta OC
-                for row in all_rows:
-                    raw = dict(zip(columns, row))
-                    if (_to_int(raw.get("EJERCICIO")) == key[0] and
-                        _to_int(raw.get("UNI_COMPRA")) == key[1] and
-                        _to_int(raw.get("NRO_OC")) == key[2]):
-                        to_send.append(row)
+                # Recolectar filas crudas de esta OC (indexadas arriba)
+                to_send.extend(rows_by_key.get(key, []))
 
                 raw_by_source_key[source_key] = grouped_raw[key]
                 gasto_refs_list = grouped_gasto_refs.get(key, [])

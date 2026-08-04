@@ -7,6 +7,7 @@ exporter.py y gateway_mapper.py.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import unicodedata
@@ -78,6 +79,31 @@ def env_bool(name: str, default: str | bool = "true") -> bool:
         default = "true" if default else "false"
     value = os.getenv(name, default)
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+_FALSY_TOKENS = frozenset({"0", "false", "no", "off"})
+
+
+def env_verify_ssl(name: str = "PAXAPOS_VERIFY_SSL") -> bool:
+    """Parser FAIL-SAFE para la flag de verificacion SSL.
+
+    A diferencia de env_bool (que devuelve False ante cualquier valor no
+    reconocido), la verificacion SSL solo se deshabilita con un valor
+    explicitamente falso ("0", "false", "no", "off"). Un typo como
+    "si"/"verdadero"/"enable" NO debe apagar la verificacion en silencio.
+    """
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return True
+    token = raw.strip().lower()
+    if token in _FALSY_TOKENS:
+        return False
+    if token not in {"1", "true", "yes", "on"}:
+        logging.getLogger(__name__).warning(
+            "%s=%r no es un booleano reconocido; se asume 'true' (verificacion SSL ACTIVA)",
+            name, raw,
+        )
+    return True
 
 
 # Patron para redactar campos sensibles en dumps de payload.

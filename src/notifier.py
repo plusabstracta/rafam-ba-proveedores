@@ -20,6 +20,7 @@ import logging
 import os
 import smtplib
 import socket
+import ssl
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from typing import Sequence
@@ -73,7 +74,11 @@ def send_notification(
         logger.warning("notifier: NOTIFY_SMTP_HOST no configurado — no se puede enviar email")
         return False
 
-    smtp_port = int(_env("NOTIFY_SMTP_PORT", "465"))
+    try:
+        smtp_port = int(_env("NOTIFY_SMTP_PORT", "465"))
+    except (TypeError, ValueError):
+        logger.warning("notifier: NOTIFY_SMTP_PORT invalido; usando 465")
+        smtp_port = 465
     smtp_user = _env("NOTIFY_SMTP_USER")
     smtp_password = _env("NOTIFY_SMTP_PASSWORD")
     from_addr = _env("NOTIFY_FROM") or smtp_user
@@ -100,16 +105,19 @@ def send_notification(
 
     try:
         timeout = int(_env("NOTIFY_SMTP_TIMEOUT", "15"))
+        # Contexto SSL explicito: el default de smtplib no valida certificado
+        # ni hostname, dejando la password SMTP expuesta a un MITM en login().
+        tls_context = ssl.create_default_context()
         # Puerto 465 = SSL/TLS directo; otros puertos = STARTTLS
         if smtp_port == 465:
-            with smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=timeout) as server:
+            with smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=timeout, context=tls_context) as server:
                 if smtp_user and smtp_password:
                     server.login(smtp_user, smtp_password)
                 server.sendmail(from_addr, recipients, msg.as_string())
         else:
             with smtplib.SMTP(smtp_host, smtp_port, timeout=timeout) as server:
                 server.ehlo()
-                server.starttls()
+                server.starttls(context=tls_context)
                 server.ehlo()
                 if smtp_user and smtp_password:
                     server.login(smtp_user, smtp_password)

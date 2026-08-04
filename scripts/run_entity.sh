@@ -54,6 +54,10 @@ if [[ "$ENTITY" == "all" ]]; then
 
         if [[ $ERC -eq 0 ]]; then
             echo "[$(date '+%Y-%m-%d %H:%M:%S')] [PROGRESS] [$POS/$TOTAL] OK entidad=$E rc=$ERC duracion=${EELAPSED}s" | tee -a "$LOG_FILE"
+        elif [[ $ERC -eq 75 ]]; then
+            # 75 = EX_TEMPFAIL: otro proceso tiene el lock global de main.py.
+            # No es un fallo; la proxima corrida del cron lo retoma.
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] [PROGRESS] [$POS/$TOTAL] SKIP entidad=$E rc=$ERC (lock ocupado) duracion=${EELAPSED}s" | tee -a "$LOG_FILE"
         else
             FAIL_COUNT=$((FAIL_COUNT + 1))
             echo "[$(date '+%Y-%m-%d %H:%M:%S')] [PROGRESS] [$POS/$TOTAL] FAIL entidad=$E rc=$ERC duracion=${EELAPSED}s" | tee -a "$LOG_FILE"
@@ -79,5 +83,9 @@ else
     RC=$?
 fi
 ELAPSED=$(( $(date +%s) - T0 ))
+if [[ $RC -eq 75 ]]; then
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [END] ${ENTITY}: SKIP rc=$RC (lock ocupado) duracion=${ELAPSED}s" | tee -a "$LOG_FILE"
+    exit 0
+fi
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] [END] ${ENTITY}: rc=$RC duracion=${ELAPSED}s" | tee -a "$LOG_FILE"
 exit $RC

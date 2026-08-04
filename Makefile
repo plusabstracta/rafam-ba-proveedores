@@ -169,10 +169,10 @@ migrate-retenciones-dry:
 
 # Detección de cambios (Updates por Hash)
 sync-proveedores:
-	$(PY) main.py sync-changes --entity proveedores --export migrator $(if $(BACKFILL),--backfill-only,) $(if $(DRY),--dry-run,)
+	$(PY) main.py sync-changes --entity proveedores $(if $(BACKFILL),--backfill-only,) $(if $(DRY),--dry-run,)
 
 sync-oc:
-	$(PY) main.py sync-changes --entity oc_items --export migrator $(if $(BACKFILL),--backfill-only,) $(if $(DRY),--dry-run,)
+	$(PY) main.py sync-changes --entity oc_items $(if $(BACKFILL),--backfill-only,) $(if $(DRY),--dry-run,)
 
 sync-all: sync-proveedores sync-oc
 

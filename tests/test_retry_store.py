@@ -29,10 +29,22 @@ class TestRetryStore:
         assert items[0].attempts == 1
 
     def test_enqueue_existing_increments_attempts(self, store):
-        store.enqueue("gastos", "x", REASON_DEPENDENCY_MISSING)
-        store.enqueue("gastos", "x", REASON_DEPENDENCY_MISSING)
+        store.enqueue("gastos", "x", REASON_BACKEND_REJECTED)
+        store.enqueue("gastos", "x", REASON_BACKEND_REJECTED)
         items = store.list_items("gastos")
         assert items[0].attempts == 2
+
+    def test_dependency_missing_no_incrementa_attempts(self, store):
+        """Esperar una dependencia no es un fallo: re-encolar por
+        dependency_missing no debe acercar la fila a 'permanent' (con el cron
+        cada 10 min, una OP quedaba permanent en <2h aunque su OC pudiera
+        confirmarse dias despues)."""
+        for _ in range(20):
+            store.enqueue("orden_pago", "op-espera", REASON_DEPENDENCY_MISSING)
+        items = store.list_items("orden_pago")
+        assert items[0].attempts == 1
+        assert items[0].status == STATUS_PENDING
+        assert store.pending_external_ids("orden_pago") == {"op-espera"}
 
     def test_promotes_to_permanent_after_max_attempts(self, store):
         for _ in range(3):
@@ -50,7 +62,7 @@ class TestRetryStore:
     def test_pending_external_ids_only_returns_pending(self, store):
         store.enqueue("gastos", "a", REASON_DEPENDENCY_MISSING)
         for _ in range(3):
-            store.enqueue("gastos", "b", REASON_DEPENDENCY_MISSING)
+            store.enqueue("gastos", "b", REASON_BACKEND_REJECTED)
         pending = store.pending_external_ids("gastos")
         assert pending == {"a"}
 

@@ -426,7 +426,10 @@ def main() -> int:
     conn = engine.connect()
     repo = SourceRepository(conn)
 
-    link_store_path = os.environ.get("LINK_STORE_PATH", "state/checkpoint.db")
+    # Variable canonica LOCAL_STATE_DB_PATH (misma DB que checkpoints/links del
+    # resto del sistema). El alias LINK_STORE_PATH apuntaba a otra DB y dejaba
+    # la verificacion corriendo contra un store distinto al real.
+    link_store_path = os.environ.get("LOCAL_STATE_DB_PATH", "state/checkpoint.db")
     link_store = EntityLinkStore(db_path=link_store_path)
 
     # Exporter solo se necesita en modo apply para proveedores
@@ -475,6 +478,9 @@ def main() -> int:
                 "Verificando cambios de contenido para proveedores... MODIFICACIONES/ERRORES DETECTADOS (Verificados: %d, Actualizados: %d, Errores: %d)",
                 r_hash.verificados, r_hash.actualizados, r_hash.errores
             )
+
+    conn.close()
+    engine.dispose()
 
     print_summary(results, dry_run=dry_run)
 

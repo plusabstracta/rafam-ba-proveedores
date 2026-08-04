@@ -36,6 +36,13 @@ STATUS_PERMANENT = "permanent"
 # reporta en la reconciliacion en vez de reintentarse indefinidamente.
 DEFAULT_MAX_ATTEMPTS = 10
 
+# Las filas en espera de una dependencia (OC/gasto aun no migrado) NO cuentan
+# intentos: con el pipeline corriendo cada 10 minutos, contar cada corrida como
+# "intento" volvia permanent una OP en menos de 2 horas, cuando su OC puede
+# confirmarse dias despues. La fila espera lo que haga falta; si la dependencia
+# nunca aparece, la reconciliacion la reporta igual (sigue 'pending' en cola).
+_NO_ATTEMPT_COUNT_REASONS = frozenset({REASON_DEPENDENCY_MISSING})
+
 
 @dataclass(frozen=True)
 class RetryItem:
@@ -132,7 +139,9 @@ class RetryStore:
 
         Si la fila ya existe se incrementan los intentos; al superar
         ``max_attempts`` pasa a 'permanent' para que la reporte la
-        reconciliacion en vez de reintentarse para siempre.
+        reconciliacion en vez de reintentarse para siempre. Excepcion:
+        ``dependency_missing`` no incrementa intentos (ver
+        _NO_ATTEMPT_COUNT_REASONS) — esperar una dependencia no es un fallo.
         """
         existing = self._conn.execute(
             f"SELECT attempts FROM {_TABLE} WHERE entity = ? AND external_id = ?",
@@ -157,8 +166,12 @@ class RetryStore:
                 ),
             )
         else:
-            attempts = (existing["attempts"] or 0) + 1
-            status = STATUS_PERMANENT if attempts >= self._max_attempts else STATUS_PENDING
+            if reason_code in _NO_ATTEMPT_COUNT_REASONS:
+                attempts = existing["attempts"] or 0
+                status = STATUS_PENDING
+            else:
+                attempts = (existing["attempts"] or 0) + 1
+                status = STATUS_PERMANENT if attempts >= self._max_attempts else STATUS_PENDING
             self._conn.execute(
                 f"""
                 UPDATE {_TABLE}

@@ -3,7 +3,7 @@ from pathlib import Path
 
 import oracledb
 from sqlalchemy import create_engine, event
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Engine, URL
 
 _STATE_DIR = Path(__file__).resolve().parent.parent / "state"
 
@@ -70,7 +70,16 @@ def create_source_engine() -> Engine:
             print(f"[thin mode] No se pudo inicializar Oracle Instant Client: {e}", file=sys.stderr)
             print("[aviso] Si la BD es Oracle < 12.1, instala Oracle Instant Client.", file=sys.stderr)
 
-    url = f"oracle+oracledb://{user}:{password}@{host}:{port}/?service_name={service}"
+    # URL.create escapa credenciales (passwords con @ / # % : rompian el parseo
+    # de la URL f-string) y ademas enmascara la password en repr/logs.
+    url = URL.create(
+        "oracle+oracledb",
+        username=user,
+        password=password,
+        host=host,
+        port=port,
+        query={"service_name": service},
+    )
     return create_engine(url, future=True)
 
 

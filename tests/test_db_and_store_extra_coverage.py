@@ -52,7 +52,34 @@ class TestDbFactories:
             assert create_source_engine() is sentinel
 
         init_client.assert_called_once_with(lib_dir="/opt/oracle")
-        assert create_engine_mock.call_args.args[0] == "oracle+oracledb://user:pass@db.local:1522/?service_name=RAFAM"
+        url = create_engine_mock.call_args.args[0]
+        # URL.create escapa credenciales y enmascara la password en str();
+        # render_as_string(hide_password=False) da la URL real.
+        assert url.render_as_string(hide_password=False) == (
+            "oracle+oracledb://user:pass@db.local:1522?service_name=RAFAM"
+        )
+
+    def test_create_source_engine_oracle_escapes_password(self, monkeypatch):
+        """Una password con caracteres reservados de URL (@ / # % :) no debe
+        romper el parseo ni conectar a un host equivocado."""
+        monkeypatch.setenv("RAFAM_SOURCE_BACKEND", "oracle")
+        monkeypatch.setenv("RAFAM_SOURCE_HOST", "db.local")
+        monkeypatch.setenv("RAFAM_SOURCE_PORT", "1522")
+        monkeypatch.setenv("RAFAM_SOURCE_SERVICE", "RAFAM")
+        monkeypatch.setenv("RAFAM_SOURCE_USER", "user")
+        monkeypatch.setenv("RAFAM_SOURCE_PASSWORD", "p@ss/w:rd#1%")
+        monkeypatch.setenv("ORACLE_CLIENT_DIR", "/opt/oracle")
+
+        sentinel = object()
+        with patch("src.db.oracledb.init_oracle_client"), patch(
+            "src.db.create_engine", return_value=sentinel
+        ) as create_engine_mock:
+            assert create_source_engine() is sentinel
+
+        url = create_engine_mock.call_args.args[0]
+        assert url.host == "db.local"
+        assert url.port == 1522
+        assert url.password == "p@ss/w:rd#1%"
         assert create_engine_mock.call_args.kwargs == {"future": True}
 
     def test_create_checkpoint_engine_uses_local_state_path(self, monkeypatch, tmp_path):

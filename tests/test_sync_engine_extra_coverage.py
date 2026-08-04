@@ -62,6 +62,23 @@ def test_advance_partial_advances_only_forward_and_accumulates_records(tmp_path)
     assert checkpoint.records_sent == 12
 
 
+def test_mark_success_es_monotonico_no_rebobina_cursor(tmp_path):
+    """Una corrida cuyas unicas filas son reinyecciones viejas (retry queue)
+    no debe rebobinar el watermark: la corrida siguiente re-escanearia y
+    re-enviaria meses de datos."""
+    engine = _engine(tmp_path)
+    newer = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    older = datetime(2026, 1, 15, tzinfo=timezone.utc)
+
+    engine.mark_success("items", 100, newer, 10)
+    engine.mark_success("items", 5, older, 2)
+
+    checkpoint = engine.get_checkpoint("items")
+    assert checkpoint.last_id == 100
+    assert checkpoint.last_ts == newer.replace(tzinfo=None)
+    assert checkpoint.status == "ok"
+
+
 def test_normalize_and_parse_datetime_variants():
     aware = datetime(2026, 1, 1, tzinfo=timezone.utc)
     naive = datetime(2026, 1, 1)

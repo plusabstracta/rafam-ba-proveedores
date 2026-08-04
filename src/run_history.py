@@ -124,7 +124,11 @@ def prune_reported(date_str: str) -> int:
         if d is not None and d <= date_str:
             continue
         kept.append(line)
-    path.write_text(("\n".join(kept) + "\n") if kept else "", encoding="utf-8")
+    # Escritura atomica (tmp + rename): write_text directo trunca el archivo
+    # antes de escribir, y un crash a mitad corrompia todo el historial.
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(("\n".join(kept) + "\n") if kept else "", encoding="utf-8")
+    os.replace(tmp_path, path)
     return len(kept)
 
 

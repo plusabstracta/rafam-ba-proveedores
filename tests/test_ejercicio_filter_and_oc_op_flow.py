@@ -21,7 +21,8 @@ from src.source_repository import SourceRepository
 @pytest.fixture
 def engine_with_data():
     """SQLite in-memory con tablas ORDEN_COMPRA, OC_ITEMS, SOLIC_GASTOS,
-    ORDEN_PAGO, CTA_HOJA_DE_RUTA y PROVEEDORES con datos de ej 2025 y 2026."""
+    ORDEN_PAGO, PROVEEDORES y las tablas puente reales REG_COMP,
+    CTA_COMPROB y ORDEN_PAGO_IMPUT, con datos de ej 2025 y 2026."""
     engine = create_engine("sqlite+pysqlite:///:memory:")
     with engine.connect() as conn:
         conn.execute(text("""
@@ -88,19 +89,42 @@ def engine_with_data():
                 PRIMARY KEY (EJERCICIO, NRO_OP)
             )
         """))
+        # Tablas puente reales (reemplazan a la VIEW CTA_HOJA_DE_RUTA):
+        # REG_COMP vincula SG/OC con el registro de comprobante; CTA_COMPROB
+        # es la factura; ORDEN_PAGO_IMPUT imputa cada OP a sus comprobantes.
         conn.execute(text("""
-            CREATE TABLE CTA_HOJA_DE_RUTA (
-                OC_EJERCICIO INTEGER,
-                OC_UNI_COMPRA INTEGER,
-                OC_NRO INTEGER,
-                OC_COD_PROV INTEGER,
-                SG_EJERCICIO INTEGER,
-                SG_DELEG_SOLIC INTEGER,
-                SG_NRO INTEGER,
-                OP_EJERCICIO INTEGER,
-                OP_NRO INTEGER,
-                CC_NRO TEXT,
-                CC_TIPO_COMPROB TEXT
+            CREATE TABLE REG_COMP (
+                EJERCICIO INTEGER,
+                NRO_REG_COMP INTEGER,
+                DELEG_SOLIC INTEGER,
+                NRO_SOLIC INTEGER,
+                UNI_COMPRA INTEGER,
+                NRO_OC INTEGER,
+                COD_PROV INTEGER,
+                PRIMARY KEY (EJERCICIO, NRO_REG_COMP)
+            )
+        """))
+        conn.execute(text("""
+            CREATE TABLE CTA_COMPROB (
+                EJERCICIO INTEGER,
+                NRO_REG_COMP INTEGER,
+                TIPO TEXT,
+                NRO_COMPROB TEXT,
+                COD_PROV INTEGER,
+                IMPORTE_COMPR REAL,
+                IMPORTE_SIN_IVA REAL,
+                FECH_COMPROB DATETIME,
+                FECH_VENCIM DATETIME
+            )
+        """))
+        conn.execute(text("""
+            CREATE TABLE ORDEN_PAGO_IMPUT (
+                EJERCICIO INTEGER,
+                NRO_OP INTEGER,
+                NRO_REG_COMP INTEGER,
+                TIPO_COMPROB TEXT,
+                NRO_COMPROB TEXT,
+                COD_PROV INTEGER
             )
         """))
 
@@ -132,10 +156,19 @@ def engine_with_data():
                 INSERT INTO SOLIC_GASTOS VALUES
                 (2026, 1, {200 + nro_oc}, 10, '2026-03-0{nro_oc}', 'C', {10000 * nro_oc}, 'Gasto {nro_oc}')
             """))
-            # CTA_HOJA_DE_RUTA: vincula OC ↔ SG ↔ OP
+            # Puente OC ↔ SG ↔ comprobante ↔ OP via tablas reales
             conn.execute(text(f"""
-                INSERT INTO CTA_HOJA_DE_RUTA VALUES
-                (2026, 1, {nro_oc}, 100, 2026, 1, {200 + nro_oc}, 2026, {500 + nro_oc}, 'CC-2026-{nro_oc}', 'FA')
+                INSERT INTO REG_COMP VALUES
+                (2026, {1000 + nro_oc}, 1, {200 + nro_oc}, 1, {nro_oc}, 100)
+            """))
+            conn.execute(text(f"""
+                INSERT INTO CTA_COMPROB VALUES
+                (2026, {1000 + nro_oc}, 'FA', 'CC-2026-{nro_oc}', 100,
+                 {10000 * nro_oc}, {9000 * nro_oc}, '2026-03-2{nro_oc}', '2026-04-2{nro_oc}')
+            """))
+            conn.execute(text(f"""
+                INSERT INTO ORDEN_PAGO_IMPUT VALUES
+                (2026, {500 + nro_oc}, {1000 + nro_oc}, 'FA', 'CC-2026-{nro_oc}', 100)
             """))
 
         # ── 4 OPs ejercicio 2026 (vinculadas a las 4 OCs) ──
@@ -320,20 +353,20 @@ class TestEjercicioMinFilter:
 # ─── Tests: Flujo OC → OP ────────────────────────────────────────────────────
 
 class TestOcToOpFlow:
-    """Verifica que el flujo OC→OP funciona:
+    """Verifica que el flujo OC→OP funciona con las tablas puente reales:
     1. Se procesan 4 OCs de 2026
-    2. Las 4 OPs vinculadas (via CTA_HOJA_DE_RUTA) son encontradas
-    3. Cada OP tiene CC_NRO que vincula al gasto de la OC
+    2. Las 4 OPs vinculadas (via ORDEN_PAGO_IMPUT + CTA_COMPROB) son encontradas
+    3. Cada OP trae el comprobante (OPI_NRO_COMPROB) y la SG (via REG_COMP)
     """
 
     def test_ops_vinculadas_a_ocs_encontradas(self, engine_with_data):
-        """Las 4 OPs de 2026 vinculadas a las 4 OCs deben retornar con CC_NRO."""
+        """Las 4 OPs de 2026 deben retornar con su comprobante imputado."""
         cfg = EntityConfig(
             name="orden_pago",
             table_name="ORDEN_PAGO",
             ts_field="FECH_CONFIRM",
             pending_state_field="ESTADO_OP",
-            pending_state_value="N",
+            pending_state_value="C",
             pending_reprocess_days=30,
             ejercicio_min=2026,
         )
@@ -351,21 +384,21 @@ class TestOcToOpFlow:
         op_keys = {(r[columns.index("EJERCICIO")], r[columns.index("NRO_OP")]) for r in rows}
         assert len(op_keys) == 4, f"Deben ser 4 OPs, encontradas: {op_keys}"
 
-        # Cada OP debe tener CC_NRO del CTA_HOJA_DE_RUTA
-        assert "HDR_CC_NRO" in columns, "La columna HDR_CC_NRO debe estar presente"
-        cc_nro_idx = columns.index("HDR_CC_NRO")
+        # Cada OP debe traer el comprobante imputado via ORDEN_PAGO_IMPUT
+        assert "OPI_NRO_COMPROB" in columns, "La columna OPI_NRO_COMPROB debe estar presente"
+        cc_nro_idx = columns.index("OPI_NRO_COMPROB")
         cc_nros = {r[cc_nro_idx] for r in rows}
-        assert None not in cc_nros, "Todas las OPs deben tener CC_NRO"
-        assert len(cc_nros) == 4, f"Deben ser 4 CC_NRO distintos, encontrados: {cc_nros}"
+        assert None not in cc_nros, "Todas las OPs deben tener comprobante imputado"
+        assert len(cc_nros) == 4, f"Deben ser 4 comprobantes distintos, encontrados: {cc_nros}"
 
     def test_op_tiene_datos_del_gasto_vinculado(self, engine_with_data):
-        """Cada OP debe traer SG_DELEG_SOLIC y SG_NRO_SOLIC del LEFT JOIN."""
+        """Cada OP debe traer SG_DELEG_SOLIC y SG_NRO_SOLIC (via REG_COMP)."""
         cfg = EntityConfig(
             name="orden_pago",
             table_name="ORDEN_PAGO",
             ts_field="FECH_CONFIRM",
             pending_state_field="ESTADO_OP",
-            pending_state_value="N",
+            pending_state_value="C",
             pending_reprocess_days=30,
             ejercicio_min=2026,
         )
@@ -381,22 +414,24 @@ class TestOcToOpFlow:
 
         assert "SG_DELEG_SOLIC" in columns
         assert "SG_NRO_SOLIC" in columns
+        assert "SG_OC_NRO" in columns
 
         sg_deleg_idx = columns.index("SG_DELEG_SOLIC")
         sg_nro_idx = columns.index("SG_NRO_SOLIC")
+        sg_oc_idx = columns.index("SG_OC_NRO")
+        assert rows, "Debe haber OPs para verificar"
         for r in rows:
             assert r[sg_deleg_idx] is not None, "SG_DELEG_SOLIC no debe ser NULL"
             assert r[sg_nro_idx] is not None, "SG_NRO_SOLIC no debe ser NULL"
+            assert r[sg_oc_idx] is not None, "SG_OC_NRO (OC canonica) no debe ser NULL"
 
     def test_cc_nro_coincide_entre_oc_y_op(self, engine_with_data):
-        """El CC_NRO que trae la OC debe ser el mismo que trae la OP vinculada."""
+        """El comprobante que trae la OC (OC_CC_NRO) debe ser el mismo que
+        trae la OP vinculada (OPI_NRO_COMPROB)."""
         oc_cfg = EntityConfig(
-            name="orden_compra",
-            table_name="ORDEN_COMPRA",
-            ts_field="FECH_OC",
-            pending_state_field="ESTADO_OC",
-            pending_state_value="N",
-            pending_reprocess_days=30,
+            name="oc_items",
+            table_name="OC_ITEMS",
+            full_load=True,
             ejercicio_min=2026,
         )
         op_cfg = EntityConfig(
@@ -404,7 +439,7 @@ class TestOcToOpFlow:
             table_name="ORDEN_PAGO",
             ts_field="FECH_CONFIRM",
             pending_state_field="ESTADO_OP",
-            pending_state_value="N",
+            pending_state_value="C",
             pending_reprocess_days=30,
             ejercicio_min=2026,
         )
@@ -412,37 +447,35 @@ class TestOcToOpFlow:
         with engine_with_data.connect() as conn:
             repo = SourceRepository(conn)
 
-            # Obtener CC_NROs de las OCs
-            with patch.dict("src.config.ENTITY_CONFIGS", {"orden_compra": oc_cfg}):
-                oc_stmt = repo.build_statement("orden_compra", Checkpoint(entity="orden_compra"))
+            # Obtener comprobantes de las OCs (subquery REG_COMP + CTA_COMPROB)
+            with patch.dict("src.config.ENTITY_CONFIGS", {"oc_items": oc_cfg}):
+                oc_stmt = repo.build_statement("oc_items", Checkpoint(entity="oc_items"))
                 oc_result = conn.execute(oc_stmt)
                 oc_cols = list(oc_result.keys())
                 oc_rows = oc_result.fetchall()
 
-            oc_cc_nros = set()
-            if "HDR_CC_NRO" in oc_cols:
-                idx = oc_cols.index("HDR_CC_NRO")
-                oc_cc_nros = {r[idx] for r in oc_rows if r[idx] is not None}
+            assert "OC_CC_NRO" in oc_cols, "La columna OC_CC_NRO debe estar presente"
+            idx = oc_cols.index("OC_CC_NRO")
+            oc_cc_nros = {r[idx] for r in oc_rows if r[idx] is not None}
 
-            # Obtener CC_NROs de las OPs
+            # Obtener comprobantes de las OPs (subquery ORDEN_PAGO_IMPUT)
             with patch.dict("src.config.ENTITY_CONFIGS", {"orden_pago": op_cfg}):
                 op_stmt = repo.build_statement("orden_pago", Checkpoint(entity="orden_pago"))
                 op_result = conn.execute(op_stmt)
                 op_cols = list(op_result.keys())
                 op_rows = op_result.fetchall()
 
-            op_cc_nros = set()
-            if "HDR_CC_NRO" in op_cols:
-                idx = op_cols.index("HDR_CC_NRO")
-                op_cc_nros = {r[idx] for r in op_rows if r[idx] is not None}
+            assert "OPI_NRO_COMPROB" in op_cols, "La columna OPI_NRO_COMPROB debe estar presente"
+            idx = op_cols.index("OPI_NRO_COMPROB")
+            op_cc_nros = {r[idx] for r in op_rows if r[idx] is not None}
 
-        # Los CC_NRO de las OPs deben estar incluidos en los de las OCs
-        assert oc_cc_nros, "Las OCs deben tener CC_NRO"
-        assert op_cc_nros, "Las OPs deben tener CC_NRO"
+        # Los comprobantes de las OPs deben estar incluidos en los de las OCs
+        assert oc_cc_nros, "Las OCs deben tener comprobante asociado"
+        assert op_cc_nros, "Las OPs deben tener comprobante imputado"
         assert op_cc_nros <= oc_cc_nros, (
-            f"Todos los CC_NRO de OPs deben existir en OCs.\n"
-            f"OC CC_NROs: {oc_cc_nros}\n"
-            f"OP CC_NROs: {op_cc_nros}"
+            f"Todos los comprobantes de OPs deben existir en OCs.\n"
+            f"OC comprobantes: {oc_cc_nros}\n"
+            f"OP comprobantes: {op_cc_nros}"
         )
 
     def test_incremental_segunda_corrida_detecta_ops_nuevas(self, engine_with_data):

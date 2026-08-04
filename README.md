@@ -488,8 +488,8 @@ crontab -e
 Y agregar las siguientes líneas:
 ```cron
 # Detección de cambios y sincronización semanal (Todos los domingos a las 03:00 y 04:00 AM)
-0 3 * * 0 cd "$RAFAM_DIR" && /usr/bin/flock -n state/sync_changes_prov.lock .venv/bin/python main.py sync-changes --entity proveedores --export migrator
-0 4 * * 0 cd "$RAFAM_DIR" && /usr/bin/flock -n state/sync_changes_oc.lock .venv/bin/python main.py sync-changes --entity oc_items --export migrator
+0 3 * * 0 cd "$RAFAM_DIR" && /usr/bin/flock -n state/sync_changes_prov.lock .venv/bin/python main.py sync-changes --entity proveedores
+0 4 * * 0 cd "$RAFAM_DIR" && /usr/bin/flock -n state/sync_changes_oc.lock .venv/bin/python main.py sync-changes --entity oc_items
 ```
 
 ## Modo gateway directo legacy

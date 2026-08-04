@@ -66,9 +66,13 @@ class OcItemsMapper:
                     )
                     skipped_no_prov.add(key)
                     continue
+                # Normalizar la clave igual que al guardarla (int → str): un
+                # COD_PROV que llega como float ("123.0") o con padding
+                # ("0123") no matchearia el link y la OC se saltearia.
                 remote_prov_id: int | None = None
-                if cod_prov is not None:
-                    remote_prov = self._link_store.get_remote_id("proveedores", str(cod_prov))
+                cod_prov_norm = to_int(cod_prov)
+                if cod_prov_norm is not None:
+                    remote_prov = self._link_store.get_remote_id("proveedores", str(cod_prov_norm))
                     if remote_prov:
                         remote_prov_id = int(remote_prov)
 
@@ -165,7 +169,9 @@ class OcItemsMapper:
             oc_payload_hashes[source_key] = current_hash
 
             link_previo = self._link_store.get_link("orden_compra", source_key)
-            estado_previo = link_previo.get("estado_oc", "").strip().upper() if link_previo else None
+            # `or ""`: links creados antes del ALTER TABLE pueden tener
+            # estado_oc NULL y .strip() sobre None tiraba AttributeError.
+            estado_previo = (link_previo.get("estado_oc") or "").strip().upper() if link_previo else None
 
             if estado_actual == "R":
                 if link_previo is None or estado_previo != "R":
@@ -173,9 +179,12 @@ class OcItemsMapper:
                 else:
                     # Ya migrada en estado R. Si el contenido cambio (hash
                     # distinto al almacenado), re-enviar con upsert aunque el
-                    # estado siga siendo R; si no, dejar como mismo_estado.
+                    # estado siga siendo R. Si el link NO tiene hash guardado
+                    # (migrado antes del feature de hashes) tambien se re-envia:
+                    # asumirlo "al dia" y backfillear el hash sin enviar
+                    # enmascararia para siempre un cambio real ya ocurrido.
                     stored_hash = link_previo.get("payload_hash")
-                    if stored_hash and current_hash != stored_hash:
+                    if not stored_hash or current_hash != stored_hash:
                         ocs_to_create.append(oc_data)
                         resent_hash += 1
                     else:

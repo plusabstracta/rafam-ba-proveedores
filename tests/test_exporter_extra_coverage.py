@@ -92,9 +92,13 @@ class TestMigratorExporterExtraPaths:
         exporter = _migrator(monkeypatch, tmp_path)
         # solic_gastos con filas vacias es un no-op (lote vacío)
         exporter.write_batch("solic_gastos", [], [])
-        # orden_compra ya no es una entidad valida (se migra via oc_items)
-        with pytest.raises(ValueError):
-            exporter.write_batch("orden_compra", [], [])
+        # orden_compra esta deshabilitada (se migra via oc_items): el exporter
+        # loguea warning y hace no-op para no romper crons/configs viejos.
+        exporter.write_batch("orden_compra", [], [])
+        # ped_items/pedidos tambien son no-op con warning.
+        exporter.write_batch("ped_items", [], [])
+        exporter.write_batch("pedidos", [], [])
+        # Una entidad realmente desconocida si debe fallar fuerte.
         with pytest.raises(ValueError):
             exporter.write_batch("otra", [], [])
 
@@ -170,31 +174,65 @@ class TestMigratorExporterExtraPaths:
             return tuple(values.get(col, "") for col in columns)
 
         sent = []
-        exporter._post_json = lambda _url, payload: sent.append(payload) or {
-            "stats": {"gastos": {"ok": 1, "error": 0}},
-            "results": {
-                "gastos": [
-                    {
+        resolver_calls = []
+
+        def fake_post(url, payload):
+            # El flujo es UPDATE-ONLY: consulta primero resolver_gasto para
+            # localizar gastos parciales ya creados por Paxapos, y solo envia
+            # el enriquecimiento (merge fill_empty) por gasto_id.
+            if url == exporter._resolver_gasto_url:
+                resolver_calls.append(payload)
+                return {
+                    "resolver": {
                         "success": True,
-                        "external_id": {"ejercicio": 2026, "deleg_solic": 2, "nro_solic": 300},
-                        "id": 123,
+                        "gastos": [
+                            {
+                                "id": 55,
+                                "pedido_id": 900,
+                                "proveedor_id": 777,
+                                "punto_de_venta": "00001",
+                                "factura_nro": "00012345",
+                                "empty_fields": ["importe_neto", "fecha_vencimiento", "observacion"],
+                            }
+                        ],
                     }
-                ]
-            },
-        }
+                }
+            sent.append(payload)
+            return {
+                "stats": {"gastos": {"ok": 1, "error": 0}},
+                "results": {
+                    "gastos": [
+                        {
+                            "success": True,
+                            "external_id": {"ejercicio": 2026, "deleg_solic": 2, "nro_solic": 300},
+                            "id": 55,
+                        }
+                    ]
+                },
+            }
+
+        exporter._post_json = fake_post
         exporter._write_batch_solic_gastos(columns, [row(300), row(301)])
+
+        # Solo SG-2026-2-300 esta en gasto_refs de una OC enviada: la 301 se
+        # filtra antes de consultar el resolver.
+        assert len(resolver_calls) == 1
+        assert resolver_calls[0]["pedido_ids"] == [900]
+        assert len(resolver_calls[0]["comprobantes"]) == 1
 
         assert len(sent) == 1
         assert len(sent[0]["gastos"]) == 1
         gasto = sent[0]["gastos"][0]["Gasto"]
-        assert gasto["proveedor_id"] == 777
-        assert gasto["tipo_factura_id"] == 2
-        assert gasto["fecha_vencimiento"] == "2026-04-10"
-        assert gasto["importe_total"] == 1210.50
+        assert gasto["id"] == 55
+        assert gasto["merge"] == "fill_empty"
+        # Solo los campos vacios reportados por el resolver viajan como enrich.
         assert gasto["importe_neto"] == 1000.00
+        assert gasto["fecha_vencimiento"] == "2026-04-10"
+        assert gasto["observacion"] == "Factura"
+        assert "importe_total" not in gasto
         source_key = json.dumps({"ejercicio": 2026, "deleg_solic": 2, "nro_solic": 300}, sort_keys=True)
-        assert exporter._link_store.get_remote_id("gasto", source_key) == "123"
-        assert exporter._link_store.get_remote_id("gasto", json.dumps({"rafam_ref": "SG-2026-2-300"}, sort_keys=True)) == "123"
+        assert exporter._link_store.get_remote_id("gasto", source_key) == "55"
+        assert exporter._link_store.get_remote_id("gasto", json.dumps({"rafam_ref": "SG-2026-2-300"}, sort_keys=True)) == "55"
 
     def test_op_helpers_retenciones_refs_and_dump(self, monkeypatch, tmp_path):
         exporter = _migrator(monkeypatch, tmp_path, dry_run=False)

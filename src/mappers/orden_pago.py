@@ -293,9 +293,10 @@ class OrdenPagoMapper:
             # Resolver proveedor_id
             remote_prov_id: int | None = None
             for cod_prov in (raw.get("COD_PROV"), raw.get("OPI_COD_PROV"), raw.get("SG_OC_COD_PROV")):
-                if cod_prov is None or str(cod_prov).strip() == "":
+                cod_prov_norm = to_int(cod_prov)
+                if cod_prov_norm is None:
                     continue
-                remote_prov = self._link_store.get_remote_id("proveedores", str(cod_prov).strip())
+                remote_prov = self._link_store.get_remote_id("proveedores", str(cod_prov_norm))
                 if remote_prov:
                     remote_prov_id = int(remote_prov)
                     break
@@ -656,9 +657,10 @@ class OrdenPagoMapper:
 
         remote_prov_id: int | None = None
         for cod_prov in (raw.get("OPI_COD_PROV"), raw.get("SG_OC_COD_PROV"), raw.get("COD_PROV")):
-            if cod_prov is None or str(cod_prov).strip() == "":
+            cod_prov_norm = to_int(cod_prov)
+            if cod_prov_norm is None:
                 continue
-            remote_prov = self._link_store.get_remote_id("proveedores", str(cod_prov).strip())
+            remote_prov = self._link_store.get_remote_id("proveedores", str(cod_prov_norm))
             if remote_prov:
                 remote_prov_id = int(remote_prov)
                 break
