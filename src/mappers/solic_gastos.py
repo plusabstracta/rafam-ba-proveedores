@@ -14,6 +14,24 @@ from ..utils import format_date_only, parse_money, to_int
 
 logger = logging.getLogger(__name__)
 
+PAXAPOS_ATTACHMENT_GASTO_FIELDS = frozenset({"media_id", "file"})
+PAXAPOS_PRIORITY_GASTO_FIELDS = PAXAPOS_ATTACHMENT_GASTO_FIELDS | {"observacion"}
+
+ENRICHABLE_GASTO_FIELDS = frozenset({
+    "proveedor_id",
+    "punto_de_venta",
+    "factura_nro",
+    "tipo_factura_id",
+    "clasificacion_id",
+    "importe_total",
+    "importe_neto",
+    "fecha",
+    "fecha_vencimiento",
+    "observacion",
+    "media_id",
+    "file",
+})
+
 
 class SolicGastosMapper:
     """Mapper para gastos de solicitud (SOLIC_GASTOS + CTA_COMPROB)."""
@@ -153,7 +171,17 @@ class SolicGastosMapper:
             enrich = {
                 field: gd[field]
                 for field in empty_fields
-                if field in gd and gd[field] not in (None, "")
+                if field in ENRICHABLE_GASTO_FIELDS
+                and not (
+                    field in PAXAPOS_ATTACHMENT_GASTO_FIELDS
+                    and resolved.get("tiene_imagen")
+                )
+                and not (
+                    field == "observacion"
+                    and resolved.get("tiene_observacion")
+                )
+                and field in gd
+                and gd[field] not in (None, "")
             }
             if not enrich:
                 skipped_complete += 1

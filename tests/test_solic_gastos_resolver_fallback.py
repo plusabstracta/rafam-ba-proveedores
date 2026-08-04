@@ -9,7 +9,11 @@ from __future__ import annotations
 
 import json
 
-from src.mappers.solic_gastos import SolicGastosMapper, _comprobante_key
+from src.mappers.solic_gastos import (
+    PAXAPOS_PRIORITY_GASTO_FIELDS,
+    SolicGastosMapper,
+    _comprobante_key,
+)
 
 
 class _FakeLinkStore:
@@ -115,3 +119,75 @@ def test_gasto_sin_pedido_id_se_enriquece_por_comprobante():
     # Solo se completan los campos vacios reportados por el backend.
     assert set(gastos[0]["Gasto"]) == {"id", "merge", "importe_total", "importe_neto"}
     assert list(raw_by_sk) == [json.dumps(gastos[0]["external_id"], sort_keys=True)]
+
+
+def test_gasto_existente_solo_envia_campos_faltantes():
+    mapper = SolicGastosMapper(
+        link_store=_FakeLinkStore("SG-2026-2-300"),
+        lookup_resolver=_FakeLookup(),
+        resolve_gastos_fn=lambda _pedidos, _comprobantes: {
+            "success": True,
+            "gastos": [
+                {
+                    "id": 4321,
+                    "pedido_id": 900,
+                    "proveedor_id": 777,
+                    "importe_total": 9999,
+                    "fecha": "2025-01-01",
+                    "empty_fields": ["punto_de_venta", "factura_nro"],
+                }
+            ],
+        },
+    )
+
+    payload, _raw_by_sk = mapper.build_payload(
+        COLUMNS, [ROW], dry_run=True, payload_options={}
+    )
+
+    assert payload is not None
+    gasto = payload["gastos"][0]["Gasto"]
+    assert gasto == {
+        "id": 4321,
+        "merge": "fill_empty",
+        "punto_de_venta": "0001",
+        "factura_nro": "00012345",
+    }
+
+
+def test_datos_paxapos_tienen_prioridad_para_observacion_y_adjunto():
+    mapper = SolicGastosMapper(
+        link_store=_FakeLinkStore("SG-2026-2-300"),
+        lookup_resolver=_FakeLookup(),
+        resolve_gastos_fn=lambda _pedidos, _comprobantes: {
+            "success": True,
+            "gastos": [
+                {
+                    "id": 4321,
+                    "pedido_id": 900,
+                    "tiene_imagen": True,
+                    "tiene_observacion": True,
+                    # Respuesta deliberadamente inconsistente: el mapper debe
+                    # respetar igual la prioridad declarada por Paxapos.
+                    "empty_fields": [
+                        "observacion",
+                        "media_id",
+                        "file",
+                        "importe_total",
+                    ],
+                }
+            ],
+        },
+    )
+
+    payload, _raw_by_sk = mapper.build_payload(
+        COLUMNS, [ROW], dry_run=True, payload_options={}
+    )
+
+    assert payload is not None
+    gasto = payload["gastos"][0]["Gasto"]
+    assert gasto == {
+        "id": 4321,
+        "merge": "fill_empty",
+        "importe_total": 1210.5,
+    }
+    assert PAXAPOS_PRIORITY_GASTO_FIELDS.isdisjoint(gasto)
