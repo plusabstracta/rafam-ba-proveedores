@@ -115,6 +115,7 @@ PAXAPOS_RAFAM_RESOLVER_MERCADERIA_PATH=rafam/migracion/resolver_mercaderia.json
 PAXAPOS_RAFAM_DEFAULT_TIPO_FACTURA_ID=
 PAXAPOS_RAFAM_DEFAULT_TIPO_PAGO_ID=10
 RAFAM_SYNC_BATCH_DELAY_SECONDS=0
+RAFAM_OC_MAX_BATCH_ROWS=100
 RAFAM_EJERCICIO_MIN=2026
 ```
 
@@ -245,7 +246,7 @@ PAXAPOS_URL=https://proveedores.madariaga.gob.ar
 PAXAPOS_TENANT=madariaga
 PAXAPOS_API_KEY=<api-key-real>
 PAXAPOS_VERIFY_SSL=true
-PAXAPOS_TIMEOUT_SECONDS=30
+PAXAPOS_TIMEOUT_SECONDS=120
 
 PAXAPOS_RAFAM_IMPORT_PATH=rafam/migracion/importar.json
 PAXAPOS_RAFAM_SPEC_PATH=rafam/migracion/spec.json
@@ -257,6 +258,7 @@ PAXAPOS_RAFAM_DEFAULT_TIPO_FACTURA_ID=
 PAXAPOS_RAFAM_DEFAULT_TIPO_PAGO_ID=10
 
 RAFAM_SYNC_BATCH_DELAY_SECONDS=2
+RAFAM_OC_MAX_BATCH_ROWS=100
 RAFAM_EJERCICIO_MIN=2026
 ```
 
@@ -315,6 +317,9 @@ Atajo equivalente:
 ```bash
 make migrate-all BATCH=500
 ```
+
+`oc_items` limita cada request a `RAFAM_OC_MAX_BATCH_ROWS` filas fuente (100 por defecto),
+aunque `BATCH` sea mayor. El agrupador nunca divide los items de una misma OC.
 
 En modo real, cada paso avanza checkpoint solo si el lote termina sin errores parciales del
 migrator.

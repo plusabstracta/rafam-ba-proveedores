@@ -244,7 +244,7 @@ def http_request_with_retries(
 ) -> Any:
     """Ejecuta urlopen con retries acotados ante errores transitorios.
 
-    Reintenta solo URLError (red caÃ­da, DNS, timeout) y HTTPError con status en
+    Reintenta URLError (red caÃ­da, DNS), TimeoutError y HTTPError con status en
     `RETRYABLE_HTTP_STATUS`. Errores 4xx normales (validaciÃ³n, auth) NO se
     reintentan â falla rÃ¡pido para que el caller actÃºe.
 
@@ -262,6 +262,10 @@ def http_request_with_retries(
                 raise
             last_exc = exc
         except error.URLError as exc:
+            if attempt == max_attempts:
+                raise
+            last_exc = exc
+        except TimeoutError as exc:
             if attempt == max_attempts:
                 raise
             last_exc = exc

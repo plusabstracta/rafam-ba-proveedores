@@ -143,7 +143,7 @@ migrate-proveedores-dry:
 
 # 3. ORDENES DE COMPRA (ORDEN_COMPRA + OC_ITEMS -> compras_pedidos + items)
 #    El exporter despacha por --entity oc_items y arma el payload ordenes_compra[]
-#    con items embebidos (un POST por OC). Sin pagos ni gastos.
+#    con una o mas OCs completas por POST. Sin pagos ni gastos.
 migrate-oc:
 	$(PY) main.py run --entity oc_items --batch-size $(BATCH) $(if $(LIMIT),--limit $(LIMIT),)
 

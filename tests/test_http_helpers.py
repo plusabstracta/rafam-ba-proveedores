@@ -66,6 +66,24 @@ class TestHttpRetries:
                 pass
         assert calls == []  # se consumieron los 3
 
+    def test_retries_on_timeout_error(self):
+        calls = [TimeoutError("The read operation timed out"), _FakeResponse()]
+
+        def side(*_a, **_kw):
+            value = calls.pop(0)
+            if isinstance(value, Exception):
+                raise value
+            return value
+
+        with patch("src.http_client._open_request", side_effect=side), patch(
+            "src.http_client.time.sleep"
+        ):
+            with _http_request_with_retries(
+                _req(), timeout=5, max_attempts=3, base_backoff=0.01
+            ):
+                pass
+        assert calls == []
+
     def test_retries_on_503_then_succeeds(self):
         first = error.HTTPError("u", 503, "busy", {}, io.BytesIO(b""))
         calls = [first, _FakeResponse()]

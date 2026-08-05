@@ -49,6 +49,29 @@ OFFICIAL_ENTITIES = (
 )
 
 
+def _effective_batch_size(entity: str, requested_batch_size: int) -> int:
+    if entity != "oc_items":
+        return requested_batch_size
+
+    raw_limit = os.getenv("RAFAM_OC_MAX_BATCH_ROWS", "100")
+    try:
+        oc_limit = int(raw_limit)
+    except ValueError:
+        logger.warning(
+            "RAFAM_OC_MAX_BATCH_ROWS=%r no es valido; se usara 100",
+            raw_limit,
+        )
+        oc_limit = 100
+
+    if oc_limit <= 0:
+        logger.warning(
+            "RAFAM_OC_MAX_BATCH_ROWS debe ser mayor a 0; se usara 100"
+        )
+        oc_limit = 100
+
+    return min(requested_batch_size, oc_limit)
+
+
 
 def _build_engine() -> SyncEngine:
     return SyncEngine(CheckpointStore())
@@ -192,6 +215,7 @@ def _sync_entity(
     t_start = time.monotonic()
     cp  = engine.get_checkpoint(entity)
     cfg = ENTITY_CONFIGS[entity]
+    effective_batch_size = _effective_batch_size(entity, batch_size)
     mode = "FULL LOAD" if (cp.is_fresh or cfg.full_load) else "INCREMENTAL"
     batch_delay = float(os.getenv("RAFAM_SYNC_BATCH_DELAY_SECONDS", "0"))
     # Si un batch individual falla queremos seguir con los proximos batches
@@ -339,7 +363,9 @@ def _sync_entity(
 
         group_fields = GROUPED_BATCH_FIELDS.get(entity)
         if group_fields:
-            for batch in iter_grouped_batches(result, columns, group_fields, batch_size):
+            for batch in iter_grouped_batches(
+                result, columns, group_fields, effective_batch_size
+            ):
                 if limit is not None and total >= limit:
                     break
                 process_batch(batch)

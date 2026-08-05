@@ -12,7 +12,7 @@ from unittest.mock import patch
 import pytest
 from sqlalchemy import create_engine, text
 
-from main import _sync_entity
+from main import _effective_batch_size, _sync_entity
 from src.checkpoint_store import CheckpointStore
 from src.exporter import BaseExporter
 from src.models import EntityConfig
@@ -51,6 +51,25 @@ def source_engine():
 def _make_sync_engine(tmp_path, configs):
     store = CheckpointStore(db_url=f"sqlite+pysqlite:///{tmp_path / 'cp.db'}")
     return SyncEngine(store, configs)
+
+
+def test_oc_items_caps_requested_batch_size(monkeypatch):
+    monkeypatch.delenv("RAFAM_OC_MAX_BATCH_ROWS", raising=False)
+
+    assert _effective_batch_size("oc_items", 500) == 100
+    assert _effective_batch_size("oc_items", 50) == 50
+
+
+def test_oc_items_batch_cap_can_be_configured(monkeypatch):
+    monkeypatch.setenv("RAFAM_OC_MAX_BATCH_ROWS", "80")
+
+    assert _effective_batch_size("oc_items", 500) == 80
+
+
+def test_batch_size_for_other_entities_is_unchanged(monkeypatch):
+    monkeypatch.setenv("RAFAM_OC_MAX_BATCH_ROWS", "80")
+
+    assert _effective_batch_size("proveedores", 500) == 500
 
 
 def test_watermark_se_congela_tras_batch_fallido(tmp_path, source_engine):
