@@ -73,6 +73,36 @@ class TestRetryStore:
         assert counts["gastos"][STATUS_PENDING] == 1
         assert counts["retenciones"][STATUS_PENDING] == 1
 
+    def test_requeue_devuelve_permanent_a_pending(self, store):
+        """core#406: cuando el receptor arregla el motivo del rechazo, las filas
+        que ya agotaron los intentos tienen que poder volver a la cola; si no,
+        quedan 'permanent' y no se reinyectan nunca mas."""
+        for _ in range(3):
+            store.enqueue("ordenes_compra", "oc-98", REASON_BACKEND_REJECTED, "cantidad <= 0")
+        assert store.list_items("ordenes_compra")[0].status == STATUS_PERMANENT
+        assert store.pending_external_ids("ordenes_compra") == set()
+
+        assert store.requeue(entity="ordenes_compra") == 1
+
+        item = store.list_items("ordenes_compra")[0]
+        assert item.status == STATUS_PENDING
+        assert item.attempts == 0
+        assert store.pending_external_ids("ordenes_compra") == {"oc-98"}
+
+    def test_requeue_respeta_filtros_y_no_toca_pending(self, store):
+        for _ in range(3):
+            store.enqueue("ordenes_compra", "oc-98", REASON_BACKEND_REJECTED)
+        for _ in range(3):
+            store.enqueue("gastos", "g-1", REASON_BACKEND_REJECTED)
+        store.enqueue("gastos", "g-2", REASON_BACKEND_REJECTED)
+
+        assert store.requeue(entity="gastos", external_id="g-1") == 1
+        assert store.list_items("ordenes_compra")[0].status == STATUS_PERMANENT
+
+        gastos = {i.external_id: i for i in store.list_items("gastos")}
+        assert gastos["g-1"].status == STATUS_PENDING and gastos["g-1"].attempts == 0
+        assert gastos["g-2"].attempts == 1  # la pending no se toca
+
     def test_shared_connection_participates_in_transaction(self, tmp_path):
         # Conexion inyectada: el commit lo controla el owner del batch (F2).
         conn = sqlite3.connect(str(tmp_path / "shared.db"))

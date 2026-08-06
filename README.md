@@ -426,6 +426,13 @@ Revisar tambien los logs del portal Paxapos si el migrator devuelve errores parc
   proxima corrida para `proveedores`, `solic_gastos`, `orden_pago` y `retenciones`
   (`oc_items` es full-scan y se auto-recupera). Las filas esperando una dependencia no
   "queman" intentos; las rechazadas pasan a `permanent` tras 10 intentos.
+- **Reencolar lo `permanent`** (`main.py retry-queue`): una fila `permanent` NO se reinyecta
+  mas, asi que cuando el rechazo se arregla del lado de Paxapos hay que devolverla a la cola
+  a mano. `main.py retry-queue [--entity X] [--status permanent]` lista la cola con motivo,
+  intentos y el error del receptor; agregando `--requeue` (opcionalmente con `--external-id`)
+  esas filas vuelven a `pending` con los intentos en 0 y entran en la proxima corrida.
+  Caso tipico: core#406 — el gate de `cantidad > 0` tiraba la OC entera por un renglon con
+  cantidad 0; tras deployar el fix, `main.py retry-queue --entity ordenes_compra --requeue`.
 - **Mail diario**: la seccion "COLA DE REINTENTOS" muestra el estado real de la cola al
   inicio y fin del dia por entidad (antes siempre figuraba vacia).
 - **OPs sin orden de compra** (`RAFAM_MIGRAR_OP_SIN_OC`, default `true`): los pagos de gasto

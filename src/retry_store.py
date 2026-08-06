@@ -203,6 +203,34 @@ class RetryStore:
         )
         self._commit()
 
+    def requeue(self, entity: str | None = None, external_id: str | None = None) -> int:
+        """Devuelve filas 'permanent' a 'pending' con los intentos en cero.
+
+        Necesario cuando el motivo del rechazo se arregla del lado del receptor
+        (core#406: el gate de cantidad>0 tiraba la OC entera por un renglon con
+        cantidad 0). Sin esto, las filas que ya agotaron ``max_attempts`` quedan
+        'permanent' y NUNCA se reinyectan — ``pending_external_ids`` solo mira
+        'pending' —, asi que el fix del backend no las desbloquea solo.
+
+        Retorna la cantidad de filas reencoladas.
+        """
+        clauses = ["status = ?"]
+        params: list[str] = [STATUS_PERMANENT]
+        if entity is not None:
+            clauses.append("entity = ?")
+            params.append(entity)
+        if external_id is not None:
+            clauses.append("external_id = ?")
+            params.append(str(external_id))
+
+        cursor = self._conn.execute(
+            f"UPDATE {_TABLE} SET status = ?, attempts = 0, next_retry_after = NULL "
+            f"WHERE {' AND '.join(clauses)}",
+            [STATUS_PENDING] + params,
+        )
+        self._commit()
+        return cursor.rowcount
+
     def clear_entity(self, entity: str) -> int:
         cursor = self._conn.execute(f"DELETE FROM {_TABLE} WHERE entity = ?", (entity,))
         self._commit()

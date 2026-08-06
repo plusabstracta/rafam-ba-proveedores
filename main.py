@@ -749,6 +749,46 @@ def cmd_reconcile(args) -> None:
     logger.info("Reconciliacion OK: sin drift.")
 
 
+# ─── retry-queue ─────────────────────────────────────────────────────────────
+
+
+def cmd_retry_queue(args) -> None:
+    """Inspecciona la cola de reintentos y reencola filas 'permanent'.
+
+    Una fila que agota max_attempts pasa a 'permanent' y deja de reinyectarse
+    (``pending_external_ids`` solo mira 'pending'). Cuando el rechazo se
+    arregla del lado del receptor (core#406), hay que devolverla a 'pending'
+    a mano: sin eso, el fix del backend no desbloquea lo ya trabado.
+    """
+    retry_store = RetryStore()
+    try:
+        if args.requeue:
+            reencoladas = retry_store.requeue(entity=args.entity, external_id=args.external_id)
+            logger.info("Filas reencoladas (permanent -> pending): %d", reencoladas)
+            if not reencoladas:
+                logger.info("No habia filas 'permanent' con ese filtro.")
+            return
+
+        items = retry_store.list_items(entity=args.entity, status=args.status)
+        if not items:
+            print("\nCola de reintentos vacia (con los filtros dados).\n")
+            return
+
+        col = "{:<14} {:<40} {:<22} {:<10} {}"
+        print()
+        print(col.format("Entidad", "External ID", "Motivo", "Intentos", "Estado"))
+        print("─" * 110)
+        for it in items:
+            print(col.format(it.entity, it.external_id[:40], it.reason_code, it.attempts, it.status))
+        print()
+        for it in items:
+            if it.error_message:
+                print(f"  {it.entity} {it.external_id}: {it.error_message}")
+        print()
+    finally:
+        retry_store.close()
+
+
 # ─── backfill-gastos ──────────────────────────────────────────────────────────
 
 
@@ -990,6 +1030,19 @@ def main() -> None:
         help="Calcula y guarda los hashes de registros ya vinculados sin enviarlos a Paxapos",
     )
 
+    retry_p = sub.add_parser(
+        "retry-queue",
+        help="Lista la cola de reintentos y permite reencolar filas 'permanent'",
+    )
+    retry_p.add_argument("--entity", metavar="NOMBRE", help="Filtrar por entidad")
+    retry_p.add_argument("--status", choices=["pending", "permanent"], help="Filtrar por estado")
+    retry_p.add_argument("--external-id", metavar="ID", help="Filtrar por external_id exacto")
+    retry_p.add_argument(
+        "--requeue",
+        action="store_true",
+        help="Devuelve las filas 'permanent' (con los filtros dados) a 'pending' con intentos en 0",
+    )
+
     daily_p = sub.add_parser(
         "daily-report",
         help="Envia UN mail resumen del dia (total y errores) y purga el historial reportado",
@@ -1007,6 +1060,7 @@ def main() -> None:
         "reconcile": cmd_reconcile,
         "backfill-gastos": cmd_backfill_gastos,
         "sync-changes": cmd_sync_changes,
+        "retry-queue": cmd_retry_queue,
         "daily-report": cmd_daily_report,
     }[args.command](args)
 
