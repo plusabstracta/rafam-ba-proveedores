@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 
+from .. import config as _config
 from ..change_detection import compute_payload_hash
 from ..utils import format_date_only, normalize_text, to_int
 
@@ -313,6 +314,20 @@ class OcItemsMapper:
 
         if raw.get("IMP_UNITARIO") is not None:
             item["precio_unitario"] = round(float(raw.get("IMP_UNITARIO")), 2)
+            # issue #414: OC_ITEMS/ORDEN_COMPRA (RAFAM) no traen ninguna
+            # columna de IVA/alicuota, asi que este mapper NO adivina si
+            # IMP_UNITARIO viene neto o bruto. Por default no se declara nada
+            # (mismo comportamiento de siempre: Paxapos lo asume neto). Solo
+            # si un humano confirmo el caso puntual (fuera de este pipeline,
+            # revisando facturas reales) y lo cargo en
+            # RAFAM_COD_PROV_PRECIO_CON_IVA se declara `precio_incluye_iva`
+            # explicitamente para ese proveedor, con la alicuota de
+            # RAFAM_ALICUOTA_IVA_DEFAULT (sin alicuota configurada, Paxapos
+            # tampoco convierte: ver _quitarIva en RafamMigracionesController).
+            if _config.is_cod_prov_precio_con_iva(raw.get("COD_PROV")):
+                item["precio_incluye_iva"] = True
+                if _config.ALICUOTA_IVA_DEFAULT is not None:
+                    item["alicuota_iva"] = _config.ALICUOTA_IVA_DEFAULT
 
         if raw.get("CANT_RECIB") is not None:
             item["recibida_cantidad"] = float(raw.get("CANT_RECIB"))

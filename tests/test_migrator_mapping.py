@@ -154,6 +154,55 @@ def test_is_cod_prov_excluded_tolera_tipos():
     assert is_cod_prov_excluded("no-numerico") is False
 
 
+# ─── issue #414: base imponible de OC_ITEMS.IMP_UNITARIO ──────────────────────
+# OC_ITEMS/ORDEN_COMPRA (RAFAM) no traen ninguna columna de IVA/alicuota, asi
+# que is_cod_prov_precio_con_iva() SOLO puede decir True para COD_PROV
+# confirmados a mano (RAFAM_COD_PROV_PRECIO_CON_IVA). Por default (sin
+# confirmacion) siempre es False: no se adivina la base imponible.
+
+def test_is_cod_prov_precio_con_iva_default_vacio():
+    """Sin confirmacion manual (env var vacia por default), ningun COD_PROV
+    se considera bruto — no hay forma de adivinarlo desde RAFAM."""
+    from src.config import is_cod_prov_precio_con_iva
+
+    assert is_cod_prov_precio_con_iva(99) is False
+    assert is_cod_prov_precio_con_iva("99") is False
+    assert is_cod_prov_precio_con_iva(None) is False
+
+
+def test_is_cod_prov_precio_con_iva_tolera_tipos(monkeypatch):
+    """Mismo contrato de tipos que is_cod_prov_excluded: int/str/espacios/None,
+    y no-numerico nunca explota (se considera False)."""
+    from src import config
+
+    monkeypatch.setattr(config, "COD_PROV_PRECIO_CON_IVA", frozenset({99}))
+
+    assert config.is_cod_prov_precio_con_iva(99) is True
+    assert config.is_cod_prov_precio_con_iva("99") is True
+    assert config.is_cod_prov_precio_con_iva(" 99 ") is True
+    assert config.is_cod_prov_precio_con_iva(None) is False
+    assert config.is_cod_prov_precio_con_iva("no-numerico") is False
+    assert config.is_cod_prov_precio_con_iva(100) is False
+
+
+def test_parse_alicuota_iva_default_env_ignora_invalidos(monkeypatch):
+    """Un valor no numerico en RAFAM_ALICUOTA_IVA_DEFAULT no rompe el import:
+    se ignora y queda None (= no convertir)."""
+    from src.config import _parse_alicuota_iva_default_env
+
+    monkeypatch.setenv("RAFAM_ALICUOTA_IVA_DEFAULT", "veintiuno")
+    assert _parse_alicuota_iva_default_env() is None
+
+    monkeypatch.setenv("RAFAM_ALICUOTA_IVA_DEFAULT", "0")
+    assert _parse_alicuota_iva_default_env() is None
+
+    monkeypatch.setenv("RAFAM_ALICUOTA_IVA_DEFAULT", "21")
+    assert _parse_alicuota_iva_default_env() == 21.0
+
+    monkeypatch.delenv("RAFAM_ALICUOTA_IVA_DEFAULT", raising=False)
+    assert _parse_alicuota_iva_default_env() is None
+
+
 class TestMapSolicGasto:
 
     def test_mapea_campos_basicos(self, exporter):
@@ -1230,6 +1279,99 @@ class TestWriteBatchOcItems:
 
         link_after = exp._link_store.get_link("orden_compra", source_key)
         assert link_after["has_op"] == "1"
+
+    # ── issue #414: precio_incluye_iva / alicuota_iva ──
+    #
+    # IMP_UNITARIO no trae en RAFAM ninguna forma de saber si es neto o bruto
+    # (OC_ITEMS/ORDEN_COMPRA no tienen columna de IVA/alicuota). Por default
+    # NO se declara nada en el payload — mismo comportamiento de siempre. Solo
+    # si el COD_PROV fue confirmado a mano en RAFAM_COD_PROV_PRECIO_CON_IVA
+    # (via src.config, monkeypatcheado aca) se agrega precio_incluye_iva.
+
+    def test_item_sin_confirmacion_no_declara_base_imponible(self):
+        """Comportamiento por default (sin ningun COD_PROV confirmado): el
+        payload no trae precio_incluye_iva ni alicuota_iva — cero regresion."""
+        exp = self._make_exporter_with_prov(cod_prov="99")
+        rows = [_oc_row(cod_prov="99", imp_unitario="121")]
+
+        sent = []
+        exp._post_json = lambda url, p: (
+            sent.append(p)
+            or {"stats": {"ordenes_compra": {"ok": 1, "error": 0}}}
+        )
+        exp.write_batch("oc_items", OC_COLUMNS, rows)
+
+        item = sent[0]["ordenes_compra"][0]["items"][0]
+        assert item["precio_unitario"] == 121.0
+        assert "precio_incluye_iva" not in item
+        assert "alicuota_iva" not in item
+
+    def test_item_de_proveedor_confirmado_bruto_declara_iva_y_alicuota(self, monkeypatch):
+        """COD_PROV en la lista confirmada + alicuota configurada: el payload
+        declara precio_incluye_iva=True y la alicuota (issue #414 opcion 2)."""
+        from src import config
+        monkeypatch.setattr(config, "COD_PROV_PRECIO_CON_IVA", frozenset({99}))
+        monkeypatch.setattr(config, "ALICUOTA_IVA_DEFAULT", 21.0)
+
+        exp = self._make_exporter_with_prov(cod_prov="99")
+        rows = [_oc_row(cod_prov="99", imp_unitario="121")]
+
+        sent = []
+        exp._post_json = lambda url, p: (
+            sent.append(p)
+            or {"stats": {"ordenes_compra": {"ok": 1, "error": 0}}}
+        )
+        exp.write_batch("oc_items", OC_COLUMNS, rows)
+
+        item = sent[0]["ordenes_compra"][0]["items"][0]
+        # precio_unitario se envia crudo (bruto); la conversion a neto la
+        # hace Paxapos (RafamMigracionesController::_normalizeItemsPrecio).
+        assert item["precio_unitario"] == 121.0
+        assert item["precio_incluye_iva"] is True
+        assert item["alicuota_iva"] == 21.0
+
+    def test_item_confirmado_bruto_sin_alicuota_configurada_no_la_declara(self, monkeypatch):
+        """COD_PROV confirmado pero sin RAFAM_ALICUOTA_IVA_DEFAULT: se declara
+        precio_incluye_iva=True (para que Paxapos sepa que es bruto) pero SIN
+        alicuota_iva — no se inventa una tasa."""
+        from src import config
+        monkeypatch.setattr(config, "COD_PROV_PRECIO_CON_IVA", frozenset({99}))
+        monkeypatch.setattr(config, "ALICUOTA_IVA_DEFAULT", None)
+
+        exp = self._make_exporter_with_prov(cod_prov="99")
+        rows = [_oc_row(cod_prov="99", imp_unitario="121")]
+
+        sent = []
+        exp._post_json = lambda url, p: (
+            sent.append(p)
+            or {"stats": {"ordenes_compra": {"ok": 1, "error": 0}}}
+        )
+        exp.write_batch("oc_items", OC_COLUMNS, rows)
+
+        item = sent[0]["ordenes_compra"][0]["items"][0]
+        assert item["precio_incluye_iva"] is True
+        assert "alicuota_iva" not in item
+
+    def test_item_de_otro_proveedor_no_confirmado_no_declara_nada(self, monkeypatch):
+        """La confirmacion es por COD_PROV: un proveedor distinto al
+        confirmado sigue sin declarar nada, aunque haya otros confirmados."""
+        from src import config
+        monkeypatch.setattr(config, "COD_PROV_PRECIO_CON_IVA", frozenset({12345}))
+        monkeypatch.setattr(config, "ALICUOTA_IVA_DEFAULT", 21.0)
+
+        exp = self._make_exporter_with_prov(cod_prov="99")
+        rows = [_oc_row(cod_prov="99", imp_unitario="121")]
+
+        sent = []
+        exp._post_json = lambda url, p: (
+            sent.append(p)
+            or {"stats": {"ordenes_compra": {"ok": 1, "error": 0}}}
+        )
+        exp.write_batch("oc_items", OC_COLUMNS, rows)
+
+        item = sent[0]["ordenes_compra"][0]["items"][0]
+        assert "precio_incluye_iva" not in item
+        assert "alicuota_iva" not in item
 
 
 # ─── Tests para deducciones por OP (ORDEN_PAGO_DEDUC) ─────────────────────

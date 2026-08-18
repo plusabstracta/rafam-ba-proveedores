@@ -109,10 +109,14 @@ graph TD
 |---|---|---|
 | `DESCRIPCION` | `item.name` | Descripción limpia de la mercadería. |
 | `CANTIDAD` | `item.cantidad` | Float. |
-| `IMP_UNITARIO` | `item.precio_unitario` | Float redondeado a 2 decimales. |
+| `IMP_UNITARIO` | `item.precio_unitario` | Float redondeado a 2 decimales. **Base imponible: ver nota abajo (issue #414).** |
 | `CANT_RECIB` | `item.recibida_cantidad` | Float. |
 | `UNI_MED` | `item.unidad_de_medida_id` | Mapeo `_UM_DEFAULT = 5` (Unidad). |
 | `SG_JURISDICCION` | `item.centro_costo_id` | Centro de costo del ítem. |
+| — (`RAFAM_COD_PROV_PRECIO_CON_IVA`) | `item.precio_incluye_iva` | Bool, solo si `COD_PROV` está en la env var (confirmación manual). |
+| — (`RAFAM_ALICUOTA_IVA_DEFAULT`) | `item.alicuota_iva` | %, solo junto con `precio_incluye_iva=true`. |
+
+> **Base imponible de `IMP_UNITARIO` (issue #414):** `OC_ITEMS`/`ORDEN_COMPRA` en RAFAM **no tienen ninguna columna de IVA/alícuota** — el contrato de origen no dice si `IMP_UNITARIO` viene neto o bruto. `Compras.DiagnosticoImportesOc` (lado Paxapos) detectó que una porción relevante de las OC de `madariaga` tiene el IVA metido adentro de `compras_pedido_mercaderias.precio` (columna que el modelo Paxapos define como SIN impuestos). Como no hay señal confiable en el dato crudo, este mapper **nunca adivina**: por default `IMP_UNITARIO` se pasa tal cual y Paxapos lo asume neto (mismo comportamiento de siempre). Si en el futuro un humano confirma, revisando facturas reales, que un proveedor puntual manda `IMP_UNITARIO` bruto, se lo agrega a `RAFAM_COD_PROV_PRECIO_CON_IVA` (+ `RAFAM_ALICUOTA_IVA_DEFAULT`) y el exportador declara `precio_incluye_iva`/`alicuota_iva` en el payload; `RafamMigracionesController::_normalizeItemsPrecio` (cakephp) recién ahí convierte a neto antes de guardar. Ver `src/config.py` (`is_cod_prov_precio_con_iva`) y `.env.example`.
 
 > **Lógica de Mercadería (sin sufijos `[RAFAM-...]`):** El script no envía `mercaderia_external_ref` en el payload de OC para evitar que Paxapos genere nombres visibles con sufijos feos. La mercadería se resuelve vía `resolver_mercaderia.json` por nombre limpio y se persiste el link local `name:{normalizada}` → `mercaderia_id` en SQLite. Paxapos le asigna un `barcode` determinista (`RAFAM-NAME:{hash}`).
 
