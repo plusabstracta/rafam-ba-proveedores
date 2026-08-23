@@ -18,9 +18,10 @@ logger = logging.getLogger(__name__)
 class OcItemsMapper:
     """Mapper stateful para OC_ITEMS: acumula contadores cross-batch."""
 
-    def __init__(self, *, link_store, lookup_resolver):
+    def __init__(self, *, link_store, lookup_resolver, retry_store=None):
         self._link_store = link_store
         self._lookup = lookup_resolver
+        self._retry_store = retry_store
         # Acumula items sin match de mercaderÃ­a entre batches para report final
         self._missing_mercaderia_matches: dict[str, int] = {}
 
@@ -146,10 +147,22 @@ class OcItemsMapper:
         ocs_to_anular: list[dict] = []
         ocs_to_skip_register: list[tuple[int, int, int]] = []
         ocs_to_skip_has_op: list[tuple[int, int, int]] = []
+        ocs_to_skip_permanent: list[tuple[int, int, int]] = []
         ocs_same_state: list[tuple[int, int, int]] = []
         skipped_same_state = 0
         resent_hash = 0
         oc_payload_hashes: dict[str, str] = {}
+
+        # paxapos#489: OCs cuyo destino local esta borrado (u otro rechazo
+        # persistente) ya agotaron sus reintentos y quedaron 'permanent' en la
+        # cola. oc_items es full_load — sin esta exclusion se reenviarian para
+        # siempre, generando el mismo error cada corrida. Recuperable a mano
+        # con RetryStore.requeue() si la causa del rechazo se resuelve.
+        permanent_keys = (
+            self._retry_store.permanent_external_ids("oc_items")
+            if self._retry_store is not None
+            else set()
+        )
 
         for key, oc_data in grouped.items():
             if not oc_data["items"]:
@@ -161,6 +174,11 @@ class OcItemsMapper:
                 {"ejercicio": key[0], "nro_oc": key[2], "uni_compra": key[1]},
                 sort_keys=True,
             )
+
+            if source_key in permanent_keys:
+                ocs_to_skip_permanent.append(key)
+                continue
+
             # Hash del contenido de la OC. Se computa con la misma forma que
             # exporter._group_oc_rows (incluye el shadow _rafam_estado_oc) para
             # que coincida con el payload_hash que guarda sync-changes/backfill.
@@ -266,10 +284,12 @@ class OcItemsMapper:
 
         if not ordenes_compra:
             logger.info(
-                "Migrator [oc_items]: nada que enviar (skip_estado=%d, mismo_estado=%d, skip_has_op=%d, sin_items=%d)",
+                "Migrator [oc_items]: nada que enviar (skip_estado=%d, mismo_estado=%d, "
+                "skip_has_op=%d, skip_permanent=%d, sin_items=%d)",
                 len(ocs_to_skip_register),
                 skipped_same_state,
                 len(ocs_to_skip_has_op),
+                len(ocs_to_skip_permanent),
                 unresolved_items,
             )
             return None, {}
@@ -292,6 +312,7 @@ class OcItemsMapper:
             "mismo_estado": skipped_same_state,
             "reenviado_hash": resent_hash,
             "skip_has_op": len(ocs_to_skip_has_op),
+            "skip_permanent": len(ocs_to_skip_permanent),
             "unresolved_items": unresolved_items,
         }
         return payload, raw_by_source_key
@@ -350,7 +371,8 @@ class OcItemsMapper:
         section_stats = stats.get("ordenes_compra", {}) if isinstance(stats, dict) else {}
         logger.info(
             "Migrator OK [oc_items->ordenes_compra]: %d ok, %d error, crear=%d, anular=%d, "
-            "skip_estado=%d, mismo_estado=%d, reenviado_hash=%d, skip_has_op=%d, dry_run=%s",
+            "skip_estado=%d, mismo_estado=%d, reenviado_hash=%d, skip_has_op=%d, "
+            "skip_permanent=%d, dry_run=%s",
             section_stats.get("ok", 0),
             section_stats.get("error", 0),
             stats_dict.get("crear", 0),
@@ -359,6 +381,7 @@ class OcItemsMapper:
             stats_dict.get("mismo_estado", 0),
             stats_dict.get("reenviado_hash", 0),
             stats_dict.get("skip_has_op", 0),
+            stats_dict.get("skip_permanent", 0),
             dry_run,
         )
         self.log_unresolved_summary()

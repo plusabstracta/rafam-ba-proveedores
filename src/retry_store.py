@@ -16,11 +16,14 @@ escrituras atomicas junto con el link store dentro de un mismo batch (F2).
 
 from __future__ import annotations
 
+import logging
 import os
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 _TABLE = "retry_queue"
 
@@ -144,7 +147,7 @@ class RetryStore:
         _NO_ATTEMPT_COUNT_REASONS) — esperar una dependencia no es un fallo.
         """
         existing = self._conn.execute(
-            f"SELECT attempts FROM {_TABLE} WHERE entity = ? AND external_id = ?",
+            f"SELECT attempts, status FROM {_TABLE} WHERE entity = ? AND external_id = ?",
             (entity, str(external_id)),
         ).fetchone()
 
@@ -172,6 +175,17 @@ class RetryStore:
             else:
                 attempts = (existing["attempts"] or 0) + 1
                 status = STATUS_PERMANENT if attempts >= self._max_attempts else STATUS_PENDING
+            if status == STATUS_PERMANENT and existing["status"] != STATUS_PERMANENT:
+                # paxapos#489: logueamos la transicion UNA sola vez (aca, no en
+                # cada corrida). De aca en mas los callers que arman el payload
+                # deben consultar permanent_external_ids() y dejar de reenviar
+                # esta fila; si vuelven a loguear en cada corrida repetimos el
+                # mismo bug (loop infinito de ruido) solo que del lado local.
+                logger.warning(
+                    "[retry_store] %s %s pasa a 'permanent' tras %d intentos — "
+                    "no se reintenta mas (recuperable con requeue()); ultimo error: %s",
+                    entity, external_id, attempts, error_message,
+                )
             self._conn.execute(
                 f"""
                 UPDATE {_TABLE}
@@ -249,6 +263,21 @@ class RetryStore:
         rows = self._conn.execute(
             f"SELECT external_id FROM {_TABLE} WHERE entity = ? AND status = ?",
             (entity, STATUS_PENDING),
+        ).fetchall()
+        return {row["external_id"] for row in rows}
+
+    def permanent_external_ids(self, entity: str) -> set[str]:
+        """IDs 'permanent' para EXCLUIR de una query full_load (paxapos#489).
+
+        Las entidades incrementales dejan de reintentar un 'permanent' solo
+        porque `pending_external_ids` no lo reinyecta y el watermark ya avanzo.
+        Una entidad full_load (ej. oc_items) no tiene ese freno natural: escanea
+        TODA la tabla en cada corrida, asi que sin esta exclusion explicita una
+        fila rechazada para siempre se reenviaria para siempre.
+        """
+        rows = self._conn.execute(
+            f"SELECT external_id FROM {_TABLE} WHERE entity = ? AND status = ?",
+            (entity, STATUS_PERMANENT),
         ).fetchall()
         return {row["external_id"] for row in rows}
 

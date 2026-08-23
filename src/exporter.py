@@ -256,6 +256,10 @@ class MigratorExporter(BaseExporter):
         self._retry_store = retry_store
         self._op_mapper._retry_store = retry_store
         self._ret_mapper._retry_store = retry_store
+        # paxapos#489: oc_items es full_load y necesita excluir explicitamente
+        # las OCs 'permanent' (ver OcItemsMapper.build_payload), a diferencia de
+        # orden_pago/retenciones que se protegen solo con no-reinyeccion.
+        self._oc_mapper._retry_store = retry_store
 
     # Seccion de la respuesta `results`/`errors` por nombre de entidad de config.
     _RESULT_SECTION_BY_ENTITY = {

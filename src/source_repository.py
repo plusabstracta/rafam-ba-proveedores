@@ -98,6 +98,10 @@ class SourceRepository:
         if entity == "oc_items":
             # oc_items es full_load: cada corrida escanea todo, asi que las
             # filas rechazadas re-entran naturalmente (no necesita reinyeccion).
+            # Ojo: eso NO alcanza para las que quedaron 'permanent' en la cola
+            # (rechazo persistente, ej. Pedido destino borrado) — a esas hay que
+            # excluirlas explicitamente, y eso lo hace OcItemsMapper.build_payload
+            # via RetryStore.permanent_external_ids() (paxapos#489).
             return self._build_oc_items_statement(cfg, checkpoint)
         if entity == "solic_gastos":
             return self._build_solic_gastos_statement(cfg, checkpoint, retry_keys)
