@@ -226,3 +226,74 @@ def is_cod_prov_excluded(cod_prov: object) -> bool:
         return int(str(cod_prov).strip()) in EXCLUDED_COD_PROV
     except (ValueError, TypeError):
         return False
+
+
+# ── issue #414: base imponible de OC_ITEMS.IMP_UNITARIO ─────────────────────
+#
+# Compras.DiagnosticoImportesOc (lado Paxapos) detecto que una porcion
+# relevante de las OC importadas desde RAFAM (concentrado en madariaga) tiene
+# el IVA metido adentro de `compras_pedido_mercaderias.precio`, una columna
+# que el modelo define como SIN impuestos. Investigado el schema de origen
+# (docs/rafam_schema_and_joins.md): ni OC_ITEMS ni ORDEN_COMPRA tienen ninguna
+# columna de IVA/alicuota — IMP_UNITARIO no trae, en el dato crudo de RAFAM,
+# forma de saber si es neto o bruto. Por eso este modulo NO adivina la base
+# imponible de ningun item.
+#
+# Lo que si se puede declarar, a mano, es una lista de COD_PROV para los que
+# un humano ya confirmo (revisando facturas reales, fuera de este pipeline)
+# que RAFAM carga IMP_UNITARIO CON IVA. El exportador marca esos items con
+# `precio_incluye_iva=true` + `alicuota_iva` en el payload; el controller
+# Paxapos (RafamMigracionesController::_normalizeItemsPrecio) recien ahi
+# convierte a neto antes de guardar. Sin entradas en esta lista, el
+# comportamiento es exactamente el de siempre (se asume neto).
+def _parse_cod_prov_precio_con_iva_env() -> frozenset[int]:
+    """Lee COD_PROV confirmados con IMP_UNITARIO bruto desde
+    RAFAM_COD_PROV_PRECIO_CON_IVA (CSV). Vacio por default: sin confirmacion
+    manual, no se convierte ningun item."""
+    raw = os.getenv("RAFAM_COD_PROV_PRECIO_CON_IVA", "")
+    cods: set[int] = set()
+    for token in raw.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        try:
+            cods.add(int(token))
+        except ValueError:
+            continue
+    return frozenset(cods)
+
+
+COD_PROV_PRECIO_CON_IVA: frozenset[int] = _parse_cod_prov_precio_con_iva_env()
+
+
+def _parse_alicuota_iva_default_env() -> float | None:
+    """Alicuota (%) a declarar para los COD_PROV de COD_PROV_PRECIO_CON_IVA,
+    via RAFAM_ALICUOTA_IVA_DEFAULT. None (default) = sin alicuota configurada;
+    el controller Paxapos entonces NO convierte (no inventa una tasa)."""
+    raw = os.getenv("RAFAM_ALICUOTA_IVA_DEFAULT", "").strip()
+    if not raw:
+        return None
+    try:
+        alicuota = float(raw)
+    except ValueError:
+        import logging
+        logging.getLogger(__name__).warning(
+            "RAFAM_ALICUOTA_IVA_DEFAULT=%r invalido; se ignora", raw
+        )
+        return None
+    return alicuota if alicuota > 0 else None
+
+
+ALICUOTA_IVA_DEFAULT: float | None = _parse_alicuota_iva_default_env()
+
+
+def is_cod_prov_precio_con_iva(cod_prov: object) -> bool:
+    """True si un humano confirmo (fuera de este pipeline) que este COD_PROV
+    manda IMP_UNITARIO con IVA incluido. Acepta int/str/None igual que
+    is_cod_prov_excluded(); no convertible a int -> False (nunca se asume)."""
+    if cod_prov is None:
+        return False
+    try:
+        return int(str(cod_prov).strip()) in COD_PROV_PRECIO_CON_IVA
+    except (ValueError, TypeError):
+        return False
