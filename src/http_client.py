@@ -22,6 +22,7 @@ import time
 from typing import Any
 from urllib import error, parse, request
 
+from . import auth_circuit_breaker
 from .utils import env_verify_ssl, redact_payload_for_dump
 
 logger = logging.getLogger(__name__)
@@ -51,6 +52,34 @@ RETRYABLE_HTTP_STATUS = frozenset({408, 425, 429, 500, 502, 503, 504})
 
 # User-Agent constante para todas las llamadas del migrator.
 _USER_AGENT = "rafam-sync/1.0"
+
+
+def build_auth_headers(
+    *,
+    api_key: str | None,
+    tenant: str,
+    content_type: str | None = None,
+) -> dict[str, str]:
+    """Headers comunes para TODAS las llamadas HTTP al migrator Paxapos.
+
+    Unico lugar que decide que headers de auth lleva un request. Antes de
+    paxapos#361, `exporter._fetch_migrator_json` (spec/lookups/resolver_*)
+    reconstruia este dict a mano por su cuenta, separado de
+    `PaxaposHttpClient._build_headers` (import). Esa duplicacion es
+    exactamente el tipo de gap que deja una llamada mandando (o no) el header
+    segun quien la haya escrito ese dia — cualquier nuevo call-site DEBE pasar
+    por esta funcion en vez de armar su propio dict.
+    """
+    headers = {
+        "Accept": "application/json",
+        "X-Tenant-Id": tenant,
+        "User-Agent": _USER_AGENT,
+    }
+    if api_key:
+        headers["X-Api-Key"] = api_key
+    if content_type:
+        headers["Content-Type"] = content_type
+    return headers
 
 
 class PaxaposHttpClient:
@@ -166,16 +195,10 @@ class PaxaposHttpClient:
     # ââ Internals ââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 
     def _build_headers(self, *, content_type: str | None = None) -> dict[str, str]:
-        """Construye headers comunes para todas las llamadas."""
-        headers = {
-            "Accept": "application/json",
-            "X-Api-Key": self._api_key,
-            "X-Tenant-Id": self._tenant,
-            "User-Agent": _USER_AGENT,
-        }
-        if content_type:
-            headers["Content-Type"] = content_type
-        return headers
+        """Construye headers comunes para todas las llamadas (ver build_auth_headers)."""
+        return build_auth_headers(
+            api_key=self._api_key, tenant=self._tenant, content_type=content_type
+        )
 
     def _ssl_context(self):
         """Devuelve SSL context si verify_ssl=false, None si es normal."""
@@ -184,7 +207,13 @@ class PaxaposHttpClient:
         return None
 
     def _execute_json_request(self, req: request.Request) -> dict:
-        """Ejecuta request con retries, valida content-type, parsea JSON."""
+        """Ejecuta request con retries, valida content-type, parsea JSON.
+
+        Antes de tocar la red, chequea el circuit breaker de auth (paxapos#361):
+        si venimos de fallar 401/403 hace poco, corta acá sin emitir el
+        request — un reintento no arregla una api_key mala.
+        """
+        auth_circuit_breaker.check(context=req.full_url)
         try:
             with http_request_with_retries(
                 req,
@@ -209,9 +238,11 @@ class PaxaposHttpClient:
                 if "json" not in content_type:
                     raise RuntimeError(f"Respuesta no JSON (Content-Type={content_type})")
 
+                auth_circuit_breaker.record_success()
                 return json.loads(body) if body else {}
 
         except error.HTTPError as exc:
+            auth_circuit_breaker.record_failure(exc.code, context=req.full_url)
             body = exc.read().decode("utf-8", errors="replace") if exc.fp else ""
             raise RuntimeError(f"HTTP {exc.code}: {body[:500]}") from exc
         except error.URLError as exc:

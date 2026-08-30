@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
+from src import auth_circuit_breaker
 from src.exporter import (
     MigratorExporter,
     _build_migrator_url,
@@ -326,6 +327,10 @@ class TestMigratorFetchHelpers:
         with patch("src.exporter._http_request_with_retries", side_effect=http_error):
             with pytest.raises(RuntimeError, match="HTTP 401"):
                 _fetch_migrator_json("PAXAPOS_RAFAM_SPEC_PATH", "rafam/migracion/spec.json")
+        # El 401 de arriba abre el circuit breaker de auth (paxapos#361) — lo
+        # cerramos explicitamente para que los casos siguientes (URLError, sin
+        # key) prueben SU propio camino y no el corte del breaker.
+        auth_circuit_breaker.record_success()
 
         with patch("src.exporter._http_request_with_retries", side_effect=error.URLError("dns")):
             with pytest.raises(RuntimeError, match="URL error"):
@@ -338,6 +343,56 @@ class TestMigratorFetchHelpers:
 
         with pytest.raises(ValueError, match="PAXAPOS_API_KEY"):
             _fetch_migrator_json("PAXAPOS_RAFAM_SPEC_PATH", "rafam/migracion/spec.json")
+
+    def test_lookups_json_sends_same_x_api_key_header_as_import(self, monkeypatch):
+        """paxapos#361: lookups.json debe llevar el mismo X-Api-Key que
+        importar.json (via PaxaposHttpClient). Antes, _fetch_migrator_json
+        armaba su propio dict de headers a mano; ahora ambos pasan por
+        build_auth_headers — este test verifica el header REAL en el Request
+        que sale hacia _http_request_with_retries, no solo el mock del
+        resultado."""
+        monkeypatch.setenv("PAXAPOS_URL", "https://example.test")
+        monkeypatch.setenv("PAXAPOS_TENANT", "tenant")
+        monkeypatch.setenv("PAXAPOS_API_KEY", "the-real-key")
+        monkeypatch.setenv("PAXAPOS_VERIFY_SSL", "true")
+        url = "https://example.test/tenant/rafam/migracion/lookups.json"
+        response = _FakeHttpResponse(b'{"tipos_de_pago": []}', url=url)
+
+        captured = {}
+
+        def _capture(req, **_kwargs):
+            captured["headers"] = dict(req.headers)
+            return response
+
+        with patch("src.exporter._http_request_with_retries", side_effect=_capture):
+            _fetch_migrator_json(
+                "PAXAPOS_RAFAM_LOOKUPS_PATH",
+                "rafam/migracion/lookups.json",
+                query_params={"only": "tipos_de_pago"},
+            )
+
+        # urllib.Request titlecase-ea los headers (X-Api-Key, no X-API-KEY).
+        assert captured["headers"].get("X-api-key") == "the-real-key"
+
+    def test_403_on_lookups_opens_breaker_and_next_call_skips_network(self, monkeypatch):
+        """El caso real del issue: lookups.json devuelve 403 en loop. Con el
+        circuit breaker, la SEGUNDA corrida ni siquiera intenta la request."""
+        monkeypatch.setenv("PAXAPOS_URL", "https://example.test")
+        monkeypatch.setenv("PAXAPOS_TENANT", "tenant")
+        monkeypatch.setenv("PAXAPOS_API_KEY", "stale-key")
+        monkeypatch.setenv("PAXAPOS_VERIFY_SSL", "true")
+        url = "https://example.test/tenant/rafam/migracion/lookups.json"
+        forbidden = error.HTTPError(url, 403, "forbidden", {}, io.BytesIO(b""))
+
+        with patch("src.exporter._http_request_with_retries", side_effect=forbidden) as mock_req:
+            with pytest.raises(RuntimeError, match="HTTP 403"):
+                fetch_migrator_lookups(["tipos_de_pago"])
+            assert mock_req.call_count == 1
+
+        with patch("src.exporter._http_request_with_retries") as mock_req_2:
+            with pytest.raises(auth_circuit_breaker.AuthCircuitOpenError):
+                fetch_migrator_lookups(["tipos_de_pago"])
+            mock_req_2.assert_not_called()
 
     def test_fetch_migrator_lookups_fallback_merge_and_failure(self):
         with patch("src.exporter._fetch_migrator_json", side_effect=[RuntimeError("full"), {"a": [1]}, {"b": [2]}]):

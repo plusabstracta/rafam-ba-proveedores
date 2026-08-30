@@ -32,8 +32,10 @@ from .entity_writer import (
     _persist_solic_gastos,
     _persist_retenciones,
 )
+from . import auth_circuit_breaker
 from .http_client import (
     PaxaposHttpClient,
+    build_auth_headers,
     build_url as _build_migrator_url_impl,
     http_request_with_retries,
     RETRYABLE_HTTP_STATUS,
@@ -749,7 +751,15 @@ class MigratorExporter(BaseExporter):
         return self._http._build_headers(content_type="application/json")
 
     def _post_json(self, url: str, payload: dict) -> dict:
-        """POST JSON. Construye request inline para que patches en src.exporter funcionen."""
+        """POST JSON. Construye request inline para que patches en src.exporter funcionen.
+
+        Cubre importar.json (el flujo de mayor volumen) y los resolver_*.json.
+        Circuit breaker de auth (paxapos#361): sin esto, un 401/403 de la
+        api_key (ej. rotada del lado del backend) haria que CADA batch de
+        CADA entidad de CADA corrida de cron siguiera pegandole a
+        importar.json en loop — el gap es peor aca que en lookups.json porque
+        el volumen de requests es mucho mayor.
+        """
         import ssl as _ssl
         from .http_client import _dump_request, _dump_response
 
@@ -760,6 +770,8 @@ class MigratorExporter(BaseExporter):
         ssl_context = None
         if not self._http._verify_ssl:
             ssl_context = _ssl._create_unverified_context()
+
+        auth_circuit_breaker.check(context=url)
 
         try:
             with _http_request_with_retries(req, timeout=self._http._timeout, ssl_context=ssl_context) as resp:
@@ -784,8 +796,10 @@ class MigratorExporter(BaseExporter):
                 if isinstance(parsed, dict) and parsed.get("errors"):
                     logger.debug("Migrator response errors=%s", parsed.get("errors"))
                 _dump_response(url, parsed)
+                auth_circuit_breaker.record_success()
                 return parsed
         except error.HTTPError as exc:
+            auth_circuit_breaker.record_failure(exc.code, context=url)
             body = exc.read().decode("utf-8", errors="replace") if exc.fp else ""
             raise RuntimeError(f"HTTP {exc.code}: {body[:500]}") from exc
         except error.URLError as exc:
@@ -1138,7 +1152,14 @@ def _fetch_migrator_json(
     require_api_key: bool = True,
 ) -> dict:
     """GET JSON desde Paxapos. Usa _http_request_with_retries del scope del exporter
-    para que los test patches en src.exporter funcionen."""
+    para que los test patches en src.exporter funcionen.
+
+    Headers via build_auth_headers (paxapos#361): antes este helper armaba su
+    propio dict de headers a mano, separado del que usa PaxaposHttpClient para
+    importar.json — dos caminos que podian divergir. Ahora comparten la misma
+    funcion, asi que un request a lookups.json/spec.json lleva exactamente el
+    mismo X-Api-Key (si hay una configurada) que un request de import.
+    """
     import ssl as _ssl
 
     base_url = _paxapos_url()
@@ -1151,13 +1172,7 @@ def _fetch_migrator_json(
     verify_ssl = env_verify_ssl()
     endpoint = _migrator_endpoint(endpoint_env, default_endpoint)
 
-    headers = {
-        "Accept": "application/json",
-        "X-Tenant-Id": tenant,
-        "User-Agent": "rafam-sync/1.0",
-    }
-    if api_key:
-        headers["X-Api-Key"] = api_key
+    headers = build_auth_headers(api_key=api_key, tenant=tenant)
     url = _build_migrator_url(base_url, tenant, endpoint)
     if query_params:
         url = f"{url}?{parse.urlencode(query_params)}"
@@ -1166,14 +1181,22 @@ def _fetch_migrator_json(
     if not verify_ssl:
         ssl_context = _ssl._create_unverified_context()
 
+    # Circuit breaker de auth (paxapos#361): si veniamos de fallar 401/403 hace
+    # poco, cortamos aca sin tocar la red — un reintento no arregla una
+    # api_key mala, solo agrega otra linea al 403 en loop que termino baneando
+    # el cliente por CrowdSec/WAF.
+    auth_circuit_breaker.check(context=url)
+
     try:
         with _http_request_with_retries(req, timeout=timeout, ssl_context=ssl_context) as resp:
             content_type = (resp.headers.get("Content-Type") or "").lower()
             body = resp.read().decode("utf-8", errors="replace")
             if "json" not in content_type:
                 raise RuntimeError(f"Respuesta no JSON (Content-Type={content_type})")
+            auth_circuit_breaker.record_success()
             return json.loads(body) if body else {}
     except error.HTTPError as exc:
+        auth_circuit_breaker.record_failure(exc.code, context=url)
         body = exc.read().decode("utf-8", errors="replace") if exc.fp else ""
         raise RuntimeError(f"HTTP {exc.code}: {body[:500]}") from exc
     except error.URLError as exc:
