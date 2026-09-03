@@ -224,7 +224,7 @@ Para paliar despasajes de tiempo en los que una entidad (ej: OP o Gasto) se crea
 
 ### 3.4 Operaciones Especiales y Scripts de Soporte
 - **`sync-changes` (`make sync-proveedores`, `make sync-oc`):** Escanea los datos en RAFAM, recalcula su hash y envía upsert solo para los registros cuyos datos sufrieron modificaciones en origen.
-- **`check-integrity` (`make check-integrity`):** Detecta anulaciones en RAFAM y propaga las bajas a Paxapos (respetando la regla de no borrar si hay OP).
+- **`check-integrity` (`make check-integrity`):** Detecta anulaciones y eliminaciones físicas de OC en RAFAM y propaga la baja a Paxapos mediante soft-delete, incluso si la OC tiene una OP vinculada.
 - **`backfill-gastos` (`make backfill-gastos`):** Escaneo completo de `SOLIC_GASTOS` ignorando la ventana de 30 días y sin alterar el checkpoint incremental, para recuperar links locales de gastos previamente creados en Paxapos.
 - **`reconcile` (`python main.py reconcile`):** Auditoría read-only que compara los registros totales en RAFAM contra los links locales y la cola de reintentos para reportar inconsistencias o drift.
 

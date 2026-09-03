@@ -147,7 +147,6 @@ class OcItemsMapper:
         ocs_to_create: list[dict] = []
         ocs_to_anular: list[dict] = []
         ocs_to_skip_register: list[tuple[int, int, int]] = []
-        ocs_to_skip_has_op: list[tuple[int, int, int]] = []
         ocs_to_skip_permanent: list[tuple[int, int, int]] = []
         ocs_same_state: list[tuple[int, int, int]] = []
         skipped_same_state = 0
@@ -238,7 +237,7 @@ class OcItemsMapper:
                     ocs_to_skip_register.append(key)
 
         # ââ 3. Registrar en link TODAS las OCs (con o sin envÃ­o) ââââââââââ
-        for key in ocs_to_skip_register + ocs_same_state + ocs_to_skip_has_op:
+        for key in ocs_to_skip_register + ocs_same_state:
             raw = grouped_raw[key]
             source_key = json.dumps(
                 {"ejercicio": key[0], "nro_oc": key[2], "uni_compra": key[1]},
@@ -285,10 +284,9 @@ class OcItemsMapper:
         if not ordenes_compra:
             logger.info(
                 "Migrator [oc_items]: nada que enviar (skip_estado=%d, mismo_estado=%d, "
-                "skip_has_op=%d, skip_permanent=%d, sin_items=%d)",
+                "skip_permanent=%d, sin_items=%d)",
                 len(ocs_to_skip_register),
                 skipped_same_state,
-                len(ocs_to_skip_has_op),
                 len(ocs_to_skip_permanent),
                 unresolved_items,
             )
@@ -311,7 +309,6 @@ class OcItemsMapper:
             "skip_estado": len(ocs_to_skip_register),
             "mismo_estado": skipped_same_state,
             "reenviado_hash": resent_hash,
-            "skip_has_op": len(ocs_to_skip_has_op),
             "skip_permanent": len(ocs_to_skip_permanent),
             "unresolved_items": unresolved_items,
         }
@@ -385,8 +382,7 @@ class OcItemsMapper:
         section_stats = stats.get("ordenes_compra", {}) if isinstance(stats, dict) else {}
         logger.info(
             "Migrator OK [oc_items->ordenes_compra]: %d ok, %d error, crear=%d, anular=%d, "
-            "skip_estado=%d, mismo_estado=%d, reenviado_hash=%d, skip_has_op=%d, "
-            "skip_permanent=%d, dry_run=%s",
+            "skip_estado=%d, mismo_estado=%d, reenviado_hash=%d, skip_permanent=%d, dry_run=%s",
             section_stats.get("ok", 0),
             section_stats.get("error", 0),
             stats_dict.get("crear", 0),
@@ -394,7 +390,6 @@ class OcItemsMapper:
             stats_dict.get("skip_estado", 0),
             stats_dict.get("mismo_estado", 0),
             stats_dict.get("reenviado_hash", 0),
-            stats_dict.get("skip_has_op", 0),
             stats_dict.get("skip_permanent", 0),
             dry_run,
         )
