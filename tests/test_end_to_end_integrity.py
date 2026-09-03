@@ -9,6 +9,7 @@ from sqlalchemy import Column, MetaData, Table, create_engine, text, Integer, St
 from scripts.check_integrity import (
     check_anulaciones,
     check_content_hash_proveedores,
+    propagate_orden_compra_soft_delete,
 )
 from src.entity_link_store import EntityLinkStore
 from src.source_repository import SourceRepository
@@ -135,6 +136,80 @@ class TestIntegrityEndToEnd:
         # 5. Volver a correr: el link ahora está marcado como eliminado, se ignora
         res = check_anulaciones("orden_compra", mock_link_store, repo, apply=True)
         assert res.verificados == 0
+
+    def test_check_anulaciones_propaga_baja_antes_de_marcar_link(self, mock_db_and_repo, mock_link_store):
+        conn, repo = mock_db_and_repo
+        source_key = '{"ejercicio": 2026, "nro_oc": 10, "uni_compra": 1}'
+        mock_link_store.save_link("orden_compra", source_key, "880")
+        conn.execute(
+            text(
+                "UPDATE ORDEN_COMPRA SET ESTADO_OC = 'A' "
+                "WHERE EJERCICIO = 2026 AND NRO_OC = 10 AND UNI_COMPRA = 1"
+            )
+        )
+        conn.commit()
+
+        propagated = []
+        result = check_anulaciones(
+            "orden_compra",
+            mock_link_store,
+            repo,
+            apply=True,
+            propagate_delete_fn=lambda key, remote_id: propagated.append((key, remote_id)),
+        )
+
+        assert result.errores == 0
+        assert propagated == [(source_key, "880")]
+        assert mock_link_store.get_link("orden_compra", source_key).get("deleted_at") is not None
+
+    def test_check_integrity_propaga_eliminacion_fisica_de_oc(self, mock_db_and_repo, mock_link_store):
+        conn, repo = mock_db_and_repo
+        source_key = '{"ejercicio": 2026, "nro_oc": 10, "uni_compra": 1}'
+        mock_link_store.save_link("orden_compra", source_key, "880")
+        conn.execute(
+            text(
+                "DELETE FROM ORDEN_COMPRA "
+                "WHERE EJERCICIO = 2026 AND NRO_OC = 10 AND UNI_COMPRA = 1"
+            )
+        )
+        conn.commit()
+
+        propagated = []
+        result = check_anulaciones(
+            "orden_compra",
+            mock_link_store,
+            repo,
+            apply=True,
+            propagate_delete_fn=lambda key, remote_id: propagated.append((key, remote_id)),
+        )
+
+        assert result.fisicamente_eliminados == 1
+        assert result.errores == 0
+        assert propagated == [(source_key, "880")]
+        assert mock_link_store.get_link("orden_compra", source_key).get("deleted_at") is not None
+
+    def test_propagate_orden_compra_soft_delete_envia_id_y_sin_items(self):
+        exporter = MagicMock()
+        exporter._import_url = "https://example.test/tenant/rafam/migracion/importar.json"
+        exporter._post_json.return_value = {
+            "results": {
+                "ordenes_compra": [{
+                    "success": True,
+                    "id": 880,
+                    "mode": "soft_delete",
+                }],
+            },
+        }
+
+        source_key = '{"ejercicio": 2026, "nro_oc": 10, "uni_compra": 1}'
+        propagate_orden_compra_soft_delete(exporter, source_key, "880")
+
+        _, payload = exporter._post_json.call_args[0]
+        row = payload["ordenes_compra"][0]
+        assert row["external_id"] == {"ejercicio": 2026, "nro_oc": 10, "uni_compra": 1}
+        assert row["Pedido"] == {"id": 880, "deleted": True}
+        assert row["items"] == []
+        exporter._raise_on_migrator_errors.assert_called_once()
 
     def test_check_content_hash_proveedores_detecta_y_reenvia(self, mock_db_and_repo, mock_link_store):
         conn, repo = mock_db_and_repo

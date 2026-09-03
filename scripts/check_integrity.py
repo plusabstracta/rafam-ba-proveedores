@@ -6,7 +6,8 @@ Detecta dos tipos de anomalías en los registros ya migrados:
   1. ANULACIONES (todas las entidades)
      Un registro que fue enviado a Paxapos (tiene remote_id en el link store)
      ahora figura como anulado en RAFAM (ESTADO_OC/OP/SOLIC = 'A').
-     Acción: marcar deleted_at en el link store para auditoría.
+    Acción: para orden_compra, propagar la baja a Paxapos mediante soft-delete;
+    luego marcar deleted_at en el link store para auditoría.
 
   2. CAMBIOS DE CONTENIDO — solo proveedores
      Un proveedor ya migrado tiene diferente hash SHA-256 respecto al guardado
@@ -140,6 +141,7 @@ def check_anulaciones(
     repo: SourceRepository,
     *,
     apply: bool,
+    propagate_delete_fn=None,
 ) -> EntityResult:
     """Verifica anulaciones para una entidad. Devuelve el resultado."""
     result = EntityResult(entity=entity)
@@ -184,10 +186,12 @@ def check_anulaciones(
             result.warnings.append(f"FÍSICO: {msg}")
             if apply:
                 try:
+                    if entity == "orden_compra" and propagate_delete_fn is not None:
+                        propagate_delete_fn(source_key, remote_id)
                     link_store.mark_deleted(entity, source_key)
                 except Exception as exc2:
                     msg_err = format_exception_context(
-                        exc2, entity, source_key, "Marcando registro como eliminado físicamente en base de datos local"
+                        exc2, entity, source_key, "Propagando la baja física a Paxapos y marcándola en la base local"
                     )
                     logger.error("\n" + msg_err)
                     result.errores += 1
@@ -206,11 +210,13 @@ def check_anulaciones(
             result.warnings.append(f"ANULADO: {msg}")
             if apply:
                 try:
+                    if entity == "orden_compra" and propagate_delete_fn is not None:
+                        propagate_delete_fn(source_key, remote_id)
                     link_store.mark_deleted(entity, source_key)
                     logger.info("Registro marcado como anulado localmente: %s key=%s", entity, source_key)
                 except Exception as exc2:
                     msg_err = format_exception_context(
-                        exc2, entity, source_key, "Marcando registro como anulado en base de datos local"
+                        exc2, entity, source_key, "Propagando la anulación a Paxapos y marcándola en la base local"
                     )
                     logger.error("\n" + msg_err)
                     result.errores += 1
@@ -219,6 +225,34 @@ def check_anulaciones(
             result.sin_cambios += 1
 
     return result
+
+
+def propagate_orden_compra_soft_delete(exporter, source_key: str, remote_id: str) -> None:
+    """Envía una baja de OC al endpoint RAFAM y exige confirmación del soft-delete."""
+    import json
+
+    external_id = json.loads(source_key)
+    payload = {
+        "dry_run": False,
+        "options": {"upsert": True, "atomic": False, "fail_fast": True},
+        "ordenes_compra": [{
+            "external_id": external_id,
+            "Pedido": {
+                "id": int(remote_id),
+                "deleted": True,
+            },
+            "items": [],
+        }],
+    }
+    parsed = exporter._post_json(exporter._import_url, payload)
+    exporter._raise_on_migrator_errors(parsed)
+
+    results = parsed.get("results", {}).get("ordenes_compra", [])
+    accepted_modes = {"soft_delete", "already_deleted", "skipped_not_found"}
+    if not results or not results[0].get("success") or results[0].get("mode") not in accepted_modes:
+        raise RuntimeError(
+            f"Paxapos no confirmó el soft-delete de Pedido #{remote_id}: {results!r}"
+        )
 
 
 def check_content_hash_proveedores(
@@ -476,9 +510,9 @@ def main() -> int:
     _backup_state_db(link_store_path)
     link_store = EntityLinkStore(db_path=link_store_path)
 
-    # Exporter solo se necesita en modo apply para proveedores
+    # Exporter se necesita para reenviar proveedores y propagar bajas de OC.
     exporter = None
-    if apply and "proveedores" in entities:
+    if apply and ("proveedores" in entities or "orden_compra" in entities):
         from src.exporter import MigratorExporter
         exporter = MigratorExporter()
 
@@ -486,7 +520,18 @@ def main() -> int:
 
     # ── Paso 1: Anulaciones (todas las entidades) ─────────────────────────
     for entity in entities:
-        r = check_anulaciones(entity, link_store, repo, apply=apply)
+        propagate_delete_fn = None
+        if apply and entity == "orden_compra":
+            propagate_delete_fn = lambda source_key, remote_id: propagate_orden_compra_soft_delete(
+                exporter, source_key, remote_id
+            )
+        r = check_anulaciones(
+            entity,
+            link_store,
+            repo,
+            apply=apply,
+            propagate_delete_fn=propagate_delete_fn,
+        )
         results.append(r)
 
         # Log ultra-corto y conciso si no hay anomalías ni errores

@@ -166,15 +166,33 @@ class OcItemsMapper:
         )
 
         for key, oc_data in grouped.items():
-            if not oc_data["items"]:
-                continue
-
             raw = grouped_raw[key]
             estado_actual = str(raw.get("OC_ESTADO_OC", "")).strip().upper()
             source_key = json.dumps(
                 {"ejercicio": key[0], "nro_oc": key[2], "uni_compra": key[1]},
                 sort_keys=True,
             )
+
+            link_previo = self._link_store.get_link("orden_compra", source_key)
+            # `or ""`: links creados antes del ALTER TABLE pueden tener
+            # estado_oc NULL y .strip() sobre None tiraba AttributeError.
+            estado_previo = (link_previo.get("estado_oc") or "").strip().upper() if link_previo else None
+
+            # Una baja no necesita items: el destino se identifica por el id remoto
+            # durable y el backend ejecuta el soft-delete canonico sin reescribir la
+            # cabecera ni los renglones. Tambien se reintentan bajas que quedaron
+            # permanent por el antiguo 409; esa causa ya fue corregida en el receptor.
+            if estado_actual == "A":
+                if link_previo and link_previo.get("remote_id"):
+                    oc_data["Pedido"]["id"] = int(link_previo["remote_id"])
+                    oc_data["Pedido"]["deleted"] = 1
+                    ocs_to_anular.append(oc_data)
+                else:
+                    ocs_to_skip_register.append(key)
+                continue
+
+            if not oc_data["items"]:
+                continue
 
             if source_key in permanent_keys:
                 ocs_to_skip_permanent.append(key)
@@ -186,11 +204,6 @@ class OcItemsMapper:
             # oc_data no se muta: {**oc_data, ...} crea un dict nuevo.
             current_hash = compute_payload_hash({**oc_data, "_rafam_estado_oc": estado_actual})
             oc_payload_hashes[source_key] = current_hash
-
-            link_previo = self._link_store.get_link("orden_compra", source_key)
-            # `or ""`: links creados antes del ALTER TABLE pueden tener
-            # estado_oc NULL y .strip() sobre None tiraba AttributeError.
-            estado_previo = (link_previo.get("estado_oc") or "").strip().upper() if link_previo else None
 
             if estado_actual == "R":
                 if link_previo is None or estado_previo != "R":
@@ -209,20 +222,6 @@ class OcItemsMapper:
                     else:
                         ocs_same_state.append(key)
                         skipped_same_state += 1
-            elif estado_actual == "A":
-                if link_previo and estado_previo == "R" and link_previo.get("remote_id"):
-                    if link_previo.get("has_op"):
-                        logger.info(
-                            "Migrator [oc_items] OC %s-%s-%s anulada en RAFAM pero tiene OP,"
-                            " no se elimina de Paxapos",
-                            key[0], key[1], key[2],
-                        )
-                        ocs_to_skip_has_op.append(key)
-                    else:
-                        oc_data["Pedido"]["deleted"] = 1
-                        ocs_to_anular.append(oc_data)
-                else:
-                    ocs_to_skip_register.append(key)
             else:
                 has_cc = bool(str(raw.get("OC_CC_NRO") or "").strip())
                 has_op = bool(link_previo and link_previo.get("has_op"))

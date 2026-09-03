@@ -1232,14 +1232,40 @@ class TestWriteBatchOcItems:
 
         assert len(sent) == 1
         oc = sent[0]["ordenes_compra"][0]
+        assert oc["Pedido"]["id"] == 880
         assert oc["Pedido"]["deleted"] == 1
         assert "estado_aprobacion" not in oc["Pedido"] or oc["Pedido"]["estado_aprobacion"] != 4
         assert "motivo_rechazo" not in oc["Pedido"]
 
-    # ── Anulación: R→A con OP → NO se envía ──
+    def test_oc_anulada_sin_items_tambien_se_envia(self):
+        """La baja se identifica por remote_id y no depende de conservar renglones."""
+        exp = self._make_exporter_with_prov()
+        source_key = json.dumps({"ejercicio": 2026, "nro_oc": 100, "uni_compra": 1}, sort_keys=True)
+        exp._link_store.save_link(
+            "orden_compra", source_key, "880",
+            estado_oc="R", gasto_linked_refs="",
+        )
 
-    def test_oc_anulada_con_op_no_se_envia(self):
-        """OC previamente migrada con R, ahora A pero con has_op=1 → no se envía."""
+        row = list(_oc_row(estado_oc="A"))
+        row[OC_COLUMNS.index("CANTIDAD")] = None
+
+        sent = []
+        exp._post_json = lambda url, p: (
+            sent.append(p)
+            or {"stats": {"ordenes_compra": {"ok": 1, "error": 0}}}
+        )
+        exp.write_batch("oc_items", OC_COLUMNS, [tuple(row)])
+
+        assert len(sent) == 1
+        oc = sent[0]["ordenes_compra"][0]
+        assert oc["Pedido"]["id"] == 880
+        assert oc["Pedido"]["deleted"] == 1
+        assert oc["items"] == []
+
+    # ── Anulación: R→A con OP → también se elimina ──
+
+    def test_oc_anulada_con_op_tambien_se_envia(self):
+        """La OP no impide la baja de la OC; gastos y egresos no son dependientes."""
         exp = self._make_exporter_with_prov()
         source_key = json.dumps({"ejercicio": 2026, "nro_oc": 100, "uni_compra": 1}, sort_keys=True)
         exp._link_store.save_link(
@@ -1252,17 +1278,14 @@ class TestWriteBatchOcItems:
         sent = []
         exp._post_json = lambda url, p: (
             sent.append(p)
-            or {"stats": {"ordenes_compra": {"ok": 0, "error": 0}}}
+            or {"stats": {"ordenes_compra": {"ok": 1, "error": 0}}}
         )
         exp.write_batch("oc_items", OC_COLUMNS, rows)
 
-        # No se envía nada a Paxapos
-        assert sent == []
-        # Pero se registra localmente con estado A
-        link = exp._link_store.get_link("orden_compra", source_key)
-        assert link is not None
-        assert link["estado_oc"] == "A"
-        assert link["remote_id"] == "880"  # se preserva
+        assert len(sent) == 1
+        oc = sent[0]["ordenes_compra"][0]
+        assert oc["Pedido"]["id"] == 880
+        assert oc["Pedido"]["deleted"] == 1
 
     # ── mark_oc_has_op ──
 
