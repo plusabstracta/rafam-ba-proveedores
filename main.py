@@ -231,6 +231,17 @@ def _sync_entity(
     migrator_sent = 0
     migrator_saved = 0
     migrator_errors = 0
+    migrator_outcomes = {
+        "created": 0,
+        "updated": 0,
+        "replaced": 0,
+        "deleted": 0,
+        "skipped": 0,
+        "unclassified": 0,
+        "unchanged": 0,
+        "excluded": 0,
+        "invalid": 0,
+    }
 
     metrics = {
         "entity": entity,
@@ -239,6 +250,15 @@ def _sync_entity(
         "migrator_sent": 0,
         "migrator_saved": 0,
         "migrator_errors": 0,
+        "migrator_created": 0,
+        "migrator_updated": 0,
+        "migrator_replaced": 0,
+        "migrator_deleted": 0,
+        "migrator_skipped": 0,
+        "migrator_unclassified": 0,
+        "source_unchanged": 0,
+        "source_excluded": 0,
+        "source_invalid": 0,
         "batches_ok": 0,
         "batches_failed": 0,
         "query_duration_secs": 0.0,
@@ -295,6 +315,11 @@ def _sync_entity(
                 migrator_errors += int(batch_metrics.get("errors", 0) or 0)
             except (TypeError, ValueError):
                 pass
+            for key in migrator_outcomes:
+                try:
+                    migrator_outcomes[key] += int(batch_metrics.get(key, 0) or 0)
+                except (TypeError, ValueError):
+                    pass
 
         def process_batch(batch: list[tuple]) -> None:
             nonlocal last_id, last_ts, total, batch_count, failed_batches, last_batch_error, last_batch_error_detail, batches_ok
@@ -387,6 +412,15 @@ def _sync_entity(
         metrics["migrator_sent"] = migrator_sent
         metrics["migrator_saved"] = migrator_saved
         metrics["migrator_errors"] = migrator_errors
+        metrics["migrator_created"] = migrator_outcomes["created"]
+        metrics["migrator_updated"] = migrator_outcomes["updated"]
+        metrics["migrator_replaced"] = migrator_outcomes["replaced"]
+        metrics["migrator_deleted"] = migrator_outcomes["deleted"]
+        metrics["migrator_skipped"] = migrator_outcomes["skipped"]
+        metrics["migrator_unclassified"] = migrator_outcomes["unclassified"]
+        metrics["source_unchanged"] = migrator_outcomes["unchanged"]
+        metrics["source_excluded"] = migrator_outcomes["excluded"]
+        metrics["source_invalid"] = migrator_outcomes["invalid"]
         metrics["batches_ok"] = batches_ok
         metrics["batches_failed"] = failed_batches
         metrics["batch_times"] = batch_times
@@ -394,16 +428,31 @@ def _sync_entity(
         if dry_run:
             logger.info("[DRY RUN   ] %s — %d registros (sin avanzar checkpoint)", entity, total)
         else:
-            if failed_batches > 0:
+            if failed_batches > 0 or migrator_errors > 0 or migrator_outcomes["invalid"] > 0:
                 # Hubo batches que fallaron pero la corrida siguió. Marcamos la
                 # entidad como con errores para que el caller devuelva exit!=0
                 # y el cron/operador se entere, pero no perdimos las filas OK.
-                msg = f"{failed_batches} batch(es) fallaron; ultimo error: {last_batch_error}"
+                if failed_batches > 0:
+                    msg = f"{failed_batches} batch(es) fallaron; ultimo error: {last_batch_error}"
+                elif migrator_outcomes["invalid"] > 0:
+                    msg = (
+                        f"{migrator_outcomes['invalid']} fila(s) de origen no pudieron mapearse; "
+                        "revisar errores del mapper"
+                    )
+                else:
+                    msg = f"Paxapos rechazo {migrator_errors} item(s); quedaron registrados en la cola de reintentos"
                 engine.mark_error(entity, msg)
-                logger.error(
-                    "[%-11s] %s — %d registros OK, %d batch(es) con error. Ultimo: %s",
-                    mode, entity, total, failed_batches, last_batch_error,
-                )
+                if failed_batches > 0:
+                    logger.error(
+                        "[%-11s] %s — %d filas leidas, %d batch(es) con error. Ultimo: %s",
+                        mode, entity, total, failed_batches, last_batch_error,
+                    )
+                else:
+                    logger.error(
+                        "[%-11s] %s — %d filas leidas, %d rechazo(s) de Paxapos, "
+                        "%d fila(s) invalidas; revisar log y cola de reintentos.",
+                        mode, entity, total, migrator_errors, migrator_outcomes["invalid"],
+                    )
                 metrics["success"] = False
                 metrics["error_msg"] = msg
                 metrics["duration_secs"] = time.monotonic() - t_start
@@ -469,6 +518,8 @@ def _cmd_run_locked(args) -> None:
     start_time_str = run_start_dt.strftime("%Y-%m-%d %H:%M:%S")
     retry_counts_start = {}
     retry_counts_end = {}
+    retry_summary_start = []
+    retry_summary_end = []
     entity_metrics = []
 
     if _EJERCICIO_MIN:
@@ -527,6 +578,7 @@ def _cmd_run_locked(args) -> None:
             if pending:
                 logger.info("Cola de reintentos al inicio: %s", json.dumps(pending, ensure_ascii=False))
                 retry_counts_start = dict(pending)
+            retry_summary_start = retry_store.summary_by_reason(targets)
 
         source_engine = create_source_engine()
         with source_engine.connect() as conn:
@@ -547,6 +599,7 @@ def _cmd_run_locked(args) -> None:
         try:
             if retry_store:
                 retry_counts_end = dict(retry_store.counts_by_entity(entities=targets))
+                retry_summary_end = retry_store.summary_by_reason(targets)
         except Exception:  # pragma: no cover - defensive
             pass
 
@@ -576,6 +629,8 @@ def _cmd_run_locked(args) -> None:
                 "error_msg": f"Las siguientes entidades fallaron: {', '.join(failed_entities)}",
                 "retry_counts_start": retry_counts_start,
                 "retry_counts_end": retry_counts_end,
+                "retry_summary_start": retry_summary_start,
+                "retry_summary_end": retry_summary_end,
             }
             record_run(summary_data, entity_metrics)
         else:
@@ -588,6 +643,8 @@ def _cmd_run_locked(args) -> None:
                 "error_msg": None,
                 "retry_counts_start": retry_counts_start,
                 "retry_counts_end": retry_counts_end,
+                "retry_summary_start": retry_summary_start,
+                "retry_summary_end": retry_summary_end,
             }
             record_run(summary_data, entity_metrics)
 
@@ -762,6 +819,23 @@ def cmd_retry_queue(args) -> None:
     """
     retry_store = RetryStore()
     try:
+        if args.dismiss and args.requeue:
+            logger.error("--dismiss y --requeue son operaciones excluyentes")
+            raise SystemExit(2)
+        if args.dismiss:
+            if not args.entity or not args.external_id or not args.note:
+                logger.error("--dismiss requiere --entity, --external-id y --note")
+                raise SystemExit(2)
+            dismissed = retry_store.dismiss(args.entity, args.external_id, args.note)
+            if not dismissed:
+                logger.error(
+                    "No existe retry para entity=%s external_id=%s",
+                    args.entity,
+                    args.external_id,
+                )
+                raise SystemExit(1)
+            return
+
         if args.requeue:
             reencoladas = retry_store.requeue(entity=args.entity, external_id=args.external_id)
             logger.info("Filas reencoladas (permanent -> pending): %d", reencoladas)
@@ -769,21 +843,36 @@ def cmd_retry_queue(args) -> None:
                 logger.info("No habia filas 'permanent' con ese filtro.")
             return
 
-        items = retry_store.list_items(entity=args.entity, status=args.status)
+        items = retry_store.list_items(
+            entity=args.entity,
+            status=args.status,
+            external_id=args.external_id,
+        )
         if not items:
             print("\nCola de reintentos vacia (con los filtros dados).\n")
             return
 
-        col = "{:<14} {:<40} {:<22} {:<10} {}"
+        col = "{:<14} {:<40} {:<22} {:<24} {:<8} {}"
         print()
-        print(col.format("Entidad", "External ID", "Motivo", "Intentos", "Estado"))
-        print("─" * 110)
+        print(col.format("Entidad", "External ID", "Motivo", "Detalle", "Intentos", "Estado"))
+        print("─" * 140)
         for it in items:
-            print(col.format(it.entity, it.external_id[:40], it.reason_code, it.attempts, it.status))
+            print(col.format(
+                it.entity,
+                it.external_id[:40],
+                it.reason_code,
+                it.reason_detail or "legacy_unspecified",
+                it.attempts,
+                it.status,
+            ))
         print()
         for it in items:
+            print(
+                f"  {it.entity} {it.external_id}: first_seen={it.first_seen}, "
+                f"last_attempt={it.last_attempt or '—'}"
+            )
             if it.error_message:
-                print(f"  {it.entity} {it.external_id}: {it.error_message}")
+                print(f"    ultimo error: {it.error_message}")
         print()
     finally:
         retry_store.close()
@@ -1042,6 +1131,12 @@ def main() -> None:
         action="store_true",
         help="Devuelve las filas 'permanent' (con los filtros dados) a 'pending' con intentos en 0",
     )
+    retry_p.add_argument(
+        "--dismiss",
+        action="store_true",
+        help="Descarta exactamente un retry; requiere --entity, --external-id y --note",
+    )
+    retry_p.add_argument("--note", help="Motivo de auditoria requerido por --dismiss")
 
     daily_p = sub.add_parser(
         "daily-report",

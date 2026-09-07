@@ -273,7 +273,13 @@ def notify_run_report(
 
     mode_label = "DRY-RUN" if dry_run else "APPLY"
     success = summary_data.get("success", False)
-    status_label = "OK" if success else "CON ERRORES"
+    status_label = summary_data.get("status_label") or ("OK" if success else "CON ERRORES")
+    if any(
+        int(m.get("migrator_errors", 0) or 0) > 0
+        or int(m.get("source_invalid", 0) or 0) > 0
+        for m in entity_metrics
+    ):
+        status_label = "CON ERRORES"
     subject = summary_data.get("subject") or f"Reporte Sincronización RAFAM [{mode_label}] — {status_label}"
 
     SEP = "=" * 70
@@ -292,6 +298,15 @@ def notify_run_report(
     total_migrator_sent = sum(m.get("migrator_sent", 0) for m in entity_metrics)
     total_migrator_saved = sum(m.get("migrator_saved", 0) for m in entity_metrics)
     total_migrator_errors = sum(m.get("migrator_errors", 0) for m in entity_metrics)
+    total_created = sum(m.get("migrator_created", 0) for m in entity_metrics)
+    total_updated = sum(m.get("migrator_updated", 0) for m in entity_metrics)
+    total_replaced = sum(m.get("migrator_replaced", 0) for m in entity_metrics)
+    total_deleted = sum(m.get("migrator_deleted", 0) for m in entity_metrics)
+    total_skipped = sum(m.get("migrator_skipped", 0) for m in entity_metrics)
+    total_unclassified = sum(m.get("migrator_unclassified", 0) for m in entity_metrics)
+    total_unchanged = sum(m.get("source_unchanged", 0) for m in entity_metrics)
+    total_excluded = sum(m.get("source_excluded", 0) for m in entity_metrics)
+    total_invalid = sum(m.get("source_invalid", 0) for m in entity_metrics)
     total_batches_ok = sum(m.get("batches_ok", 0) for m in entity_metrics)
     total_batches_failed = sum(m.get("batches_failed", 0) for m in entity_metrics)
     runs_count = summary_data.get("runs_count")
@@ -315,13 +330,22 @@ def notify_run_report(
     if runs_count is not None:
         lines.append(f"  • Corridas agregadas    : {runs_count}")
     lines.append(f"  • Entidades procesadas   : {total_entities}  (OK: {ok_entities}, con error: {fail_entities})")
-    lines.append(f"  • Registros procesados   : {total_records:,}")
-    lines.append(f"  • Enviados al migrator   : {total_migrator_sent:,}")
-    lines.append(f"  • Guardados por migrator : {total_migrator_saved:,}")
-    lines.append(f"  • Errores del migrator   : {total_migrator_errors:,}")
+    lines.append(f"  • Filas leídas de RAFAM  : {total_records:,}")
+    lines.append(f"  • Items enviados Paxapos : {total_migrator_sent:,}")
+    lines.append(f"  • Confirmados por Paxapos: {total_migrator_saved:,}")
+    lines.append(f"      Altas nuevas         : {total_created:,}")
+    lines.append(f"      Actualizaciones      : {total_updated:,}")
+    lines.append(f"      Reemplazos           : {total_replaced:,}")
+    lines.append(f"      Bajas                : {total_deleted:,}")
+    lines.append(f"      Omitidos/ya existentes: {total_skipped:,}")
+    lines.append(f"      Sin modo clasificable: {total_unclassified:,}")
+    lines.append(f"  • Sin cambios, no enviados: {total_unchanged:,}")
+    lines.append(f"  • Excluidos por configuración: {total_excluded:,}")
+    lines.append(f"  • Filas inválidas        : {total_invalid:,}")
+    lines.append(f"  • Rechazados por Paxapos : {total_migrator_errors:,}")
     lines.append(f"  • Batches OK / con error : {total_batches_ok} / {total_batches_failed}")
     lines.append(f"  • Velocidad global       : {global_speed_min:,.1f} reg/min   ({global_speed_sec:,.1f} reg/s)")
-    lines.append("  • Nota                  : registros procesados no equivale a altas nuevas en Paxapos")
+    lines.append("  • Nota                  : filas leídas no equivale a altas nuevas en Paxapos")
     lines.append("")
 
     # Error general de la corrida
@@ -337,7 +361,11 @@ def notify_run_report(
     lines.append(SEP)
     for m in entity_metrics:
         ent = m.get("entity", "?")
-        ent_ok = m.get("success", False)
+        ent_ok = (
+            m.get("success", False)
+            and int(m.get("migrator_errors", 0) or 0) == 0
+            and int(m.get("source_invalid", 0) or 0) == 0
+        )
         ent_status = "OK" if ent_ok else "ERROR"
         duration = m.get("duration_secs", 0.0) or 0.0
         dur_min = duration / 60.0
@@ -357,10 +385,16 @@ def notify_run_report(
             b_min = b_max = b_avg = 0.0
 
         lines.append(f"[{ent}]  ({m.get('mode', '—')})  →  {ent_status}")
-        lines.append(f"  Registros procesados    : {records:,}")
-        lines.append(f"  Enviados al migrator    : {migrator_sent:,}")
-        lines.append(f"  Guardados por migrator  : {migrator_saved:,}")
-        lines.append(f"  Errores del migrator    : {migrator_errors:,}")
+        lines.append(f"  Filas leídas de RAFAM   : {records:,}")
+        lines.append(f"  Items enviados Paxapos  : {migrator_sent:,}")
+        lines.append(f"  Confirmados por Paxapos : {migrator_saved:,}")
+        lines.append(f"    Altas / updates       : {m.get('migrator_created', 0):,} / {m.get('migrator_updated', 0):,}")
+        lines.append(f"    Reemplazos / bajas    : {m.get('migrator_replaced', 0):,} / {m.get('migrator_deleted', 0):,}")
+        lines.append(f"    Omitidos / sin modo   : {m.get('migrator_skipped', 0):,} / {m.get('migrator_unclassified', 0):,}")
+        lines.append(f"  Sin cambios, no enviados: {m.get('source_unchanged', 0):,}")
+        lines.append(f"  Excluidos por configuración: {m.get('source_excluded', 0):,}")
+        lines.append(f"  Filas inválidas         : {m.get('source_invalid', 0):,}")
+        lines.append(f"  Rechazados por Paxapos  : {migrator_errors:,}")
         lines.append(f"  Batches OK / con error  : {m.get('batches_ok', 0)} / {m.get('batches_failed', 0)}")
         lines.append(f"  Duración                : {duration:.2f} s   ({dur_min:.2f} min)")
         lines.append(f"  Query origen (SQL)      : {query_dur:.2f} s")
@@ -386,6 +420,20 @@ def notify_run_report(
             lines.append(f"  • {ent:<24} inicio: {s:>4}  →  fin: {e:>4}   ({diff_str})")
     else:
         lines.append("  Sin registros pendientes de reintento.")
+    retry_summary = summary_data.get("retry_summary_end") or []
+    if retry_summary:
+        lines.append("")
+        lines.append("  Agrupado por causa al cierre:")
+        for row in retry_summary:
+            detail = row.get("reason_detail") or "legacy_unspecified"
+            lines.append(
+                f"    - {row.get('entity', '?')} | {row.get('status', '?')} | "
+                f"{row.get('reason_code', '?')}/{detail}: {int(row.get('count', 0) or 0):,} "
+                f"(desde {row.get('oldest_first_seen') or '—'}, último intento "
+                f"{row.get('last_attempt') or '—'}, máx. intentos {int(row.get('max_attempts', 0) or 0)})"
+            )
+        lines.append("")
+        lines.append("  Inspección: .venv/bin/python main.py retry-queue --entity <entidad>")
     lines.append("")
     lines.append(SEP)
     lines.append("Email generado automáticamente por el pipeline de sincronización RAFAM (Madariaga).")

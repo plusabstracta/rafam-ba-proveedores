@@ -204,7 +204,7 @@ class MigratorExporter(BaseExporter):
         self._retry_store = None
         # Ultima respuesta parseada del receptor; la usa _record_batch_outcomes
         self._last_parsed = None
-        self._last_batch_migrator_metrics = {"sent": 0, "saved": 0, "errors": 0}
+        self._last_batch_migrator_metrics = self._empty_migrator_metrics()
 
         # ââ Mapper instances âââââââââââââââââââââââââââââââââââââââââââââ
         self._oc_mapper = OcItemsMapper(link_store=self._link_store, lookup_resolver=self._lookup)
@@ -320,7 +320,34 @@ class MigratorExporter(BaseExporter):
                 if key is None:
                     continue
                 message = err.get("message") or "fila rechazada por el receptor"
-                self._retry_store.enqueue(entity, key, REASON_BACKEND_REJECTED, str(message)[:500])
+                validation_errors = err.get("validationErrors")
+                if validation_errors:
+                    message = "%s | validationErrors=%s" % (
+                        message,
+                        json.dumps(validation_errors, ensure_ascii=False, sort_keys=True),
+                    )
+                self._retry_store.enqueue(
+                    entity,
+                    key,
+                    REASON_BACKEND_REJECTED,
+                    str(message)[:2000],
+                    reason_detail=self._backend_error_detail(err),
+                )
+
+    @staticmethod
+    def _backend_error_detail(error_data: dict) -> str:
+        if error_data.get("validationErrors"):
+            return "validation_error"
+        message = str(error_data.get("message") or "").lower()
+        if "duplic" in message or "unique" in message:
+            return "duplicate"
+        if "no existe" in message or "borrad" in message:
+            return "destination_missing"
+        if "sin items" in message or "cantidad" in message:
+            return "invalid_items"
+        if "proveedor" in message:
+            return "provider_error"
+        return "backend_rejected"
 
     def _payload_options(self) -> dict:
         return {
@@ -339,7 +366,24 @@ class MigratorExporter(BaseExporter):
         return dict(self._last_batch_migrator_metrics)
 
     def _reset_last_batch_migrator_metrics(self) -> None:
-        self._last_batch_migrator_metrics = {"sent": 0, "saved": 0, "errors": 0}
+        self._last_batch_migrator_metrics = self._empty_migrator_metrics()
+
+    @staticmethod
+    def _empty_migrator_metrics() -> dict[str, int]:
+        return {
+            "sent": 0,
+            "saved": 0,
+            "errors": 0,
+            "created": 0,
+            "updated": 0,
+            "replaced": 0,
+            "deleted": 0,
+            "skipped": 0,
+            "unclassified": 0,
+            "unchanged": 0,
+            "excluded": 0,
+            "invalid": 0,
+        }
 
     @staticmethod
     def _metric_int(value) -> int:
@@ -384,18 +428,45 @@ class MigratorExporter(BaseExporter):
         sections: list[str],
     ) -> None:
         saved, errors = self._stats_counts(parsed, sections)
-        self._last_batch_migrator_metrics = {
-            "sent": self._metric_int(sent),
-            "saved": saved,
-            "errors": errors,
+        metrics = self._empty_migrator_metrics()
+        metrics.update({"sent": self._metric_int(sent), "saved": saved, "errors": errors})
+        mode_groups = {
+            "create": "created",
+            "created": "created",
+            "update": "updated",
+            "replace": "replaced",
+            "soft_delete": "deleted",
+            "already_deleted": "deleted",
+            "existing": "skipped",
+            "skip_existing": "skipped",
+            "skipped_not_found": "skipped",
+            "already_linked": "skipped",
+            "already_linked_other": "skipped",
         }
+        results = parsed.get("results") if isinstance(parsed, dict) else None
+        if isinstance(results, dict):
+            for section in sections:
+                for result in results.get(section, []) or []:
+                    if not isinstance(result, dict) or not result.get("success"):
+                        continue
+                    group = mode_groups.get(str(result.get("mode") or ""), "unclassified")
+                    metrics[group] += 1
+        self._last_batch_migrator_metrics = metrics
 
     def _set_last_batch_migrator_metrics_from_writer(self, writer: EntityWriter) -> None:
-        self._last_batch_migrator_metrics = {
+        metrics = self._empty_migrator_metrics()
+        outcome_counts = getattr(writer, "last_outcome_counts", {}) or {}
+        mapper_metrics = getattr(writer, "last_mapper_metrics", {}) or {}
+        metrics.update({
             "sent": self._metric_int(writer.last_payload_count),
             "saved": self._metric_int(writer.last_saved_count),
             "errors": self._metric_int(writer.last_error_count),
-        }
+            **outcome_counts,
+            "unchanged": self._metric_int(mapper_metrics.get("unchanged", 0)),
+            "excluded": self._metric_int(mapper_metrics.get("excluded", 0)),
+            "invalid": self._metric_int(mapper_metrics.get("invalid", 0)),
+        })
+        self._last_batch_migrator_metrics = metrics
 
     # ââ write_batch: orchestrator ââââââââââââââââââââââââââââââââââââââââ
 
@@ -597,6 +668,9 @@ class MigratorExporter(BaseExporter):
     def _write_batch_proveedores(self, columns, rows):
         """Delegado a EntityWriter."""
         writer = self._writers["proveedores"]
+        force_external_ids = set()
+        if getattr(self, "_retry_store", None) is not None:
+            force_external_ids = self._retry_store.pending_external_ids("proveedores")
         try:
             parsed = writer.write_batch(
                 columns, rows,
@@ -606,15 +680,12 @@ class MigratorExporter(BaseExporter):
                 post_fn=self._post_json,
                 link_store=self._link_store,
                 raise_on_errors_fn=self._raise_on_migrator_errors,
+                force_external_ids=force_external_ids,
             )
         except Exception:
             self._set_last_batch_migrator_metrics_from_writer(writer)
             raise
-        self._set_last_batch_migrator_metrics(
-            sent=writer.last_payload_count,
-            parsed=parsed,
-            sections=[writer.result_section],
-        )
+        self._set_last_batch_migrator_metrics_from_writer(writer)
         if parsed is not None:
             self._last_parsed = parsed
 
@@ -634,11 +705,7 @@ class MigratorExporter(BaseExporter):
         except Exception:
             self._set_last_batch_migrator_metrics_from_writer(writer)
             raise
-        self._set_last_batch_migrator_metrics(
-            sent=writer.last_payload_count,
-            parsed=parsed,
-            sections=[writer.result_section],
-        )
+        self._set_last_batch_migrator_metrics_from_writer(writer)
         if parsed is not None:
             self._last_parsed = parsed
 
@@ -658,15 +725,13 @@ class MigratorExporter(BaseExporter):
         try:
             parsed = self._post_json(self._resolver_gasto_url, payload)
         except Exception as exc:
-            logger.warning(
-                "Migrator [resolver_gasto]: fallo la consulta (%s); no se enriquecen gastos este lote",
-                exc,
-            )
-            return {}
+            raise RuntimeError(f"resolver_gasto fallo: {exc}") from exc
         resolver = parsed.get("resolver") if isinstance(parsed, dict) else None
         if not isinstance(resolver, dict) or not resolver.get("success"):
-            logger.warning("Migrator [resolver_gasto]: respuesta sin resolver.success; %s", resolver)
-            return {}
+            raise RuntimeError(
+                "resolver_gasto devolvio una respuesta invalida o sin success: "
+                f"{json.dumps(resolver, ensure_ascii=False)}"
+            )
         return resolver
 
     def _write_batch_solic_gastos(self, columns, rows):
@@ -685,11 +750,7 @@ class MigratorExporter(BaseExporter):
         except Exception:
             self._set_last_batch_migrator_metrics_from_writer(writer)
             raise
-        self._set_last_batch_migrator_metrics(
-            sent=writer.last_payload_count,
-            parsed=parsed,
-            sections=[writer.result_section],
-        )
+        self._set_last_batch_migrator_metrics_from_writer(writer)
         if parsed is not None:
             self._last_parsed = parsed
 
@@ -786,7 +847,7 @@ class MigratorExporter(BaseExporter):
                 )
 
                 if status < 200 or status >= 300:
-                    raise RuntimeError(f"HTTP {status}: {body[:500]}")
+                    raise RuntimeError(f"HTTP {status}: {self._error_body(body)}")
 
                 if "json" not in content_type:
                     raise RuntimeError(f"Respuesta no JSON (Content-Type={content_type})")
@@ -801,9 +862,15 @@ class MigratorExporter(BaseExporter):
         except error.HTTPError as exc:
             auth_circuit_breaker.record_failure(exc.code, context=url)
             body = exc.read().decode("utf-8", errors="replace") if exc.fp else ""
-            raise RuntimeError(f"HTTP {exc.code}: {body[:500]}") from exc
+            raise RuntimeError(f"HTTP {exc.code}: {self._error_body(body)}") from exc
         except error.URLError as exc:
             raise RuntimeError(f"URL error: {exc.reason}") from exc
+
+    @staticmethod
+    def _error_body(body: str, limit: int = 5000) -> str:
+        if len(body) <= limit:
+            return body
+        return f"{body[:limit]} [RESPUESTA TRUNCADA: {len(body)} caracteres totales]"
 
     @staticmethod
     def _raise_on_migrator_errors(parsed: dict) -> None:

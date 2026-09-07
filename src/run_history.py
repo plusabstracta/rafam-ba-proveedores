@@ -66,6 +66,8 @@ def record_run(summary_data: dict, entity_metrics: list[dict]) -> None:
         # (sin esto, filas encoladas se acumulaban invisiblemente).
         "retry_counts_start": summary_data.get("retry_counts_start") or {},
         "retry_counts_end": summary_data.get("retry_counts_end") or {},
+        "retry_summary_start": summary_data.get("retry_summary_start") or [],
+        "retry_summary_end": summary_data.get("retry_summary_end") or [],
         "entities": [
             {
                 "entity": m.get("entity"),
@@ -75,6 +77,15 @@ def record_run(summary_data: dict, entity_metrics: list[dict]) -> None:
                 "migrator_sent": m.get("migrator_sent", 0),
                 "migrator_saved": m.get("migrator_saved", 0),
                 "migrator_errors": m.get("migrator_errors", 0),
+                "migrator_created": m.get("migrator_created", 0),
+                "migrator_updated": m.get("migrator_updated", 0),
+                "migrator_replaced": m.get("migrator_replaced", 0),
+                "migrator_deleted": m.get("migrator_deleted", 0),
+                "migrator_skipped": m.get("migrator_skipped", 0),
+                "migrator_unclassified": m.get("migrator_unclassified", 0),
+                "source_unchanged": m.get("source_unchanged", 0),
+                "source_excluded": m.get("source_excluded", 0),
+                "source_invalid": m.get("source_invalid", 0),
                 "batches_ok": m.get("batches_ok", 0),
                 "batches_failed": m.get("batches_failed", 0),
                 "duration_secs": m.get("duration_secs", 0.0),
@@ -154,6 +165,11 @@ def aggregate_runs(runs: list[dict], date_str: str) -> tuple[dict, list[dict]]:
             any_fail = True
         for m in r.get("entities", []) or []:
             name = m.get("entity", "?")
+            if (
+                int(m.get("migrator_errors", 0) or 0) > 0
+                or int(m.get("source_invalid", 0) or 0) > 0
+            ):
+                any_fail = True
             agg = ent.setdefault(
                 name,
                 {
@@ -163,6 +179,15 @@ def aggregate_runs(runs: list[dict], date_str: str) -> tuple[dict, list[dict]]:
                     "migrator_sent": 0,
                     "migrator_saved": 0,
                     "migrator_errors": 0,
+                    "migrator_created": 0,
+                    "migrator_updated": 0,
+                    "migrator_replaced": 0,
+                    "migrator_deleted": 0,
+                    "migrator_skipped": 0,
+                    "migrator_unclassified": 0,
+                    "source_unchanged": 0,
+                    "source_excluded": 0,
+                    "source_invalid": 0,
                     "batches_ok": 0,
                     "batches_failed": 0,
                     "duration_secs": 0.0,
@@ -180,11 +205,27 @@ def aggregate_runs(runs: list[dict], date_str: str) -> tuple[dict, list[dict]]:
             agg["migrator_sent"] += int(m.get("migrator_sent", 0) or 0)
             agg["migrator_saved"] += int(m.get("migrator_saved", 0) or 0)
             agg["migrator_errors"] += int(m.get("migrator_errors", 0) or 0)
+            for key in (
+                "migrator_created",
+                "migrator_updated",
+                "migrator_replaced",
+                "migrator_deleted",
+                "migrator_skipped",
+                "migrator_unclassified",
+                "source_unchanged",
+                "source_excluded",
+                "source_invalid",
+            ):
+                agg[key] += int(m.get(key, 0) or 0)
             agg["batches_ok"] += int(m.get("batches_ok", 0) or 0)
             agg["batches_failed"] += int(m.get("batches_failed", 0) or 0)
             agg["duration_secs"] += float(m.get("duration_secs", 0.0) or 0.0)
             agg["query_duration_secs"] += float(m.get("query_duration_secs", 0.0) or 0.0)
-            if not m.get("success", False):
+            if (
+                not m.get("success", False)
+                or int(m.get("migrator_errors", 0) or 0) > 0
+                or int(m.get("source_invalid", 0) or 0) > 0
+            ):
                 agg["success"] = False
                 for k in ("error_msg", "error_type", "error_location", "migrator_error", "error_trace"):
                     if m.get(k):
@@ -202,14 +243,31 @@ def aggregate_runs(runs: list[dict], date_str: str) -> tuple[dict, list[dict]]:
     # vs "como termino la ultima" (los snapshots intermedios no aportan).
     retry_start: dict = {}
     retry_end: dict = {}
+    retry_summary_start: list[dict] = []
+    retry_summary_end: list[dict] = []
     for r in runs:
-        if r.get("retry_counts_start"):
-            retry_start = r["retry_counts_start"]
+        if "retry_counts_start" in r or "retry_summary_start" in r:
+            retry_start = r.get("retry_counts_start") or {}
+            retry_summary_start = r.get("retry_summary_start") or []
             break
     for r in reversed(runs):
-        if r.get("retry_counts_end"):
-            retry_end = r["retry_counts_end"]
+        if "retry_counts_end" in r or "retry_summary_end" in r:
+            retry_end = r.get("retry_counts_end") or {}
+            retry_summary_end = r.get("retry_summary_end") or []
             break
+
+    retry_has_errors = any(
+        row.get("status") == "permanent"
+        or row.get("reason_code") in {"backend_rejected", "validation_client"}
+        for row in retry_summary_end
+    )
+    retry_has_warnings = bool(retry_end or retry_summary_end)
+    if any_fail or retry_has_errors:
+        status_label = "CON ERRORES"
+    elif retry_has_warnings:
+        status_label = "CON ADVERTENCIAS"
+    else:
+        status_label = "OK"
 
     summary_data = {
         "subject": f"Resumen diario RAFAM {date_str} — {status_label}",
@@ -217,10 +275,13 @@ def aggregate_runs(runs: list[dict], date_str: str) -> tuple[dict, list[dict]]:
         "start_time": (runs[0].get("start_time") if runs else "—"),
         "end_time": (runs[-1].get("end_time") if runs else "—"),
         "duration_formatted": duration_formatted,
-        "success": not any_fail,
+        "success": not any_fail and not retry_has_errors,
+        "status_label": status_label,
         "error_msg": (f"Entidades con error en el día: {', '.join(failed)}" if failed else None),
         "runs_count": len(runs),
         "retry_counts_start": retry_start,
         "retry_counts_end": retry_end,
+        "retry_summary_start": retry_summary_start,
+        "retry_summary_end": retry_summary_end,
     }
     return summary_data, entity_metrics

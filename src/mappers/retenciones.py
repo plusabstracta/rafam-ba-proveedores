@@ -98,6 +98,7 @@ class RetencionesMapper:
                         op_sk,
                         REASON_DEPENDENCY_MISSING,
                         f"OP {ejercicio}-{nro_op} aun no migrada en Paxapos",
+                        reason_detail="payment_not_migrated",
                     )
                 continue
 
@@ -117,6 +118,7 @@ class RetencionesMapper:
                         op_sk,
                         REASON_DEPENDENCY_MISSING,
                         f"OP {ejercicio}-{nro_op}: {len(deducciones)} deduccion(es) sin tipo de retencion resoluble",
+                        reason_detail="retention_type_unresolved",
                     )
                 continue
 

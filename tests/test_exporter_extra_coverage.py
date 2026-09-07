@@ -88,6 +88,18 @@ def test_build_exporter_returns_migrator():
         migrator.assert_called_once_with(dry_run=False)
 
 
+def test_resolver_gasto_failure_is_not_hidden(monkeypatch, tmp_path):
+    exporter = _migrator(monkeypatch, tmp_path)
+
+    def fail_post(_url, _payload):
+        raise RuntimeError("HTTP 503: resolver no disponible")
+
+    exporter._post_json = fail_post
+
+    with pytest.raises(RuntimeError, match="resolver_gasto"):
+        exporter._resolve_gastos_batch([10], [])
+
+
 class TestMigratorExporterExtraPaths:
     def test_write_batch_dispatch_empty_and_unknown(self, monkeypatch, tmp_path):
         exporter = _migrator(monkeypatch, tmp_path)

@@ -292,19 +292,15 @@ class SolicGastosMapper:
         try:
             comps = self._source_repo.fetch_cta_comprob_for_sgs(list(raw_by_key.keys()))
         except Exception as exc:
-            logger.warning(
-                "Migrator [solic_gastos]: fallo el fetch de comprobantes multiples (%s); "
-                "%d SGs quedan sin enriquecer este lote",
-                exc, len(raw_by_key),
-            )
-            return []
+            raise RuntimeError(
+                "solic_gastos: fallo el fetch de comprobantes multiples para "
+                f"{len(raw_by_key)} SGs: {exc}"
+            ) from exc
         if comps is None:
-            logger.warning(
-                "Migrator [solic_gastos]: REG_COMP/CTA_COMPROB no disponibles; "
-                "%d SGs multi-comprobante sin enriquecer",
-                len(raw_by_key),
+            raise RuntimeError(
+                "solic_gastos: REG_COMP/CTA_COMPROB no disponibles para "
+                f"{len(raw_by_key)} SGs multi-comprobante"
             )
-            return []
 
         out: list[tuple[dict, dict]] = []
         for key, comp_rows in comps.items():

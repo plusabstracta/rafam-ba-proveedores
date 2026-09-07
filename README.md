@@ -433,8 +433,24 @@ Revisar tambien los logs del portal Paxapos si el migrator devuelve errores parc
   esas filas vuelven a `pending` con los intentos en 0 y entran en la proxima corrida.
   Caso tipico: core#406 — el gate de `cantidad > 0` tiraba la OC entera por un renglon con
   cantidad 0; tras deployar el fix, `main.py retry-queue --entity ordenes_compra --requeue`.
+- **Inspeccionar una fila exacta**: `main.py retry-queue --entity retenciones --external-id
+  '{"ejercicio": 2026, "nro_op": 123}'` muestra causa, detalle estable, primer registro,
+  ultimo intento y error completo.
+- **Descartar un falso positivo confirmado**: usar exclusivamente un ID exacto y dejar una
+  justificacion auditable:
+  `main.py retry-queue --dismiss --entity retenciones --external-id
+  '{"ejercicio": 2026, "nro_op": 123}' --note 'retencion historica fuera de alcance'`.
+  El descarte no modifica checkpoints ni links. No usar `reset-*` para limpiar retries: esos
+  comandos reinician estado de sincronizacion y pueden provocar reenvios masivos.
 - **Mail diario**: la seccion "COLA DE REINTENTOS" muestra el estado real de la cola al
-  inicio y fin del dia por entidad (antes siempre figuraba vacia).
+  inicio y fin del dia, agrupado por entidad, estado y causa. `CON ADVERTENCIAS` significa
+  que solo quedan dependencias pendientes; `CON ERRORES` indica rechazos del backend,
+  validaciones, filas `permanent` o fallas tecnicas.
+- **Metricas del mail**: "Filas leidas de RAFAM" es trabajo del scanner, "Items enviados a
+  Paxapos" es el payload real y "Altas nuevas" cuenta exclusivamente resultados
+  `mode=create`. Actualizaciones, reemplazos, bajas y omitidos se informan por separado.
+  Proveedores ya vinculados cuyo `payload_hash` no cambio no se vuelven a enviar, excepto si
+  estan en la cola de reintentos.
 - **OPs sin orden de compra** (`RAFAM_MIGRAR_OP_SIN_OC`, default `true`): los pagos de gasto
   directo — con factura imputada en `ORDEN_PAGO_IMPUT`/`CTA_COMPROB` pero sin OC en
   `REG_COMP` — se envian sin `pedido_id`; Paxapos deduplica el gasto por

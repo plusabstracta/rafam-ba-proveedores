@@ -19,6 +19,8 @@ from __future__ import annotations
 import logging
 import os
 import sqlite3
+import getpass
+import socket
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -52,9 +54,12 @@ class RetryItem:
     entity: str
     external_id: str
     reason_code: str
+    reason_detail: Optional[str]
     error_message: Optional[str]
     attempts: int
     status: str
+    first_seen: str
+    last_attempt: Optional[str]
     payload_snapshot: Optional[str] = None
 
 
@@ -99,6 +104,7 @@ class RetryStore:
                 entity TEXT NOT NULL,
                 external_id TEXT NOT NULL,
                 reason_code TEXT NOT NULL,
+                reason_detail TEXT,
                 error_message TEXT,
                 attempts INTEGER NOT NULL DEFAULT 0,
                 first_seen TEXT NOT NULL,
@@ -110,6 +116,12 @@ class RetryStore:
             )
             """
         )
+        existing_columns = {
+            row["name"]
+            for row in self._conn.execute(f"PRAGMA table_info({_TABLE})").fetchall()
+        }
+        if "reason_detail" not in existing_columns:
+            self._conn.execute(f"ALTER TABLE {_TABLE} ADD COLUMN reason_detail TEXT")
         self._conn.execute(
             f"CREATE INDEX IF NOT EXISTS idx_{_TABLE}_pending "
             f"ON {_TABLE} (entity, status)"
@@ -137,6 +149,7 @@ class RetryStore:
         reason_code: str,
         error_message: str | None = None,
         payload_snapshot: str | None = None,
+        reason_detail: str | None = None,
     ) -> None:
         """Encola o actualiza una fila pendiente (incrementa attempts).
 
@@ -155,14 +168,15 @@ class RetryStore:
             self._conn.execute(
                 f"""
                 INSERT INTO {_TABLE}
-                    (entity, external_id, reason_code, error_message, attempts,
+                    (entity, external_id, reason_code, reason_detail, error_message, attempts,
                      first_seen, last_attempt, status, payload_snapshot)
-                VALUES (?, ?, ?, ?, 1, datetime('now'), datetime('now'), ?, ?)
+                VALUES (?, ?, ?, ?, ?, 1, datetime('now'), datetime('now'), ?, ?)
                 """,
                 (
                     entity,
                     str(external_id),
                     reason_code,
+                    reason_detail,
                     error_message,
                     STATUS_PENDING,
                     payload_snapshot,
@@ -189,13 +203,14 @@ class RetryStore:
             self._conn.execute(
                 f"""
                 UPDATE {_TABLE}
-                   SET reason_code = ?, error_message = ?, attempts = ?,
+                         SET reason_code = ?, reason_detail = ?, error_message = ?, attempts = ?,
                        last_attempt = datetime('now'), status = ?,
                        payload_snapshot = COALESCE(?, payload_snapshot)
                  WHERE entity = ? AND external_id = ?
                 """,
                 (
                     reason_code,
+                    reason_detail,
                     error_message,
                     attempts,
                     status,
@@ -256,6 +271,29 @@ class RetryStore:
         self._commit()
         return cursor.rowcount
 
+    def dismiss(self, entity: str, external_id: str, note: str) -> bool:
+        """Descarta un unico retry confirmado como no accionable."""
+        note = " ".join(str(note or "").split())
+        if not note:
+            raise ValueError("dismiss requiere una nota de auditoria")
+        cursor = self._conn.execute(
+            f"DELETE FROM {_TABLE} WHERE entity = ? AND external_id = ?",
+            (entity, str(external_id)),
+        )
+        self._commit()
+        if cursor.rowcount:
+            logger.warning(
+                "[retry_store] retry descartado manualmente operator=%s host=%s "
+                "entity=%s external_id=%s note=%s",
+                getpass.getuser(),
+                socket.gethostname(),
+                entity,
+                external_id,
+                note,
+            )
+            return True
+        return False
+
     # ── lectura ───────────────────────────────────────────────────────────
 
     def pending_external_ids(self, entity: str) -> set[str]:
@@ -281,7 +319,12 @@ class RetryStore:
         ).fetchall()
         return {row["external_id"] for row in rows}
 
-    def list_items(self, entity: str | None = None, status: str | None = None) -> list[RetryItem]:
+    def list_items(
+        self,
+        entity: str | None = None,
+        status: str | None = None,
+        external_id: str | None = None,
+    ) -> list[RetryItem]:
         clauses = []
         params: list[str] = []
         if entity is not None:
@@ -290,10 +333,14 @@ class RetryStore:
         if status is not None:
             clauses.append("status = ?")
             params.append(status)
+        if external_id is not None:
+            clauses.append("external_id = ?")
+            params.append(str(external_id))
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         rows = self._conn.execute(
-            f"SELECT entity, external_id, reason_code, error_message, attempts, "
-            f"status, payload_snapshot FROM {_TABLE} {where} ORDER BY entity, external_id",
+            f"SELECT entity, external_id, reason_code, reason_detail, error_message, attempts, "
+            f"status, first_seen, last_attempt, payload_snapshot "
+            f"FROM {_TABLE} {where} ORDER BY entity, external_id",
             params,
         ).fetchall()
         return [
@@ -301,9 +348,12 @@ class RetryStore:
                 entity=row["entity"],
                 external_id=row["external_id"],
                 reason_code=row["reason_code"],
+                reason_detail=row["reason_detail"],
                 error_message=row["error_message"],
                 attempts=row["attempts"] or 0,
                 status=row["status"],
+                first_seen=row["first_seen"],
+                last_attempt=row["last_attempt"],
                 payload_snapshot=row["payload_snapshot"],
             )
             for row in rows
@@ -328,3 +378,30 @@ class RetryStore:
                 continue
             out.setdefault(row["entity"], {})[row["status"]] = row["n"]
         return out
+
+    def summary_by_reason(self, entities: Optional[list[str]] = None) -> list[dict]:
+        """Resumen compacto para historial y notificaciones, sin payloads ni IDs."""
+        clauses = []
+        params: list[str] = []
+        if entities is not None:
+            if not entities:
+                return []
+            clauses.append(f"entity IN ({', '.join('?' for _ in entities)})")
+            params.extend(entities)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = self._conn.execute(
+            f"""
+            SELECT entity, status, reason_code,
+                   COALESCE(reason_detail, 'legacy_unspecified') AS reason_detail,
+                   COUNT(*) AS count,
+                   MIN(first_seen) AS oldest_first_seen,
+                   MAX(last_attempt) AS last_attempt,
+                   MAX(attempts) AS max_attempts
+              FROM {_TABLE}
+              {where}
+             GROUP BY entity, status, reason_code, COALESCE(reason_detail, 'legacy_unspecified')
+             ORDER BY entity, status, reason_code, reason_detail
+            """,
+            params,
+        ).fetchall()
+        return [dict(row) for row in rows]

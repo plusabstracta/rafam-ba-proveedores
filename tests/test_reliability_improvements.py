@@ -17,6 +17,10 @@ import pytest
 from sqlalchemy import create_engine, text
 
 from src.models import Checkpoint, EntityConfig
+from src.change_detection import compute_payload_hash
+from src.entity_link_store import EntityLinkStore
+from src.gateway_mapper import map_proveedor_migrator_row
+from src.mappers import proveedores as proveedores_mapper
 from src.run_history import aggregate_runs, load_runs, record_run
 from src.source_repository import SourceRepository
 
@@ -90,6 +94,43 @@ class TestRetryReinjectionProveedores:
         cp = Checkpoint(entity="proveedores", last_ts=datetime(2026, 5, 1))
         rows = self._rows(engine, cp, retry_keys={"no-numerico", ""})
         assert {r[0] for r in rows} == {2}
+
+
+def test_proveedor_sin_cambios_se_omite_salvo_retry(tmp_path):
+    columns = ["COD_PROV", "FANTASIA", "RAZON_SOCIAL", "CUIT", "COD_IVA", "COD_ESTADO"]
+    row = ("7", "Prov", "Prov SA", "20-12345678-3", "RINS", "A")
+    raw = dict(zip(columns, row))
+    mapped = map_proveedor_migrator_row(raw)
+    payload_hash = compute_payload_hash(mapped["Proveedor"])
+    link_store = EntityLinkStore(db_path=str(tmp_path / "state.db"))
+    link_store.save_link(
+        "proveedores",
+        "7",
+        "700",
+        payload_hash=payload_hash,
+    )
+
+    payload, _context, metrics = proveedores_mapper.build_payload(
+        columns,
+        [row],
+        dry_run=False,
+        payload_options={},
+        link_store=link_store,
+    )
+    assert payload is None
+    assert metrics == {"unchanged": 1, "excluded": 0, "invalid": 0}
+
+    payload, _context, metrics = proveedores_mapper.build_payload(
+        columns,
+        [row],
+        dry_run=False,
+        payload_options={},
+        link_store=link_store,
+        force_external_ids={"7"},
+    )
+    assert payload["proveedores"][0]["Proveedor"]["id"] == 700
+    assert metrics == {"unchanged": 0, "excluded": 0, "invalid": 0}
+    link_store.close()
 
 
 class TestRetryReinjectionSolicGastos:

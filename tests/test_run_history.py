@@ -59,7 +59,7 @@ def test_record_and_load(hist):
 
 
 def test_aggregate_runs_ok(hist):
-    run_history.record_run(_summary(True), [_entity("proveedores", records=100, sent=20, saved=18, errors=2)])
+    run_history.record_run(_summary(True), [_entity("proveedores", records=100, sent=20, saved=20, errors=0)])
     run_history.record_run(_summary(True, start="2026-07-07 10:10:00", end="2026-07-07 10:12:00", dur="00:02:00"),
                            [_entity("proveedores", records=50, sent=5, saved=5, errors=0)])
 
@@ -73,8 +73,54 @@ def test_aggregate_runs_ok(hist):
     assert len(metrics) == 1
     assert metrics[0]["records_ok"] == 150
     assert metrics[0]["migrator_sent"] == 25
-    assert metrics[0]["migrator_saved"] == 23
-    assert metrics[0]["migrator_errors"] == 2
+    assert metrics[0]["migrator_saved"] == 25
+    assert metrics[0]["migrator_errors"] == 0
+
+
+def test_aggregate_runs_partial_rejection_is_error(hist):
+    run_history.record_run(
+        _summary(True),
+        [_entity("proveedores", success=True, records=10, sent=10, saved=9, errors=1)],
+    )
+
+    summary, _metrics = run_history.aggregate_runs(
+        run_history.load_runs("2026-07-07"),
+        "2026-07-07",
+    )
+
+    assert summary["success"] is False
+    assert summary["status_label"] == "CON ERRORES"
+
+
+def test_aggregate_runs_dependency_retry_is_warning(hist):
+    summary_data = {
+        **_summary(True),
+        "retry_counts_start": {},
+        "retry_counts_end": {"retenciones": {"pending": 2}},
+        "retry_summary_start": [],
+        "retry_summary_end": [
+            {
+                "entity": "retenciones",
+                "status": "pending",
+                "reason_code": "dependency_missing",
+                "reason_detail": "payment_not_migrated",
+                "count": 2,
+                "oldest_first_seen": "2026-07-07 10:00:00",
+                "last_attempt": "2026-07-07 10:03:00",
+                "max_attempts": 1,
+            }
+        ],
+    }
+    run_history.record_run(summary_data, [_entity("retenciones", errors=0)])
+
+    summary, _metrics = run_history.aggregate_runs(
+        run_history.load_runs("2026-07-07"),
+        "2026-07-07",
+    )
+
+    assert summary["success"] is True
+    assert summary["status_label"] == "CON ADVERTENCIAS"
+    assert summary["retry_counts_start"] == {}
 
 
 def test_aggregate_runs_con_errores(hist):

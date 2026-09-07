@@ -66,12 +66,62 @@ class TestRetryStore:
         pending = store.pending_external_ids("gastos")
         assert pending == {"a"}
 
+    def test_list_items_filters_exact_external_id(self, store):
+        store.enqueue("gastos", "a", REASON_DEPENDENCY_MISSING)
+        store.enqueue("gastos", "b", REASON_DEPENDENCY_MISSING)
+
+        items = store.list_items("gastos", external_id="b")
+
+        assert [item.external_id for item in items] == ["b"]
+
     def test_counts_by_entity(self, store):
         store.enqueue("gastos", "a", REASON_DEPENDENCY_MISSING)
         store.enqueue("retenciones", "r", REASON_VALIDATION_CLIENT)
         counts = store.counts_by_entity()
         assert counts["gastos"][STATUS_PENDING] == 1
         assert counts["retenciones"][STATUS_PENDING] == 1
+
+    def test_summary_groups_by_status_reason_and_detail(self, store):
+        store.enqueue(
+            "retenciones",
+            "r-1",
+            REASON_DEPENDENCY_MISSING,
+            "OP 2026-1 aun no migrada",
+            reason_detail="op_not_migrated",
+        )
+        store.enqueue(
+            "retenciones",
+            "r-2",
+            REASON_DEPENDENCY_MISSING,
+            "OP 2026-2 aun no migrada",
+            reason_detail="op_not_migrated",
+        )
+
+        summary = store.summary_by_reason(["retenciones"])
+
+        assert summary == [
+            {
+                "entity": "retenciones",
+                "status": STATUS_PENDING,
+                "reason_code": REASON_DEPENDENCY_MISSING,
+                "reason_detail": "op_not_migrated",
+                "count": 2,
+                "oldest_first_seen": summary[0]["oldest_first_seen"],
+                "last_attempt": summary[0]["last_attempt"],
+                "max_attempts": 1,
+            }
+        ]
+        assert summary[0]["oldest_first_seen"]
+        assert summary[0]["last_attempt"]
+
+    def test_dismiss_removes_only_exact_item(self, store, caplog):
+        store.enqueue("gastos", "g-1", REASON_BACKEND_REJECTED, "duplicado")
+        store.enqueue("gastos", "g-2", REASON_BACKEND_REJECTED, "duplicado")
+
+        assert store.dismiss("gastos", "g-1", "confirmado como dato historico") is True
+        assert [item.external_id for item in store.list_items("gastos")] == ["g-2"]
+        assert "confirmado como dato historico" in caplog.text
+        assert store.dismiss("gastos", "inexistente", "no aplica") is False
 
     def test_requeue_devuelve_permanent_a_pending(self, store):
         """core#406: cuando el receptor arregla el motivo del rechazo, las filas

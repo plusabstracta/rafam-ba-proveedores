@@ -68,6 +68,8 @@ class EntityWriter:
         self._last_payload_count = 0
         self._last_saved_count = 0
         self._last_error_count = 0
+        self._last_outcome_counts = self._empty_outcome_counts()
+        self._last_mapper_metrics: dict[str, int] = {}
 
     @property
     def entity_name(self) -> str:
@@ -93,6 +95,14 @@ class EntityWriter:
     def last_error_count(self) -> int:
         return self._last_error_count
 
+    @property
+    def last_outcome_counts(self) -> dict[str, int]:
+        return dict(self._last_outcome_counts)
+
+    @property
+    def last_mapper_metrics(self) -> dict[str, int]:
+        return dict(self._last_mapper_metrics)
+
     def write_batch(
         self,
         columns: list[str],
@@ -104,6 +114,7 @@ class EntityWriter:
         post_fn: Callable[[str, dict], dict],
         link_store: Any,
         raise_on_errors_fn: Callable[[dict], None],
+        force_external_ids: set[str] | None = None,
     ) -> dict | None:
         """Ejecuta el ciclo completo: build â POST â persist â validate â log.
 
@@ -123,6 +134,8 @@ class EntityWriter:
         self._last_payload_count = 0
         self._last_saved_count = 0
         self._last_error_count = 0
+        self._last_outcome_counts = self._empty_outcome_counts()
+        self._last_mapper_metrics = {}
 
         import inspect
         sig = inspect.signature(self._mapper.build_payload)
@@ -132,6 +145,8 @@ class EntityWriter:
         }
         if "link_store" in sig.parameters:
             kwargs["link_store"] = link_store
+        if "force_external_ids" in sig.parameters:
+            kwargs["force_external_ids"] = force_external_ids or set()
 
         result = self._mapper.build_payload(columns, rows, **kwargs)
 
@@ -139,6 +154,10 @@ class EntityWriter:
         if not isinstance(result, tuple) or len(result) < 2:
             return None
         payload, context = result[0], result[1]
+        if len(result) >= 3 and isinstance(result[2], dict):
+            self._last_mapper_metrics = {
+                str(key): self._to_int(value) for key, value in result[2].items()
+            }
 
         if payload is None:
             return None
@@ -154,6 +173,7 @@ class EntityWriter:
         # POST
         parsed = post_fn(import_url, payload)
         self._capture_response_counts(parsed)
+        self._capture_result_modes(parsed)
 
         # Persist links
         self._persist_fn(parsed, context, link_store, dry_run)
@@ -195,6 +215,46 @@ class EntityWriter:
             return
         self._last_saved_count = self._to_int(section_stats.get("ok", 0))
         self._last_error_count = self._to_int(section_stats.get("error", 0))
+
+    @staticmethod
+    def _empty_outcome_counts() -> dict[str, int]:
+        return {
+            "created": 0,
+            "updated": 0,
+            "replaced": 0,
+            "deleted": 0,
+            "skipped": 0,
+            "unclassified": 0,
+        }
+
+    def _capture_result_modes(self, parsed: dict | None) -> None:
+        if not self._result_section or not isinstance(parsed, dict):
+            return
+        results = parsed.get("results")
+        if not isinstance(results, dict):
+            return
+        section_results = results.get(self._result_section)
+        if not isinstance(section_results, list):
+            return
+
+        mode_groups = {
+            "create": "created",
+            "created": "created",
+            "update": "updated",
+            "replace": "replaced",
+            "soft_delete": "deleted",
+            "already_deleted": "deleted",
+            "existing": "skipped",
+            "skip_existing": "skipped",
+            "skipped_not_found": "skipped",
+            "already_linked": "skipped",
+            "already_linked_other": "skipped",
+        }
+        for result in section_results:
+            if not isinstance(result, dict) or not result.get("success"):
+                continue
+            group = mode_groups.get(str(result.get("mode") or ""), "unclassified")
+            self._last_outcome_counts[group] += 1
 
 
 # ââ Persist function adapters ââââââââââââââââââââââââââââââââââââââââââââ

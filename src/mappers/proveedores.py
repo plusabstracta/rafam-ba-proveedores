@@ -12,6 +12,7 @@ import logging
 from typing import Any
 
 from ..change_detection import compute_payload_hash
+from ..config import is_cod_prov_excluded
 from ..gateway_mapper import map_proveedor_migrator_row
 from ..utils import normalize_cuit
 
@@ -22,7 +23,8 @@ def map_rows(
     columns: list[str],
     rows: list[tuple],
     link_store: Any | None = None,
-) -> tuple[list[dict], dict[str, dict]]:
+    force_external_ids: set[str] | None = None,
+) -> tuple[list[dict], dict[str, dict], dict[str, int]]:
     """Transforma filas RAFAM PROVEEDORES al formato migrator.
 
     Returns:
@@ -30,23 +32,48 @@ def map_rows(
     """
     proveedores: list[dict] = []
     raw_by_source_key: dict[str, dict] = {}
+    unchanged = 0
+    excluded = 0
+    invalid = 0
+    force_external_ids = force_external_ids or set()
 
     for row in rows:
         raw = dict(zip(columns, row))
         payload_row = map_proveedor_migrator_row(raw)
         if payload_row is None:
+            if is_cod_prov_excluded(raw.get("COD_PROV")):
+                excluded += 1
+            else:
+                invalid += 1
+                logger.error(
+                    "Migrator [proveedores]: fila invalida, no se puede mapear COD_PROV=%r",
+                    raw.get("COD_PROV"),
+                )
             continue
         source_key = _source_key(raw)
         if source_key is not None:
-            raw_by_source_key[source_key] = raw
             if link_store:
-                remote_id = link_store.get_remote_id("proveedores", source_key)
+                link = link_store.get_link("proveedores", source_key)
+                current_hash = compute_payload_hash(payload_row.get("Proveedor", {}))
+                if (
+                    link
+                    and link.get("payload_hash") == current_hash
+                    and source_key not in force_external_ids
+                ):
+                    unchanged += 1
+                    continue
+                remote_id = link.get("remote_id") if link else None
                 if remote_id:
                     # Inyectar el ID de Paxapos existente para actualizarlo
                     payload_row["Proveedor"]["id"] = int(remote_id)
+            raw_by_source_key[source_key] = raw
         proveedores.append(payload_row)
 
-    return proveedores, raw_by_source_key
+    return proveedores, raw_by_source_key, {
+        "unchanged": unchanged,
+        "excluded": excluded,
+        "invalid": invalid,
+    }
 
 
 def build_payload(
@@ -56,17 +83,26 @@ def build_payload(
     dry_run: bool,
     payload_options: dict,
     link_store: Any | None = None,
-) -> tuple[dict | None, dict[str, dict]]:
+    force_external_ids: set[str] | None = None,
+) -> tuple[dict | None, dict[str, dict], dict[str, int]]:
     """Construye el payload completo para POST al migrator.
 
     Returns:
         (payload, raw_by_source_key) o (None, {}) si no hay datos.
     """
-    proveedores, raw_by_source_key = map_rows(columns, rows, link_store=link_store)
+    proveedores, raw_by_source_key, mapper_metrics = map_rows(
+        columns,
+        rows,
+        link_store=link_store,
+        force_external_ids=force_external_ids,
+    )
 
     if not proveedores:
-        logger.info("Migrator [proveedores]: lote vacio luego del mapeo")
-        return None, {}
+        logger.info(
+            "Migrator [proveedores]: lote sin cambios para enviar (%d omitidos)",
+            mapper_metrics["unchanged"],
+        )
+        return None, {}, mapper_metrics
 
     payload = {
         "dry_run": dry_run,
@@ -77,7 +113,7 @@ def build_payload(
         "gastos": [],
         "ordenes_pago": [],
     }
-    return payload, raw_by_source_key
+    return payload, raw_by_source_key, mapper_metrics
 
 
 def persist_links(parsed: dict, raw_by_source_key: dict[str, dict], link_store) -> None:
