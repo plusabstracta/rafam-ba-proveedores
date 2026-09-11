@@ -151,6 +151,9 @@ class SolicGastosMapper:
         for g in resolved_gastos:
             if not isinstance(g, dict):
                 continue
+            # Ya creado/pareado por RAFAM en otra corrida: no es candidato para otro comprobante.
+            if g.get("tiene_traza_rafam"):
+                continue
             comp_key = _comprobante_key(g)
             if comp_key is not None:
                 by_comprobante.setdefault(comp_key, g)
@@ -425,11 +428,24 @@ class SolicGastosMapper:
 
 # ââ Persist Links ââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 
+# Placeholders que deja el OCR del portal cuando no pudo leer el comprobante.
+_NRO_PLACEHOLDERS = frozenset({"SIN-NUMERO"})
+
+# Tolerancia para dar dos importes por iguales al desambiguar facturas de una OC.
+_IMPORTE_TOLERANCIA = 0.01
+
+
 def _norm_factura(value) -> str:
-    """Normaliza un numero de factura para comparar (sin ceros a izquierda)."""
+    """Normaliza un numero de factura para comparar (sin ceros a izquierda).
+
+    Los placeholders del OCR y los valores solo-ceros quedan en '' (sin comprobante).
+    """
     if value is None:
         return ""
-    return str(value).strip().lstrip("0")
+    text = str(value).strip()
+    if text.upper() in _NRO_PLACEHOLDERS:
+        return ""
+    return text.lstrip("0")
 
 
 def _comprobante_key(data: dict) -> tuple | None:
@@ -456,17 +472,30 @@ def _comprobante_key(data: dict) -> tuple | None:
 def _pick_resolved(candidates: list[dict], gasto_data: dict) -> dict | None:
     """Elige el gasto resolver correcto cuando una OC tiene varias facturas.
 
-    Con un solo candidato lo devuelve. Con varios, desambigua por factura_nro;
-    si no se puede, devuelve None (se omite para no enriquecer el gasto errado).
+    Misma cascada que Gasto::matchParcialEnOc() del backend: con un solo
+    candidato lo devuelve; con varios desambigua por factura_nro y, si el OCR
+    leyo mal el numero, por importe_total (abs, +-_IMPORTE_TOLERANCIA). Si no
+    se puede, devuelve None (se omite para no enriquecer el gasto errado).
     """
     if len(candidates) == 1:
         return candidates[0]
     want = _norm_factura(gasto_data.get("factura_nro"))
-    if not want:
+    if want:
+        by_nro = [c for c in candidates if _norm_factura(c.get("factura_nro")) == want]
+        if len(by_nro) == 1:
+            return by_nro[0]
+        if by_nro:
+            candidates = by_nro
+    importe = parse_money(gasto_data.get("importe_total"))
+    if importe is None or importe == 0:
         return None
-    for candidate in candidates:
-        if _norm_factura(candidate.get("factura_nro")) == want:
-            return candidate
+    by_importe = [
+        c for c in candidates
+        if (ci := parse_money(c.get("importe_total"))) is not None
+        and round(abs(abs(ci) - abs(importe)), 2) <= _IMPORTE_TOLERANCIA
+    ]
+    if len(by_importe) == 1:
+        return by_importe[0]
     return None
 
 
