@@ -23,6 +23,7 @@ from dotenv import load_dotenv
 from sqlalchemy.exc import SQLAlchemyError
 
 from src.batch_grouping import GROUPED_BATCH_FIELDS, ENTITY_LINK_NAMES, iter_grouped_batches
+from src.backend_errors import BackendInfraError
 from src.checkpoint_store import CheckpointStore
 from src.config import ENTITY_CONFIGS
 from src.db import create_source_engine
@@ -47,6 +48,21 @@ OFFICIAL_ENTITIES = (
     "orden_pago",
     "retenciones",
 )
+
+
+def _infra_abort_after() -> int:
+    """Batches consecutivos con fallo de infraestructura del backend antes de cortar la entidad.
+
+    Con `account_gasto_itemes doesn't exist` (sep-2026) cada corrida siguio
+    mandando los 4-8 batches de la entidad a un backend que no podia procesar
+    ninguno. El watermark ya queda congelado en el primer fallo, asi que cortar
+    no pierde filas: la proxima corrida las vuelve a leer.
+    """
+    raw = os.getenv("RAFAM_INFRA_ABORT_AFTER", "2")
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return 2
 
 
 def _effective_batch_size(entity: str, requested_batch_size: int) -> int:
@@ -226,11 +242,15 @@ def _sync_entity(
     batch_times = []
     last_batch_error: str | None = None
     last_batch_error_detail: str | None = None
+    infra_streak = 0
+    infra_abort_after = _infra_abort_after()
+    abort_entity = False
     query_duration = 0.0
     total = 0
     migrator_sent = 0
     migrator_saved = 0
     migrator_errors = 0
+    migrator_deferred = 0
     migrator_outcomes = {
         "created": 0,
         "updated": 0,
@@ -250,6 +270,9 @@ def _sync_entity(
         "migrator_sent": 0,
         "migrator_saved": 0,
         "migrator_errors": 0,
+        # Filas que Paxapos difirio por dependencia pendiente (egreso_not_found,
+        # etc.); quedan en la cola y no cuentan como rechazo.
+        "migrator_deferred": 0,
         "migrator_created": 0,
         "migrator_updated": 0,
         "migrator_replaced": 0,
@@ -271,6 +294,8 @@ def _sync_entity(
         "error_location": None,    # archivo, línea y función de origen
         "error_trace": None,       # traceback completo + contexto
         "migrator_error": None,    # mensaje crudo devuelto por el migrator
+        # "backend_infra" cuando el fallo es del server Paxapos (SQL/PHP), no de los datos.
+        "error_kind": None,
     }
 
     try:
@@ -298,7 +323,7 @@ def _sync_entity(
         last_ts = None
 
         def record_migrator_metrics() -> None:
-            nonlocal migrator_sent, migrator_saved, migrator_errors
+            nonlocal migrator_sent, migrator_saved, migrator_errors, migrator_deferred
             metrics_fn = getattr(exporter, "get_last_batch_migrator_metrics", None)
             if not callable(metrics_fn):
                 return
@@ -315,6 +340,10 @@ def _sync_entity(
                 migrator_errors += int(batch_metrics.get("errors", 0) or 0)
             except (TypeError, ValueError):
                 pass
+            try:
+                migrator_deferred += int(batch_metrics.get("deferred", 0) or 0)
+            except (TypeError, ValueError):
+                pass
             for key in migrator_outcomes:
                 try:
                     migrator_outcomes[key] += int(batch_metrics.get(key, 0) or 0)
@@ -323,6 +352,7 @@ def _sync_entity(
 
         def process_batch(batch: list[tuple]) -> None:
             nonlocal last_id, last_ts, total, batch_count, failed_batches, last_batch_error, last_batch_error_detail, batches_ok
+            nonlocal infra_streak, abort_entity
             bid, bts = engine.extract_cursor_values(columns, batch, entity)
             if bid is not None:
                 last_id = max(last_id, bid) if last_id is not None else bid
@@ -338,6 +368,7 @@ def _sync_entity(
                 record_migrator_metrics()
                 batch_times.append(time.monotonic() - t_batch_start)
                 batches_ok += 1
+                infra_streak = 0
             except Exception as exc:
                 record_migrator_metrics()
                 batch_times.append(time.monotonic() - t_batch_start)
@@ -354,10 +385,19 @@ def _sync_entity(
                 metrics["error_location"] = _info["error_location"]
                 metrics["error_trace"] = last_batch_error_detail
                 metrics["migrator_error"] = _info["error_message"]
+                if isinstance(exc, BackendInfraError):
+                    metrics["error_kind"] = "backend_infra"
+                    infra_streak += 1
+                    if infra_streak >= infra_abort_after:
+                        abort_entity = True
+                else:
+                    infra_streak = 0
                 logger.error(
-                    "[%-11s] %s — batch #%d (%d filas) FALLO: %s. Continuando con el siguiente batch.",
+                    "[%-11s] %s — batch #%d (%d filas) FALLO: %s. %s",
                     mode, entity, batch_count + 1, len(batch), exc,
-                    exc_info=True,
+                    "Backend caido: se corta la entidad por esta corrida." if abort_entity
+                    else "Continuando con el siguiente batch.",
+                    exc_info=not isinstance(exc, BackendInfraError),
                 )
                 batch_count += 1
                 return
@@ -391,13 +431,13 @@ def _sync_entity(
             for batch in iter_grouped_batches(
                 result, columns, group_fields, effective_batch_size
             ):
-                if limit is not None and total >= limit:
+                if abort_entity or (limit is not None and total >= limit):
                     break
                 process_batch(batch)
                 if limit is not None and total >= limit:
                     break
         else:
-            while True:
+            while not abort_entity:
                 fetch_n = batch_size if limit is None else min(batch_size, limit - total)
                 if fetch_n <= 0:
                     break
@@ -412,6 +452,7 @@ def _sync_entity(
         metrics["migrator_sent"] = migrator_sent
         metrics["migrator_saved"] = migrator_saved
         metrics["migrator_errors"] = migrator_errors
+        metrics["migrator_deferred"] = migrator_deferred
         metrics["migrator_created"] = migrator_outcomes["created"]
         metrics["migrator_updated"] = migrator_outcomes["updated"]
         metrics["migrator_replaced"] = migrator_outcomes["replaced"]
@@ -433,7 +474,14 @@ def _sync_entity(
                 # entidad como con errores para que el caller devuelva exit!=0
                 # y el cron/operador se entere, pero no perdimos las filas OK.
                 if failed_batches > 0:
-                    msg = f"{failed_batches} batch(es) fallaron; ultimo error: {last_batch_error}"
+                    if metrics.get("error_kind") == "backend_infra":
+                        msg = (
+                            f"BACKEND PAXAPOS CON FALLA DE INFRAESTRUCTURA (no son datos): {failed_batches} "
+                            f"batch(es) fallaron{' y se corto la entidad por esta corrida' if abort_entity else ''}; "
+                            f"ultimo error: {last_batch_error}"
+                        )
+                    else:
+                        msg = f"{failed_batches} batch(es) fallaron; ultimo error: {last_batch_error}"
                 elif migrator_outcomes["invalid"] > 0:
                     msg = (
                         f"{migrator_outcomes['invalid']} fila(s) de origen no pudieron mapearse; "

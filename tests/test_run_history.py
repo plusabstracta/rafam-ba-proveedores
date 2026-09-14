@@ -77,6 +77,29 @@ def test_aggregate_runs_ok(hist):
     assert metrics[0]["migrator_errors"] == 0
 
 
+def test_aggregate_runs_latencias_y_diferidos_sobreviven_la_agregacion(hist):
+    """El mail diario mostraba `Latencia batch 0.000s`: record_run no guardaba
+    las latencias por batch. Ahora persiste un resumen y aggregate lo combina."""
+    e1 = _entity("retenciones", errors=0)
+    e1["batch_times"] = [0.5, 1.5]
+    e1["migrator_deferred"] = 1
+    e2 = _entity("retenciones", errors=0)
+    e2["batch_times"] = [2.0]
+    e2["migrator_deferred"] = 2
+    run_history.record_run(_summary(True), [e1])
+    run_history.record_run(_summary(True, start="2026-07-07 11:00:00", end="2026-07-07 11:01:00"), [e2])
+
+    runs = run_history.load_runs("2026-07-07")
+    assert "batch_times" not in runs[0]["entities"][0]
+    _, metrics = run_history.aggregate_runs(runs, "2026-07-07")
+
+    lat = metrics[0]["batch_latency"]
+    assert lat == {"min": 0.5, "max": 2.0, "sum": 4.0, "count": 3}
+    assert metrics[0]["migrator_deferred"] == 3
+    # Diferidos no marcan la entidad en error.
+    assert metrics[0]["success"] is True
+
+
 def test_aggregate_runs_partial_rejection_is_error(hist):
     run_history.record_run(
         _summary(True),

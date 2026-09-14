@@ -72,7 +72,13 @@ from .mappers.clasificaciones import (
     ClasificacionesMapper,
     persist_links as clasif_persist_links,
 )
-from .retry_store import REASON_BACKEND_REJECTED
+from .retry_store import REASON_BACKEND_REJECTED, REASON_DEPENDENCY_MISSING
+from .backend_errors import (
+    BackendInfraError,
+    classify_backend_error,
+    is_dependency_error,
+    systemic_errors,
+)
 from .utils import (
     build_single_index,
     env_bool,
@@ -159,6 +165,21 @@ def _format_partial_errors(errors) -> list[str]:
             msg += f" -> **DETALLE DE VALIDACIÓN: {json.dumps(val_errs, ensure_ascii=False)}**"
         err_list.append(f"[{err.get('section', 'unknown').upper()}] {msg}")
     return err_list
+
+
+def _all_errors_tracked(errors, sections: list[str]) -> bool:
+    """True si cada error de ``sections`` trae external_id (rastreable en la cola)."""
+    if not isinstance(errors, list):
+        return False
+    wanted = set(sections)
+    seen = False
+    for err in errors:
+        if not isinstance(err, dict) or err.get("section") not in wanted:
+            continue
+        seen = True
+        if err.get("external_id") in (None, "", {}):
+            return False
+    return seen
 
 
 class MigratorExporter(BaseExporter):
@@ -326,28 +347,66 @@ class MigratorExporter(BaseExporter):
                         message,
                         json.dumps(validation_errors, ensure_ascii=False, sort_keys=True),
                     )
+                reason_code, reason_detail = classify_backend_error(err)
                 self._retry_store.enqueue(
                     entity,
                     key,
-                    REASON_BACKEND_REJECTED,
+                    reason_code,
                     str(message)[:2000],
-                    reason_detail=self._backend_error_detail(err),
+                    reason_detail=reason_detail,
                 )
+                if reason_code == REASON_DEPENDENCY_MISSING:
+                    self._on_backend_dependency_missing(entity, key, err)
+
+    def _on_backend_dependency_missing(self, entity: str, key: str, err: dict) -> None:
+        """Reacciona a una dependencia que el receptor dice que no existe.
+
+        Caso retenciones: el mapper solo envia retenciones cuya OP tiene link
+        local con remote_id (y ahora manda ese ``egreso_id``), asi que si
+        Paxapos responde ``egreso_not_found`` el Egreso fue borrado del lado
+        remoto. Por contrato del receptor (``id_inexistente``: baja manual
+        desde la UI => NO se recrea) eso es terminal: se marca el link de la
+        OP como borrado y la retencion pasa directo a 'permanent' para que el
+        mapper deje de reenviarla (antes: 376 intentos en 3 dias, todos con
+        el mismo error) y quede visible en el reporte para el operador.
+        """
+        if entity != "retenciones":
+            return
+        code = str(err.get("code") or "").strip().lower()
+        if code and code != "egreso_not_found":
+            return
+        op_link = self._link_store.get_link("orden_pago", key)
+        if not op_link or not op_link.get("remote_id"):
+            # Sin link no deberia haberse enviado; el mapper la encola como
+            # dependencia y espera a que la OP migre. Nada mas que hacer.
+            return
+        logger.warning(
+            "Migrator [retenciones]: Paxapos no encuentra el Egreso id=%s de la OP %s "
+            "(borrado en destino); se marca el link como borrado y la retencion pasa a "
+            "'permanent'. Recuperable con `retry-queue --requeue` si la OP se recrea.",
+            op_link.get("remote_id"), key,
+        )
+        if not op_link.get("deleted_at"):
+            self._link_store.mark_deleted("orden_pago", key)
+        self._retry_store.mark_permanent(
+            "retenciones",
+            key,
+            REASON_BACKEND_REJECTED,
+            f"Egreso id={op_link.get('remote_id')} ya no existe en Paxapos; retenciones no aplicables",
+            reason_detail="destination_deleted",
+        )
 
     @staticmethod
     def _backend_error_detail(error_data: dict) -> str:
-        if error_data.get("validationErrors"):
-            return "validation_error"
-        message = str(error_data.get("message") or "").lower()
-        if "duplic" in message or "unique" in message:
-            return "duplicate"
-        if "no existe" in message or "borrad" in message:
-            return "destination_missing"
-        if "sin items" in message or "cantidad" in message:
-            return "invalid_items"
-        if "proveedor" in message:
-            return "provider_error"
-        return "backend_rejected"
+        return classify_backend_error(error_data)[1]
+
+    def _rows_tracked(self) -> bool:
+        """True si los rechazos por fila quedan registrados en la cola de reintentos."""
+        return getattr(self, "_retry_store", None) is not None and not getattr(self, "_dry_run", False)
+
+    def _raise_on_errors_fn(self):
+        rows_tracked = self._rows_tracked()
+        return lambda parsed: self._raise_on_migrator_errors(parsed, rows_tracked=rows_tracked)
 
     def _payload_options(self) -> dict:
         return {
@@ -374,6 +433,10 @@ class MigratorExporter(BaseExporter):
             "sent": 0,
             "saved": 0,
             "errors": 0,
+            # Filas que Paxapos no pudo aplicar porque esperan otra entidad
+            # (egreso_not_found, etc.). Quedan en la cola como dependency_missing;
+            # no son rechazos de datos y no deben marcar la entidad en error.
+            "deferred": 0,
             "created": 0,
             "updated": 0,
             "replaced": 0,
@@ -420,6 +483,23 @@ class MigratorExporter(BaseExporter):
                 total += len(items)
         return total
 
+    @staticmethod
+    def _deferred_count(parsed: dict | None, sections: list[str]) -> int:
+        """Errores por fila que son dependencias pendientes (no rechazos de datos)."""
+        if not isinstance(parsed, dict):
+            return 0
+        errors = parsed.get("errors")
+        if not isinstance(errors, list):
+            return 0
+        wanted = set(sections)
+        return sum(
+            1
+            for err in errors
+            if isinstance(err, dict)
+            and err.get("section") in wanted
+            and is_dependency_error(err)
+        )
+
     def _set_last_batch_migrator_metrics(
         self,
         *,
@@ -428,8 +508,14 @@ class MigratorExporter(BaseExporter):
         sections: list[str],
     ) -> None:
         saved, errors = self._stats_counts(parsed, sections)
+        deferred = min(errors, self._deferred_count(parsed, sections))
         metrics = self._empty_migrator_metrics()
-        metrics.update({"sent": self._metric_int(sent), "saved": saved, "errors": errors})
+        metrics.update({
+            "sent": self._metric_int(sent),
+            "saved": saved,
+            "errors": errors - deferred,
+            "deferred": deferred,
+        })
         mode_groups = {
             "create": "created",
             "created": "created",
@@ -457,10 +543,16 @@ class MigratorExporter(BaseExporter):
         metrics = self._empty_migrator_metrics()
         outcome_counts = getattr(writer, "last_outcome_counts", {}) or {}
         mapper_metrics = getattr(writer, "last_mapper_metrics", {}) or {}
+        errors = self._metric_int(writer.last_error_count)
+        deferred = min(
+            errors,
+            self._deferred_count(getattr(self, "_last_parsed", None), [getattr(writer, "result_section", "")]),
+        )
         metrics.update({
             "sent": self._metric_int(writer.last_payload_count),
             "saved": self._metric_int(writer.last_saved_count),
-            "errors": self._metric_int(writer.last_error_count),
+            "errors": errors - deferred,
+            "deferred": deferred,
             **outcome_counts,
             "unchanged": self._metric_int(mapper_metrics.get("unchanged", 0)),
             "excluded": self._metric_int(mapper_metrics.get("excluded", 0)),
@@ -546,12 +638,13 @@ class MigratorExporter(BaseExporter):
             url, self._dry_run, nodos,
         )
         parsed = self._post_json(url, payload)
+        self._last_parsed = parsed
 
         # En dry_run el receptor no persiste: guardar links aca dejaria ids
         # locales apuntando a registros que no existen en Paxapos.
         if not self._dry_run:
             self._persist_links("clasificaciones", parsed, raw_by_source_key)
-        self._raise_on_migrator_errors(parsed)
+        self._raise_on_migrator_errors(parsed, rows_tracked=self._rows_tracked())
         self._clasif_mapper.log_stats(parsed, self._dry_run)
 
     def _group_oc_rows(self, columns: list[str], rows: list[tuple]) -> tuple[dict, dict, dict, int]:
@@ -679,7 +772,7 @@ class MigratorExporter(BaseExporter):
                 import_url=self._import_url,
                 post_fn=self._post_json,
                 link_store=self._link_store,
-                raise_on_errors_fn=self._raise_on_migrator_errors,
+                raise_on_errors_fn=self._raise_on_errors_fn(),
                 force_external_ids=force_external_ids,
             )
         except Exception:
@@ -700,7 +793,7 @@ class MigratorExporter(BaseExporter):
                 import_url=self._import_url,
                 post_fn=self._post_json,
                 link_store=self._link_store,
-                raise_on_errors_fn=self._raise_on_migrator_errors,
+                raise_on_errors_fn=self._raise_on_errors_fn(),
             )
         except Exception:
             self._set_last_batch_migrator_metrics_from_writer(writer)
@@ -745,7 +838,7 @@ class MigratorExporter(BaseExporter):
                 import_url=self._import_url,
                 post_fn=self._post_json,
                 link_store=self._link_store,
-                raise_on_errors_fn=self._raise_on_migrator_errors,
+                raise_on_errors_fn=self._raise_on_errors_fn(),
             )
         except Exception:
             self._set_last_batch_migrator_metrics_from_writer(writer)
@@ -770,6 +863,7 @@ class MigratorExporter(BaseExporter):
                       len(payload.get("ordenes_pago", [])),
                       len(payload.get("gastos", [])))
         parsed = self._post_json(url, payload)
+        self._last_parsed = parsed
         self._set_last_batch_migrator_metrics(
             sent=self._payload_count(payload, payload_sections),
             parsed=parsed,
@@ -778,7 +872,7 @@ class MigratorExporter(BaseExporter):
 
         self._op_mapper.process_response(parsed, raw_by_source_key,
                                           link_store=self._link_store, dry_run=self._dry_run)
-        self._raise_on_migrator_errors(parsed)
+        self._raise_on_migrator_errors(parsed, rows_tracked=self._rows_tracked())
         self._op_mapper.log_stats(parsed, self._dry_run)
 
     def _write_batch_retenciones(self, columns, rows):
@@ -795,6 +889,7 @@ class MigratorExporter(BaseExporter):
         logger.debug("Migrator request [retenciones] POST %s dry_run=%s ops=%d",
                       url, self._dry_run, len(payload.get("retenciones", [])))
         parsed = self._post_json(url, payload)
+        self._last_parsed = parsed
         self._set_last_batch_migrator_metrics(
             sent=self._payload_count(payload, payload_sections),
             parsed=parsed,
@@ -802,7 +897,7 @@ class MigratorExporter(BaseExporter):
         )
 
         persist_links_retenciones(parsed, pending_fingerprints, self._link_store, self._dry_run)
-        self._raise_on_migrator_errors(parsed)
+        self._raise_on_migrator_errors(parsed, rows_tracked=self._rows_tracked())
         self._ret_mapper.log_stats(parsed, self._dry_run)
 
     # ââ HTTP transport (usa PaxaposHttpClient para config, inline para patches) â
@@ -873,8 +968,23 @@ class MigratorExporter(BaseExporter):
         return f"{body[:limit]} [RESPUESTA TRUNCADA: {len(body)} caracteres totales]"
 
     @staticmethod
-    def _raise_on_migrator_errors(parsed: dict) -> None:
-        """Procesa la respuesta del migrator y reporta errores parciales."""
+    def _raise_on_migrator_errors(parsed: dict, *, rows_tracked: bool = False) -> None:
+        """Procesa la respuesta del migrator y decide si el batch cuenta como fallido.
+
+        Un batch fallido congela el watermark de la entidad por el resto de la
+        corrida (ver main._sync_entity), asi que solo debe fallar cuando algo
+        realmente impide seguir:
+
+        * error de infraestructura del receptor (SQLSTATE, tabla inexistente,
+          fatal PHP) -> ``BackendInfraError``, siempre;
+        * una seccion con TODAS las filas rechazadas y sin forma de rastrearlas
+          (``rows_tracked=False`` o errores sin external_id) -> ``RuntimeError``.
+
+        Si ``rows_tracked`` es True y cada rechazo trae external_id, las filas ya
+        quedaron en la cola de reintentos: se loguea y el batch continua. Antes,
+        un batch de 1 retencion rechazada por dependencia fallaba la entidad y
+        congelaba el cursor de retenciones en cada corrida del dia.
+        """
         if not isinstance(parsed, dict):
             return
 
@@ -894,6 +1004,20 @@ class MigratorExporter(BaseExporter):
                 logger.warning("... y %d error(es) mas omitidos del log", len(errors) - 20)
             has_errors = True
 
+        infra = systemic_errors(errors)
+        if infra:
+            err_list = _format_partial_errors(infra)
+            err_msg = (
+                f"Paxapos fallo por infraestructura del backend ({len(infra)} error(es) "
+                "de SQL/PHP; no es un problema de los datos enviados)"
+            )
+            err_msg += "\n\n >>> RESPUESTA DE ERROR DE PAXAPOS >>>\n"
+            err_msg += "\n".join(f"  * {e}" for e in err_list[:10])
+            if len(err_list) > 10:
+                err_msg += f"\n  * ... y {len(err_list) - 10} error(es) mas"
+            err_msg += "\n <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<"
+            raise BackendInfraError(err_msg)
+
         stats = parsed.get("stats")
         if not isinstance(stats, dict):
             if has_errors and strict:
@@ -902,6 +1026,7 @@ class MigratorExporter(BaseExporter):
 
         failed = []
         fully_failed = []
+        fully_failed_sections = []
         for section, section_stats in stats.items():
             if not isinstance(section_stats, dict):
                 continue
@@ -919,6 +1044,7 @@ class MigratorExporter(BaseExporter):
                 failed.append(f"{section}={error_count}")
                 if ok_count == 0:
                     fully_failed.append(f"{section}={error_count}")
+                    fully_failed_sections.append(section)
 
         if failed:
             log_fn = logger.error if strict else logger.warning
@@ -932,12 +1058,28 @@ class MigratorExporter(BaseExporter):
         if fully_failed:
             details = ", ".join(fully_failed)
             err_list = _format_partial_errors(errors)
-            err_msg = f"Migrator devolvió errores para todas las filas de una sección: {details}"
-            if err_list:
-                err_msg += "\n\n >>> RESPUESTA DE ERROR DE PAXAPOS >>>\n"
-                err_msg += "\n".join(f"  * {e}" for e in err_list)
-                err_msg += "\n <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<"
-            raise RuntimeError(err_msg)
+            tracked = rows_tracked and _all_errors_tracked(errors, fully_failed_sections)
+            if tracked:
+                dependency_only = all(
+                    is_dependency_error(err)
+                    for err in errors
+                    if isinstance(err, dict) and err.get("section") in fully_failed_sections
+                )
+                log_fn = logger.warning if dependency_only else logger.error
+                log_fn(
+                    "Migrator: todas las filas de %s fallaron (%s); quedaron en la cola de "
+                    "reintentos y el batch continua. Detalle: %s",
+                    details,
+                    "dependencias pendientes" if dependency_only else "rechazos del receptor",
+                    " | ".join(err_list[:10]),
+                )
+            else:
+                err_msg = f"Migrator devolvió errores para todas las filas de una sección: {details}"
+                if err_list:
+                    err_msg += "\n\n >>> RESPUESTA DE ERROR DE PAXAPOS >>>\n"
+                    err_msg += "\n".join(f"  * {e}" for e in err_list)
+                    err_msg += "\n <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<"
+                raise RuntimeError(err_msg)
 
         if has_errors and strict:
             details = ", ".join(failed) if failed else "ver errors en respuesta"

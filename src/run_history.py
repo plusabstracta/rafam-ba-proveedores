@@ -50,6 +50,37 @@ def _record_date(rec: dict) -> str | None:
     return str(ts)[:10]  # YYYY-MM-DD
 
 
+def summarize_latency(batch_times: list) -> dict | None:
+    """{min, max, sum, count} de una lista de latencias, o None si esta vacia."""
+    values = []
+    for value in batch_times or []:
+        try:
+            values.append(float(value))
+        except (TypeError, ValueError):
+            continue
+    if not values:
+        return None
+    return {
+        "min": min(values),
+        "max": max(values),
+        "sum": sum(values),
+        "count": len(values),
+    }
+
+
+def merge_latency(agg: dict | None, other: dict | None) -> dict | None:
+    if not other:
+        return agg
+    if not agg:
+        return dict(other)
+    return {
+        "min": min(agg["min"], other["min"]),
+        "max": max(agg["max"], other["max"]),
+        "sum": agg["sum"] + other["sum"],
+        "count": agg["count"] + other["count"],
+    }
+
+
 def record_run(summary_data: dict, entity_metrics: list[dict]) -> None:
     """Agrega una linea JSON con el resultado de la corrida al historial."""
     path = _path()
@@ -77,6 +108,7 @@ def record_run(summary_data: dict, entity_metrics: list[dict]) -> None:
                 "migrator_sent": m.get("migrator_sent", 0),
                 "migrator_saved": m.get("migrator_saved", 0),
                 "migrator_errors": m.get("migrator_errors", 0),
+                "migrator_deferred": m.get("migrator_deferred", 0),
                 "migrator_created": m.get("migrator_created", 0),
                 "migrator_updated": m.get("migrator_updated", 0),
                 "migrator_replaced": m.get("migrator_replaced", 0),
@@ -90,8 +122,13 @@ def record_run(summary_data: dict, entity_metrics: list[dict]) -> None:
                 "batches_failed": m.get("batches_failed", 0),
                 "duration_secs": m.get("duration_secs", 0.0),
                 "query_duration_secs": m.get("query_duration_secs", 0.0),
+                # Resumen de latencia por batch: la lista cruda no se guarda
+                # (18k batches/dia en oc_items) pero sin esto el mail diario
+                # mostraba 0.000s en todas las entidades.
+                "batch_latency": summarize_latency(m.get("batch_times") or []),
                 "error_msg": m.get("error_msg"),
                 "error_type": m.get("error_type"),
+                "error_kind": m.get("error_kind"),
                 "error_location": m.get("error_location"),
                 "migrator_error": m.get("migrator_error"),
                 "error_trace": m.get("error_trace"),
@@ -179,6 +216,7 @@ def aggregate_runs(runs: list[dict], date_str: str) -> tuple[dict, list[dict]]:
                     "migrator_sent": 0,
                     "migrator_saved": 0,
                     "migrator_errors": 0,
+                    "migrator_deferred": 0,
                     "migrator_created": 0,
                     "migrator_updated": 0,
                     "migrator_replaced": 0,
@@ -193,9 +231,11 @@ def aggregate_runs(runs: list[dict], date_str: str) -> tuple[dict, list[dict]]:
                     "duration_secs": 0.0,
                     "query_duration_secs": 0.0,
                     "batch_times": [],
+                    "batch_latency": None,
                     "success": True,
                     "error_msg": None,
                     "error_type": None,
+                    "error_kind": None,
                     "error_location": None,
                     "migrator_error": None,
                     "error_trace": None,
@@ -205,6 +245,7 @@ def aggregate_runs(runs: list[dict], date_str: str) -> tuple[dict, list[dict]]:
             agg["migrator_sent"] += int(m.get("migrator_sent", 0) or 0)
             agg["migrator_saved"] += int(m.get("migrator_saved", 0) or 0)
             agg["migrator_errors"] += int(m.get("migrator_errors", 0) or 0)
+            agg["migrator_deferred"] += int(m.get("migrator_deferred", 0) or 0)
             for key in (
                 "migrator_created",
                 "migrator_updated",
@@ -221,13 +262,17 @@ def aggregate_runs(runs: list[dict], date_str: str) -> tuple[dict, list[dict]]:
             agg["batches_failed"] += int(m.get("batches_failed", 0) or 0)
             agg["duration_secs"] += float(m.get("duration_secs", 0.0) or 0.0)
             agg["query_duration_secs"] += float(m.get("query_duration_secs", 0.0) or 0.0)
+            agg["batch_latency"] = merge_latency(
+                agg["batch_latency"],
+                m.get("batch_latency") or summarize_latency(m.get("batch_times") or []),
+            )
             if (
                 not m.get("success", False)
                 or int(m.get("migrator_errors", 0) or 0) > 0
                 or int(m.get("source_invalid", 0) or 0) > 0
             ):
                 agg["success"] = False
-                for k in ("error_msg", "error_type", "error_location", "migrator_error", "error_trace"):
+                for k in ("error_msg", "error_type", "error_kind", "error_location", "migrator_error", "error_trace"):
                     if m.get(k):
                         agg[k] = m.get(k)
 
@@ -258,7 +303,7 @@ def aggregate_runs(runs: list[dict], date_str: str) -> tuple[dict, list[dict]]:
 
     retry_has_errors = any(
         row.get("status") == "permanent"
-        or row.get("reason_code") in {"backend_rejected", "validation_client"}
+        or row.get("reason_code") in {"backend_rejected", "backend_unavailable", "validation_client"}
         for row in retry_summary_end
     )
     retry_has_warnings = bool(retry_end or retry_summary_end)

@@ -33,6 +33,7 @@ _TABLE = "retry_queue"
 REASON_VALIDATION_CLIENT = "validation_client"      # rechazada por validation.py
 REASON_DEPENDENCY_MISSING = "dependency_missing"    # FK/OC aun no migrada
 REASON_BACKEND_REJECTED = "backend_rejected"        # 207: error por fila en el receptor
+REASON_BACKEND_UNAVAILABLE = "backend_unavailable"  # SQL/PHP roto en el receptor; la fila esta bien
 
 STATUS_PENDING = "pending"
 STATUS_PERMANENT = "permanent"
@@ -46,7 +47,10 @@ DEFAULT_MAX_ATTEMPTS = 10
 # "intento" volvia permanent una OP en menos de 2 horas, cuando su OC puede
 # confirmarse dias despues. La fila espera lo que haga falta; si la dependencia
 # nunca aparece, la reconciliacion la reporta igual (sigue 'pending' en cola).
-_NO_ATTEMPT_COUNT_REASONS = frozenset({REASON_DEPENDENCY_MISSING})
+# Lo mismo aplica cuando el que fallo es el backend (tabla inexistente, fatal
+# PHP): castigar a la fila por un deploy incompleto del tenant la volvia
+# permanent antes de que alguien arreglara el server.
+_NO_ATTEMPT_COUNT_REASONS = frozenset({REASON_DEPENDENCY_MISSING, REASON_BACKEND_UNAVAILABLE})
 
 
 @dataclass(frozen=True)
@@ -220,6 +224,56 @@ class RetryStore:
                 ),
             )
         self._commit()
+
+    def mark_permanent(
+        self,
+        entity: str,
+        external_id: str,
+        reason_code: str,
+        error_message: str | None = None,
+        reason_detail: str | None = None,
+    ) -> None:
+        """Deja una fila directamente en 'permanent' (rechazo terminal del receptor).
+
+        Para casos donde el contrato del backend dice que no hay que reintentar
+        (destino borrado a mano desde la UI): gastar ``max_attempts`` corridas
+        para llegar al mismo lugar solo genera ruido y trafico. Recuperable con
+        ``requeue()`` igual que cualquier permanent.
+        """
+        existing = self._conn.execute(
+            f"SELECT attempts FROM {_TABLE} WHERE entity = ? AND external_id = ?",
+            (entity, str(external_id)),
+        ).fetchone()
+        attempts = max(1, (existing["attempts"] or 0) if existing else 1)
+        self._conn.execute(
+            f"""
+            INSERT INTO {_TABLE}
+                (entity, external_id, reason_code, reason_detail, error_message, attempts,
+                 first_seen, last_attempt, status)
+            VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'), ?)
+            ON CONFLICT(entity, external_id) DO UPDATE SET
+                reason_code = excluded.reason_code,
+                reason_detail = excluded.reason_detail,
+                error_message = excluded.error_message,
+                attempts = excluded.attempts,
+                last_attempt = excluded.last_attempt,
+                status = excluded.status
+            """,
+            (
+                entity,
+                str(external_id),
+                reason_code,
+                reason_detail,
+                error_message,
+                attempts,
+                STATUS_PERMANENT,
+            ),
+        )
+        self._commit()
+        logger.warning(
+            "[retry_store] %s %s marcado 'permanent' (terminal): %s",
+            entity, external_id, error_message,
+        )
 
     def resolve(self, entity: str, external_id: str) -> None:
         """Marca una fila como resuelta (la elimina de la cola).

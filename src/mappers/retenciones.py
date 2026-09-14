@@ -28,6 +28,7 @@ class RetencionesMapper:
         # Contadores de retenciones descartadas
         self._retencion_skipped_no_catalog: int = 0
         self._retencion_skipped_no_match: dict[str, int] = {}
+        self._retencion_skipped_non_tax: dict[str, float] = {}
 
     def build_payload(
         self,
@@ -81,14 +82,32 @@ class RetencionesMapper:
         skipped_no_link = 0
         skipped_no_deduc = 0
         skipped_unchanged = 0
+        skipped_permanent = 0
+
+        # Igual que oc_items (paxapos#489): una OP dentro de la ventana de
+        # reproceso vuelve a entrar en cada corrida; sin esta exclusion una
+        # retencion 'permanent' se reenviaba (y fallaba) 144 veces por dia.
+        permanent_keys: set[str] = set()
+        if self._retry_store is not None:
+            try:
+                permanent_keys = self._retry_store.permanent_external_ids("retenciones")
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning("Migrator [retenciones]: no se pudo leer permanent_external_ids: %s", exc)
 
         for ejercicio, nro_op in op_keys:
+            op_sk = json.dumps({"ejercicio": ejercicio, "nro_op": nro_op}, sort_keys=True)
+            if op_sk in permanent_keys:
+                skipped_permanent += 1
+                continue
+
             deducciones = deducciones_by_op.get((ejercicio, nro_op), [])
             if not deducciones:
                 skipped_no_deduc += 1
+                # Sin deducciones no hay nada que migrar: si estaba en la cola
+                # (p.ej. por un tipo de retencion no resuelto), cerrarla.
+                self._resolve_retry(op_sk, dry_run)
                 continue
 
-            op_sk = json.dumps({"ejercicio": ejercicio, "nro_op": nro_op}, sort_keys=True)
             op_link = self._link_store.get_link("orden_pago", op_sk)
             if not op_link or not op_link.get("remote_id"):
                 skipped_no_link += 1
@@ -101,6 +120,11 @@ class RetencionesMapper:
                         reason_detail="payment_not_migrated",
                     )
                 continue
+            if op_link.get("deleted_at"):
+                # El Egreso destino fue borrado en Paxapos (baja manual, terminal
+                # por contrato): no hay a que aplicarle las retenciones.
+                skipped_permanent += 1
+                continue
 
             mapped: list[dict] = []
             for ded in deducciones:
@@ -108,17 +132,30 @@ class RetencionesMapper:
                 if ret is not None:
                     mapped.append(ret)
             if not mapped:
-                # Hay deducciones pero ninguna mapeo (tipicamente el catalogo
-                # tipos_retencion fallo al cargarse o no matchea). Encolar para
-                # que la proxima corrida las reinyecte: sin esto el cursor
-                # avanza y estas retenciones se pierden en silencio.
+                # Hay deducciones pero ninguna mapeo. Dos causas distintas:
+                #  - todas son TIPO_DEDUC='O' (IPS, IOMA, sindicato, garantia...):
+                #    no son retenciones impositivas y Paxapos no las modela; no
+                #    hay nada que "resolver" del lado del catalogo;
+                #  - hay alguna 'I' que el catalogo tipos_retencion no matchea
+                #    (o el lookup fallo al cargarse): eso si es un pendiente real.
+                # Ambas se encolan (para no perderlas si el catalogo cambia) pero
+                # con reason_detail distinto para que el reporte no las mezcle.
                 if self._retry_store is not None and not dry_run:
+                    if _all_non_tax(deducciones):
+                        detail = "non_tax_deduction"
+                        msg = (
+                            f"OP {ejercicio}-{nro_op}: {len(deducciones)} deduccion(es) no impositivas "
+                            f"(TIPO_DEDUC=O: {_describe(deducciones)}); Paxapos no las modela como retencion"
+                        )
+                    else:
+                        detail = "retention_type_unresolved"
+                        msg = f"OP {ejercicio}-{nro_op}: {len(deducciones)} deduccion(es) sin tipo de retencion resoluble"
                     self._retry_store.enqueue(
                         "retenciones",
                         op_sk,
                         REASON_DEPENDENCY_MISSING,
-                        f"OP {ejercicio}-{nro_op}: {len(deducciones)} deduccion(es) sin tipo de retencion resoluble",
-                        reason_detail="retention_type_unresolved",
+                        msg,
+                        reason_detail=detail,
                     )
                 continue
 
@@ -127,20 +164,27 @@ class RetencionesMapper:
             ret_link = self._link_store.get_link("retenciones", op_sk)
             if ret_link and ret_link.get("fingerprint") == fingerprint:
                 skipped_unchanged += 1
+                # Ya migrada y al dia: si venia de la cola de reintentos (152
+                # entradas legacy quedaron asi desde agosto), cerrarla.
+                self._resolve_retry(op_sk, dry_run)
                 continue
 
             pending_fingerprints[op_sk] = (fingerprint, len(mapped))
             retenciones_payload.append({
                 "external_id": {"ejercicio": ejercicio, "nro_op": nro_op},
+                # egreso_id resuelve el destino por id directo; el backend cae a
+                # identificador_pago solo si no viene. Si el Egreso ya no existe
+                # responde egreso_not_found y el exporter invalida el link.
+                "egreso_id": to_int(op_link.get("remote_id")),
                 "orden_pago_external_id": {"ejercicio": ejercicio, "nro_op": nro_op},
                 "retenciones": mapped,
             })
 
-        if skipped_no_link or skipped_no_deduc or skipped_unchanged:
+        if skipped_no_link or skipped_no_deduc or skipped_unchanged or skipped_permanent:
             logger.info(
                 "Migrator [retenciones]: %d OP sin link (encoladas), %d sin deducciones, "
-                "%d ya migradas sin cambios (skip)",
-                skipped_no_link, skipped_no_deduc, skipped_unchanged,
+                "%d ya migradas sin cambios (skip), %d permanent (no se reenvian)",
+                skipped_no_link, skipped_no_deduc, skipped_unchanged, skipped_permanent,
             )
 
         self._flush_retencion_skip_counters("retenciones")
@@ -160,6 +204,15 @@ class RetencionesMapper:
             "retenciones": retenciones_payload,
         }
         return payload, pending_fingerprints
+
+    def _resolve_retry(self, op_sk: str, dry_run: bool) -> None:
+        """Saca la OP de la cola de retenciones (nada pendiente para ella)."""
+        if self._retry_store is None or dry_run:
+            return
+        try:
+            self._retry_store.resolve("retenciones", op_sk)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("Migrator [retenciones]: no se pudo resolver %s en la cola: %s", op_sk, exc)
 
     def _map_deduccion_dict(self, ded: dict, ejercicio: int, nro_op: int) -> dict | None:
         """Mapea una deducciÃ³n de ORDEN_PAGO_DEDUC al formato Paxapos."""
@@ -192,10 +245,14 @@ class RetencionesMapper:
                 tipo_retencion_id = self._lookup.resolve_tipo_retencion_id_by_alias(alias)
 
         if tipo_retencion_id is None:
-            if not self._lookup.tipos_retencion:
+            key = descripcion or f"CODIGO_DEDUC={cod_text}"
+            if str(ded.get("tipo_deduc") or "").strip().upper() == "O":
+                # No impositiva: se omite a proposito, pero se acumula el importe
+                # porque Paxapos recalcula neto_transferido solo con lo enviado.
+                self._retencion_skipped_non_tax[key] = self._retencion_skipped_non_tax.get(key, 0.0) + float(monto_retenido)
+            elif not self._lookup.tipos_retencion:
                 self._retencion_skipped_no_catalog += 1
             else:
-                key = descripcion or f"CODIGO_DEDUC={cod_text}"
                 self._retencion_skipped_no_match[key] = self._retencion_skipped_no_match.get(key, 0) + 1
             return None
 
@@ -247,6 +304,13 @@ class RetencionesMapper:
                 self._retencion_skipped_no_match,
             )
             self._retencion_skipped_no_match = {}
+        if self._retencion_skipped_non_tax:
+            logger.info(
+                "Migrator [%s]: deducciones no impositivas (TIPO_DEDUC=O) omitidas, importe por concepto: %s",
+                entity_label,
+                {k: round(v, 2) for k, v in self._retencion_skipped_non_tax.items()},
+            )
+            self._retencion_skipped_non_tax = {}
 
     def log_stats(self, parsed: dict, dry_run: bool) -> None:
         stats = parsed.get("stats", {}) if isinstance(parsed, dict) else {}
@@ -299,6 +363,22 @@ def persist_links_retenciones(
 
 
 # ââ Helpers ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+
+def _all_non_tax(deducciones: list[dict]) -> bool:
+    """True si todas las deducciones son TIPO_DEDUC='O' (ninguna impositiva)."""
+    tipos = {str(d.get("tipo_deduc") or "").strip().upper() for d in deducciones}
+    return bool(tipos) and tipos == {"O"}
+
+
+def _describe(deducciones: list[dict], limit: int = 4) -> str:
+    names = []
+    for d in deducciones:
+        name = " ".join(str(d.get("descripcion") or d.get("codigo_deduc") or "").split())
+        if name and name not in names:
+            names.append(name)
+    extra = f" +{len(names) - limit}" if len(names) > limit else ""
+    return ", ".join(names[:limit]) + extra
+
 
 def _retenciones_fingerprint(mapped: list[dict]) -> str:
     """Hash estable del conjunto de retenciones enviadas."""

@@ -122,3 +122,44 @@ def test_watermark_avanza_normal_sin_fallos(tmp_path, source_engine):
     assert checkpoint.last_ts is not None
     assert checkpoint.last_ts >= datetime(2026, 3, 6)
     assert checkpoint.status == "ok"
+
+
+def test_backend_infra_corta_la_entidad_sin_martillar(tmp_path, source_engine, monkeypatch):
+    """Con el backend roto (SQLSTATE) no tiene sentido seguir mandando batches.
+
+    Reporte 11/9/2026: `account_gasto_itemes doesn't exist` y el pipeline
+    siguio POSTeando todos los batches de la entidad en cada corrida del dia.
+    """
+    from src.backend_errors import BackendInfraError
+
+    monkeypatch.setenv("RAFAM_INFRA_ABORT_AFTER", "2")
+
+    class _BrokenBackendExporter(BaseExporter):
+        def __init__(self):
+            self.batches = []
+
+        def write_batch(self, entity, columns, rows):
+            self.batches.append(rows)
+            raise BackendInfraError("SQLSTATE[42S02]: Base table or view not found")
+
+    cfg = EntityConfig(name="items", table_name="ITEMS", ts_field="UPDATED_AT")
+    configs = {"items": cfg}
+    engine = _make_sync_engine(tmp_path, configs)
+    exporter = _BrokenBackendExporter()
+
+    with source_engine.connect() as conn:
+        repo = SourceRepository(conn)
+        with patch.dict("src.config.ENTITY_CONFIGS", configs, clear=False):
+            ok, error_msg, metrics = _sync_entity(
+                repo, engine, exporter, "items",
+                batch_size=2, limit=None, dry_run=False,
+            )
+
+    # 6 filas = 3 batches posibles; se corta tras 2 fallos consecutivos de infra.
+    assert len(exporter.batches) == 2
+    assert ok is False
+    assert metrics["batches_failed"] == 2
+    assert metrics["error_kind"] == "backend_infra"
+    assert "INFRAESTRUCTURA" in error_msg
+    # Nada avanzo: la proxima corrida relee todo.
+    assert engine.get_checkpoint("items").last_ts is None

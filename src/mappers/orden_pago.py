@@ -152,6 +152,10 @@ class OrdenPagoMapper:
         grouped_pedido_internal_ids: dict[tuple[int, int], list[str]] = {}
         grouped_oc_source_keys: dict[tuple[int, int], list[str]] = {}
         grouped_has_opi: set[tuple[int, int]] = set()
+        # ORDEN_PAGO.TIPO_OP: 'P' = presupuestaria (paga comprobantes de proveedor),
+        # 'N' = no presupuestaria (giro de retenciones de sueldos, embargos, cajas
+        # chicas). Solo se usa para clasificar OPs sin imputacion.
+        grouped_tipo_op: dict[tuple[int, int], str] = {}
         raw_by_source_key: dict[str, dict] = {}
         cc_raw_by_key: dict[tuple[str, str, str], dict] = {}
         skipped_estado: dict[str, int] = {}
@@ -160,6 +164,17 @@ class OrdenPagoMapper:
         skipped_importe_invalido: dict[str, int] = {}
         skipped_existing_keys: set[tuple[int, int]] = set()
         skipped_excluded_prov = 0
+        skipped_permanent_keys: set[tuple[int, int]] = set()
+
+        # Una OP rechazada 'permanent' sigue entrando por la ventana de reproceso
+        # (pending_reprocess_days) en cada corrida; sin esta exclusion se
+        # reenviaba y fallaba igual hasta salir de la ventana.
+        permanent_keys: set[str] = set()
+        if self._retry_store is not None:
+            try:
+                permanent_keys = self._retry_store.permanent_external_ids("orden_pago")
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning("Migrator [orden_pago]: no se pudo leer permanent_external_ids: %s", exc)
 
         for row in rows:
             raw = dict(zip(columns, row))
@@ -169,6 +184,7 @@ class OrdenPagoMapper:
                 continue
 
             key = (ejercicio, nro_op)
+            grouped_tipo_op[key] = str(raw.get("TIPO_OP") or "").strip().upper()
 
             if any(
                 str(raw.get(field) or "").strip()
@@ -251,6 +267,9 @@ class OrdenPagoMapper:
                 continue
 
             sk = json.dumps({"ejercicio": ejercicio, "nro_op": nro_op}, sort_keys=True)
+            if sk in permanent_keys:
+                skipped_permanent_keys.add(key)
+                continue
             # ABM: si la OP ya fue migrada, re-enviarla como MODIFICACION solo si
             # cambio en RAFAM (comparando el snapshot guardado en el link:
             # importe_total / estado_op / confirmado / fech_confirm). Si no cambio se
@@ -398,6 +417,7 @@ class OrdenPagoMapper:
         cc_key_to_pedido_id: dict[tuple[str, str, str], int] = {}
         skipped_no_gasto = 0
         skipped_no_opi = 0
+        skipped_no_presupuestaria = 0
         skipped_no_comprobante = 0
         skipped_no_oc_canonica = 0
         skipped_no_oc_link = 0
@@ -416,6 +436,18 @@ class OrdenPagoMapper:
             if not cc_nros:
                 skipped_no_gasto += 1
                 if key not in grouped_has_opi:
+                    if grouped_tipo_op.get(key) == "N":
+                        # OP no presupuestaria sin ninguna fila en ORDEN_PAGO_IMPUT:
+                        # no paga un comprobante de proveedor y nunca va a tener
+                        # uno. Encolarla como dependencia la dejaba 'pending' para
+                        # siempre (340 OP en sep-2026). Fuera de alcance: se cierra.
+                        skipped_no_presupuestaria += 1
+                        self._resolve_op(key, dry_run)
+                        logger.debug(
+                            "Migrator [orden_pago] OP %s-%s omitida: TIPO_OP=N sin imputacion (fuera de alcance)",
+                            key[0], key[1],
+                        )
+                        continue
                     skipped_no_opi += 1
                     self._enqueue_op(key, "sin ORDEN_PAGO_IMPUT", dry_run, "missing_payment_imputation")
                     logger.debug(
@@ -572,8 +604,8 @@ class OrdenPagoMapper:
         if skipped_no_gasto:
             logger.warning(
                 "Migrator [orden_pago]: %d OPs omitidas sin gasto vinculado "
-                "(sin ORDEN_PAGO_IMPUT=%d, sin OPI_NRO_COMPROB=%d)",
-                skipped_no_gasto, skipped_no_opi, skipped_no_comprobante,
+                "(sin ORDEN_PAGO_IMPUT=%d, sin OPI_NRO_COMPROB=%d, no presupuestarias TIPO_OP=N=%d)",
+                skipped_no_gasto, skipped_no_opi, skipped_no_comprobante, skipped_no_presupuestaria,
             )
         if sent_sin_oc:
             logger.info(
@@ -618,6 +650,11 @@ class OrdenPagoMapper:
             )
         if skipped_existing_keys:
             logger.info("Migrator [orden_pago]: %d OPs omitidas por link local existente", len(skipped_existing_keys))
+        if skipped_permanent_keys:
+            logger.info(
+                "Migrator [orden_pago]: %d OPs 'permanent' en la cola, no se reenvian (requeue para reintentar)",
+                len(skipped_permanent_keys),
+            )
         if skipped_excluded_prov:
             logger.info("Migrator [orden_pago]: %d OPs omitidas por proveedor excluido", skipped_excluded_prov)
         self._flush_retencion_skip_counters("orden_pago")

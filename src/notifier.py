@@ -233,6 +233,26 @@ def _parse_hhmmss(value: str) -> float:
     return h * 3600 + m * 60 + s
 
 
+def _latency_stats(metrics: dict) -> tuple[float, float, float]:
+    """(min, prom, max) de latencia por batch.
+
+    Prefiere la lista cruda ``batch_times`` (corrida individual); si no esta,
+    usa el resumen ``batch_latency`` que persiste run_history para el mail diario.
+    """
+    batch_times = metrics.get("batch_times") or []
+    if batch_times:
+        return min(batch_times), sum(batch_times) / len(batch_times), max(batch_times)
+    summary = metrics.get("batch_latency") or {}
+    count = int(summary.get("count", 0) or 0)
+    if count <= 0:
+        return 0.0, 0.0, 0.0
+    return (
+        float(summary.get("min", 0.0) or 0.0),
+        float(summary.get("sum", 0.0) or 0.0) / count,
+        float(summary.get("max", 0.0) or 0.0),
+    )
+
+
 def _emit_error_block(lines: list[str], metrics: dict, indent: str = "  ") -> None:
     """Agrega al reporte el bloque de diagnóstico de un fallo de entidad.
 
@@ -240,6 +260,11 @@ def _emit_error_block(lines: list[str], metrics: dict, indent: str = "  ") -> No
     respuesta cruda del migrator y traceback completo, cada uno multilinea.
     """
     lines.append(f"{indent}DIAGNÓSTICO DE FALLO:")
+    if metrics.get("error_kind") == "backend_infra":
+        lines.append(
+            f"{indent}  ATENCIÓN        : fallo de INFRAESTRUCTURA del servidor Paxapos (SQL/PHP). "
+            "Los datos de RAFAM no son el problema; las filas se releen en la próxima corrida."
+        )
     if metrics.get("error_msg"):
         lines.append(f"{indent}  Motivo          : {metrics['error_msg']}")
     if metrics.get("error_type"):
@@ -298,6 +323,7 @@ def notify_run_report(
     total_migrator_sent = sum(m.get("migrator_sent", 0) for m in entity_metrics)
     total_migrator_saved = sum(m.get("migrator_saved", 0) for m in entity_metrics)
     total_migrator_errors = sum(m.get("migrator_errors", 0) for m in entity_metrics)
+    total_migrator_deferred = sum(int(m.get("migrator_deferred", 0) or 0) for m in entity_metrics)
     total_created = sum(m.get("migrator_created", 0) for m in entity_metrics)
     total_updated = sum(m.get("migrator_updated", 0) for m in entity_metrics)
     total_replaced = sum(m.get("migrator_replaced", 0) for m in entity_metrics)
@@ -343,6 +369,7 @@ def notify_run_report(
     lines.append(f"  • Excluidos por configuración: {total_excluded:,}")
     lines.append(f"  • Filas inválidas        : {total_invalid:,}")
     lines.append(f"  • Rechazados por Paxapos : {total_migrator_errors:,}")
+    lines.append(f"  • Diferidos (dependencia pendiente): {total_migrator_deferred:,}")
     lines.append(f"  • Batches OK / con error : {total_batches_ok} / {total_batches_failed}")
     lines.append(f"  • Velocidad global       : {global_speed_min:,.1f} reg/min   ({global_speed_sec:,.1f} reg/s)")
     lines.append("  • Nota                  : filas leídas no equivale a altas nuevas en Paxapos")
@@ -376,13 +403,7 @@ def notify_run_report(
         speed_min = (records / dur_min) if dur_min > 0 else 0.0
         speed_sec = (records / duration) if duration > 0 else 0.0
         query_dur = m.get("query_duration_secs", 0.0) or 0.0
-        batch_times = m.get("batch_times") or []
-        if batch_times:
-            b_min = min(batch_times)
-            b_max = max(batch_times)
-            b_avg = sum(batch_times) / len(batch_times)
-        else:
-            b_min = b_max = b_avg = 0.0
+        b_min, b_avg, b_max = _latency_stats(m)
 
         lines.append(f"[{ent}]  ({m.get('mode', '—')})  →  {ent_status}")
         lines.append(f"  Filas leídas de RAFAM   : {records:,}")
@@ -395,6 +416,7 @@ def notify_run_report(
         lines.append(f"  Excluidos por configuración: {m.get('source_excluded', 0):,}")
         lines.append(f"  Filas inválidas         : {m.get('source_invalid', 0):,}")
         lines.append(f"  Rechazados por Paxapos  : {migrator_errors:,}")
+        lines.append(f"  Diferidos (dependencia) : {int(m.get('migrator_deferred', 0) or 0):,}")
         lines.append(f"  Batches OK / con error  : {m.get('batches_ok', 0)} / {m.get('batches_failed', 0)}")
         lines.append(f"  Duración                : {duration:.2f} s   ({dur_min:.2f} min)")
         lines.append(f"  Query origen (SQL)      : {query_dur:.2f} s")

@@ -211,6 +211,41 @@ class TestOrdenPagoEnqueue:
         assert sk not in retry_store.pending_external_ids("orden_pago")
         retry_store.close()
 
+    def test_op_no_presupuestaria_sin_imputacion_queda_fuera_de_alcance(self, tmp_path):
+        """TIPO_OP='N' sin ORDEN_PAGO_IMPUT (giro de retenciones de sueldos,
+        embargos, cajas chicas) no paga comprobantes de proveedor: no se envia
+        ni se encola, y si estaba en la cola se cierra."""
+        retry_store = RetryStore(db_path=str(tmp_path / "retry.db"))
+        exporter = self._make_exporter(tmp_path, retry_store)
+        sent = []
+        exporter._post_json = lambda url, payload: sent.append(payload) or {"stats": {}}
+        columns = self.COLUMNS + ["TIPO_OP"]
+        sk = _op_key(2026, 1001)
+        retry_store.enqueue("orden_pago", sk, "dependency_missing", "sin ORDEN_PAGO_IMPUT",
+                            reason_detail="missing_payment_imputation")
+
+        row = self._row(OPI_NRO_COMPROB="", SG_DELEG_SOLIC="", SG_NRO_SOLIC="") + ("N",)
+        exporter.write_batch("orden_pago", columns, [row])
+
+        assert sent == []
+        assert retry_store.list_items("orden_pago") == []
+        retry_store.close()
+
+    def test_op_presupuestaria_sin_imputacion_sigue_encolada(self, tmp_path):
+        """Una 'P' sin imputacion es anomala (en RAFAM el 100% la tiene): se
+        conserva el comportamiento de encolar para no perderla."""
+        retry_store = RetryStore(db_path=str(tmp_path / "retry.db"))
+        exporter = self._make_exporter(tmp_path, retry_store)
+        exporter._post_json = lambda url, payload: {"stats": {}}
+        columns = self.COLUMNS + ["TIPO_OP"]
+
+        row = self._row(OPI_NRO_COMPROB="", SG_DELEG_SOLIC="", SG_NRO_SOLIC="") + ("P",)
+        exporter.write_batch("orden_pago", columns, [row])
+
+        items = retry_store.list_items("orden_pago")
+        assert [i.reason_detail for i in items] == ["missing_payment_imputation"]
+        retry_store.close()
+
 
 class TestRecordBatchOutcomesWiring:
     def test_write_batch_resuelve_la_cola_con_la_respuesta(self, tmp_path):

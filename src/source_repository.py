@@ -228,6 +228,7 @@ class SourceRepository:
         if deducciones is not None:
             ded_codigo = self._safe_column(deducciones, "CODIGO")
             ded_desc = self._safe_column(deducciones, "DESCRIPCION")
+            ded_tipo = self._safe_column(deducciones, "TIPO_DEDUC")
             if ded_codigo is not None:
                 join_conditions = [od_codigo == ded_codigo]
                 ded_ejercicio = self._safe_column(deducciones, "EJERCICIO")
@@ -236,6 +237,11 @@ class SourceRepository:
                 from_clause = from_clause.outerjoin(deducciones, and_(*join_conditions))
                 if ded_desc is not None:
                     select_cols.append(ded_desc.label("DESCRIPCION"))
+                if ded_tipo is not None:
+                    # 'I' = impositiva (Ganancias/IIBB/SUSS/IVA), 'O' = otra (IPS,
+                    # IOMA, sindicato, garantia...). Solo las 'I' son retenciones
+                    # en el sentido de Paxapos (account_tipo_impuestos).
+                    select_cols.append(ded_tipo.label("TIPO_DEDUC"))
 
         keys_by_ej: dict[int, set[int]] = {}
         for ej, nro_op in op_keys:
@@ -268,6 +274,7 @@ class SourceRepository:
                     "comprob_deduc": mapping.get("COMPROB_DEDUC") if "COMPROB_DEDUC" in mapping.keys() else None,
                     "cuenta": mapping.get("CUENTA") if "CUENTA" in mapping.keys() else None,
                     "descripcion": mapping.get("DESCRIPCION") if "DESCRIPCION" in mapping.keys() else None,
+                    "tipo_deduc": mapping.get("TIPO_DEDUC") if "TIPO_DEDUC" in mapping.keys() else None,
                 }
                 out.setdefault((ej, nro_op), []).append(entry)
         except (SQLAlchemyError, Exception) as exc:

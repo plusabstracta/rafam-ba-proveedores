@@ -150,6 +150,7 @@ class OcItemsMapper:
         ocs_to_skip_permanent: list[tuple[int, int, int]] = []
         ocs_same_state: list[tuple[int, int, int]] = []
         skipped_same_state = 0
+        skipped_already_deleted = 0
         resent_hash = 0
         oc_payload_hashes: dict[str, str] = {}
 
@@ -183,6 +184,12 @@ class OcItemsMapper:
             # permanent por el antiguo 409; esa causa ya fue corregida en el receptor.
             if estado_actual == "A":
                 if link_previo and link_previo.get("remote_id"):
+                    if estado_previo == "A" and link_previo.get("deleted_at"):
+                        # Baja ya confirmada por Paxapos en una corrida anterior.
+                        # Sin este corte, oc_items (full_load) reenviaba las
+                        # mismas ~12 bajas en cada corrida (1.728 por dia).
+                        skipped_already_deleted += 1
+                        continue
                     oc_data["Pedido"]["id"] = int(link_previo["remote_id"])
                     oc_data["Pedido"]["deleted"] = 1
                     ocs_to_anular.append(oc_data)
@@ -284,10 +291,11 @@ class OcItemsMapper:
         if not ordenes_compra:
             logger.info(
                 "Migrator [oc_items]: nada que enviar (skip_estado=%d, mismo_estado=%d, "
-                "skip_permanent=%d, sin_items=%d)",
+                "skip_permanent=%d, bajas_ya_aplicadas=%d, sin_items=%d)",
                 len(ocs_to_skip_register),
                 skipped_same_state,
                 len(ocs_to_skip_permanent),
+                skipped_already_deleted,
                 unresolved_items,
             )
             return None, {}
@@ -310,6 +318,7 @@ class OcItemsMapper:
             "mismo_estado": skipped_same_state,
             "reenviado_hash": resent_hash,
             "skip_permanent": len(ocs_to_skip_permanent),
+            "bajas_ya_aplicadas": skipped_already_deleted,
             "unresolved_items": unresolved_items,
         }
         return payload, raw_by_source_key
@@ -440,6 +449,12 @@ def persist_links(parsed: dict, raw_by_source_key: dict[str, dict], link_store) 
         paxapos_gasto_ids_list = result.get("gasto_ids") or []
         paxapos_gasto_ids = ",".join(str(g) for g in paxapos_gasto_ids_list) if paxapos_gasto_ids_list else ""
 
+        # La baja confirmada (o ya aplicada / destino inexistente) se registra
+        # en deleted_at para que la proxima corrida no la reenvie. Un alta o
+        # modificacion posterior (OC que vuelve a R) limpia la marca.
+        mode = str(result.get("mode") or "")
+        deleted_at = _utc_now_sqlite() if mode in _BAJA_MODES else None
+
         link_store.save_link(
             entity="orden_compra",
             source_key=source_key,
@@ -452,7 +467,18 @@ def persist_links(parsed: dict, raw_by_source_key: dict[str, dict], link_store) 
             gasto_linked_refs=gasto_linked_refs,
             paxapos_gasto_ids=paxapos_gasto_ids,
             payload_hash=payload_hash,
+            deleted_at=deleted_at,
         )
+
+
+_BAJA_MODES = frozenset({"soft_delete", "already_deleted", "skipped_not_found"})
+
+
+def _utc_now_sqlite() -> str:
+    """Misma forma que ``datetime('now')`` de sqlite (UTC sin zona), como mark_deleted."""
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
 
 # ââ Helpers ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
