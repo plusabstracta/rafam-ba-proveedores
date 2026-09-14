@@ -167,6 +167,12 @@ _EXCLUDED_COD_PROV_DEFAULT: frozenset[int] = frozenset(
         50001,  # Telefonica Argentina
         50002,  # Telefonica Moviles Argentina S.A.
         50003,  # Viatico
+        # Liquidacion de sueldos y sus giros previsionales (comprobantes tipo LIQ).
+        # Confirmado en Oracle (audit-op-scope, sep-2026): 1.537 OP / $13.870M
+        # que Paxapos recibia como pagos a proveedor con Gastos "Otros".
+        50008,  # SUELDOS A PAGAR AL PERSONAL
+        50051,  # I.P.S
+        50052,  # I.O.M.A.
         50012,  # Caja Chica Compras
         50014,  # Caja Chica Contaduria
         50015,  # Caja Chica Accion Social

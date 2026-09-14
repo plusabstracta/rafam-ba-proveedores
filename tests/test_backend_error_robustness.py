@@ -289,6 +289,25 @@ class TestRetencionesEgresoBorrado:
         assert retry.list_items("retenciones")[0].reason_detail == "retention_type_unresolved"
         retry.close()
 
+    def test_op_de_proveedor_excluido_no_se_envia_y_cierra_la_cola(self, monkeypatch, tmp_path):
+        """50008 = SUELDOS A PAGAR AL PERSONAL (audit-op-scope en Oracle): sus
+        367 entradas 'retention_type_unresolved' deben drenar solas."""
+        exporter = _migrator(monkeypatch, tmp_path)
+        retry = RetryStore(db_path=str(tmp_path / "retry.db"))
+        exporter.attach_retry_store(retry)
+        retry.enqueue("retenciones", _OP_SK, REASON_DEPENDENCY_MISSING, "x", reason_detail="retention_type_unresolved")
+        exporter._link_store.save_link("orden_pago", _OP_SK, "5001")
+        exporter.attach_source(_FakeSourceRepo({(2026, 100): [
+            {"codigo_deduc": "3", "importe_reten": 10.0, "descripcion": "Ganancias", "tipo_deduc": "I"},
+        ]}))
+
+        with patch.object(exporter, "_post_json") as post:
+            exporter.write_batch("retenciones", ["EJERCICIO", "NRO_OP", "COD_PROV"], [(2026, 100, 50008)])
+            post.assert_not_called()
+
+        assert retry.list_items("retenciones") == []
+        retry.close()
+
 
 # ── Infra del backend en la cola ─────────────────────────────────────────────
 

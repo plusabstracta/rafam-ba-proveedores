@@ -246,6 +246,20 @@ class TestOrdenPagoEnqueue:
         assert [i.reason_detail for i in items] == ["missing_payment_imputation"]
         retry_store.close()
 
+    def test_op_de_proveedor_excluido_cierra_la_cola(self, tmp_path):
+        retry_store = RetryStore(db_path=str(tmp_path / "retry.db"))
+        exporter = self._make_exporter(tmp_path, retry_store)
+        sent = []
+        exporter._post_json = lambda url, payload: sent.append(payload) or {"stats": {}}
+        sk = _op_key(2026, 1001)
+        retry_store.enqueue("orden_pago", sk, "dependency_missing", "pendiente")
+
+        exporter.write_batch("orden_pago", self.COLUMNS, [self._row(COD_PROV="50008")])
+
+        assert sent == []
+        assert retry_store.list_items("orden_pago") == []
+        retry_store.close()
+
 
 class TestRecordBatchOutcomesWiring:
     def test_write_batch_resuelve_la_cola_con_la_respuesta(self, tmp_path):

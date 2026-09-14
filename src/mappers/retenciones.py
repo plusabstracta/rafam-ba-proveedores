@@ -10,6 +10,7 @@ import hashlib
 import json
 import logging
 
+from ..config import is_cod_prov_excluded
 from ..retry_store import REASON_DEPENDENCY_MISSING
 from ..utils import normalize_text, to_int
 from ..validation import validate_amount
@@ -53,6 +54,7 @@ class RetencionesMapper:
         # 1. Claves OP unicas del batch
         op_keys: list[tuple[int, int]] = []
         seen: set[tuple[int, int]] = set()
+        prov_by_key: dict[tuple[int, int], object] = {}
         for row in rows:
             raw = dict(zip(columns, row))
             ejercicio = to_int(raw.get("EJERCICIO"))
@@ -63,6 +65,7 @@ class RetencionesMapper:
             if key not in seen:
                 seen.add(key)
                 op_keys.append(key)
+                prov_by_key[key] = raw.get("COD_PROV")
 
         if not op_keys:
             logger.info("Migrator [retenciones]: batch sin OPs validas")
@@ -83,6 +86,7 @@ class RetencionesMapper:
         skipped_no_deduc = 0
         skipped_unchanged = 0
         skipped_permanent = 0
+        skipped_excluded = 0
 
         # Igual que oc_items (paxapos#489): una OP dentro de la ventana de
         # reproceso vuelve a entrar en cada corrida; sin esta exclusion una
@@ -98,6 +102,13 @@ class RetencionesMapper:
             op_sk = json.dumps({"ejercicio": ejercicio, "nro_op": nro_op}, sort_keys=True)
             if op_sk in permanent_keys:
                 skipped_permanent += 1
+                continue
+            if is_cod_prov_excluded(prov_by_key.get((ejercicio, nro_op))):
+                # Misma blocklist que orden_pago (sueldos, IPS, IOMA, cajas chicas):
+                # sus deducciones no son retenciones a proveedores. Cerrar la cola
+                # si quedo encolada antes de la exclusion.
+                skipped_excluded += 1
+                self._resolve_retry(op_sk, dry_run)
                 continue
 
             deducciones = deducciones_by_op.get((ejercicio, nro_op), [])
@@ -180,11 +191,11 @@ class RetencionesMapper:
                 "retenciones": mapped,
             })
 
-        if skipped_no_link or skipped_no_deduc or skipped_unchanged or skipped_permanent:
+        if skipped_no_link or skipped_no_deduc or skipped_unchanged or skipped_permanent or skipped_excluded:
             logger.info(
                 "Migrator [retenciones]: %d OP sin link (encoladas), %d sin deducciones, "
-                "%d ya migradas sin cambios (skip), %d permanent (no se reenvian)",
-                skipped_no_link, skipped_no_deduc, skipped_unchanged, skipped_permanent,
+                "%d ya migradas sin cambios (skip), %d permanent (no se reenvian), %d de proveedores excluidos",
+                skipped_no_link, skipped_no_deduc, skipped_unchanged, skipped_permanent, skipped_excluded,
             )
 
         self._flush_retencion_skip_counters("retenciones")

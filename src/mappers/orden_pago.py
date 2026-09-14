@@ -309,6 +309,8 @@ class OrdenPagoMapper:
             )
             if is_cod_prov_excluded(prov_candidate):
                 skipped_excluded_prov += 1
+                # Nunca va a migrar: si quedo encolada antes de excluirla, cerrarla.
+                self._resolve_op(key, dry_run)
                 logger.info(
                     "Migrator [orden_pago] OP %s-%s: omitida - proveedor excluido (COD_PROV=%s)",
                     ejercicio, nro_op, prov_candidate,
