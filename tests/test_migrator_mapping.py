@@ -328,7 +328,10 @@ class TestWriteBatchOrdenPago:
                 "PAXAPOS_RAFAM_DEFAULT_TIPO_PAGO_ID": "4",
                 "LOCAL_STATE_DB_PATH": ":memory:",
             }):
-                return MigratorExporter(dry_run=True)
+                exp = MigratorExporter(dry_run=True)
+        # Estos tests no cubren el pareo con gastos del portal: la OC no tiene ninguno.
+        exp._resolve_gastos_batch = lambda pedido_ids, comprobantes: {"success": True, "gastos": []}
+        return exp
 
     def test_agrupa_por_nro_op(self):
         exp = self._make_exporter()

@@ -229,12 +229,18 @@ class MigratorExporter(BaseExporter):
 
         # ââ Mapper instances âââââââââââââââââââââââââââââââââââââââââââââ
         self._oc_mapper = OcItemsMapper(link_store=self._link_store, lookup_resolver=self._lookup)
+        # Late-bound: los tests stubean exporter._resolve_gastos_batch despues de construir.
+        resolve_gastos_fn = lambda pedido_ids, comprobantes: self._resolve_gastos_batch(pedido_ids, comprobantes)  # noqa: E731
         self._sg_mapper = SolicGastosMapper(
             link_store=self._link_store,
             lookup_resolver=self._lookup,
-            resolve_gastos_fn=self._resolve_gastos_batch,
+            resolve_gastos_fn=resolve_gastos_fn,
         )
-        self._op_mapper = OrdenPagoMapper(link_store=self._link_store, lookup_resolver=self._lookup)
+        self._op_mapper = OrdenPagoMapper(
+            link_store=self._link_store,
+            lookup_resolver=self._lookup,
+            resolve_gastos_fn=resolve_gastos_fn,
+        )
         self._ret_mapper = RetencionesMapper(link_store=self._link_store, lookup_resolver=self._lookup)
         self._clasif_mapper = ClasificacionesMapper(link_store=self._link_store, lookup_resolver=self._lookup)
 

@@ -14,9 +14,14 @@ from ..retry_store import REASON_DEPENDENCY_MISSING
 from ..validation import validate_amount
 from .clasificaciones import code_str as clasif_code_str
 from .clasificaciones import parent_code as clasif_parent_code
+from .gasto_matching import elegir_gasto_portal, gasto_ids_pareados
 from .solic_gastos import gasto_external_id
+from .solic_gastos import persist_links as persist_links_gastos
 
 logger = logging.getLogger(__name__)
+
+# Campos del gasto del portal que se conservan en el edit (RAFAM manda el comprobante).
+_PORTAL_KEEP_FIELDS = ("fecha", "importe_total", "importe_neto", "clasificacion_id")
 
 
 def _partida_code_from_op_raw(raw: dict) -> str | None:
@@ -36,11 +41,13 @@ def _partida_code_from_op_raw(raw: dict) -> str | None:
 class OrdenPagoMapper:
     """Mapper stateful para ORDEN_PAGO."""
 
-    def __init__(self, *, link_store, lookup_resolver, source_repo=None, retry_store=None):
+    def __init__(self, *, link_store, lookup_resolver, source_repo=None, retry_store=None, resolve_gastos_fn=None):
         self._link_store = link_store
         self._lookup = lookup_resolver
         self._source_repo = source_repo
         self._retry_store = retry_store
+        # Consulta resolver_gasto de Paxapos (gastos ya creados en la OC por el portal).
+        self._resolve_gastos_fn = resolve_gastos_fn
         # Contadores de retenciones descartadas (shared con retenciones mapper)
         self._retencion_skipped_no_catalog: int = 0
         self._retencion_skipped_no_match: dict[str, int] = {}
@@ -417,6 +424,7 @@ class OrdenPagoMapper:
         included_cc_keys: list[tuple[str, str, str]] = []
         included_cc_key_set: set[tuple[str, str, str]] = set()
         cc_key_to_pedido_id: dict[tuple[str, str, str], int] = {}
+        cc_key_to_op_keys: dict[tuple[str, str, str], list[tuple[int, int]]] = {}
         skipped_no_gasto = 0
         skipped_no_opi = 0
         skipped_no_presupuestaria = 0
@@ -537,6 +545,7 @@ class OrdenPagoMapper:
                     included_cc_keys.append(cc_key)
                 if pedido_id is not None:
                     cc_key_to_pedido_id.setdefault(cc_key, pedido_id)
+                cc_key_to_op_keys.setdefault(cc_key, []).append(key)
 
             # Mapear deducciones
             ret_payload: list[dict] = []
@@ -665,10 +674,23 @@ class OrdenPagoMapper:
             logger.info("Migrator [orden_pago]: lote vacÃ­o luego del mapeo")
             return None, {}
 
-        # Construir gastos[] con datos de CTA_COMPROB
+        # Construir gastos[] con datos de CTA_COMPROB. Antes de crear, parear cada
+        # comprobante con el gasto que Paxapos ya tiene en la OC (subido por el
+        # proveedor via portal): si hay match se manda {id, ...} para que RAFAM lo
+        # complete con un edit, no un gasto nuevo. Sin esto quedaban dos gastos por
+        # factura: el del portal (PDF, sin datos) y el de RAFAM (datos, sin PDF).
+        portal_by_pedido = self._fetch_gastos_portal(
+            sorted({p for p in cc_key_to_pedido_id.values() if p is not None})
+        )
         gastos_payload: list[dict] = []
+        gasto_raw_by_sk: dict[str, dict] = {}
         seen_dedup_keys: set[tuple] = set()
         skipped_gastos_incomplete = 0
+        matched_stats: dict[str, int] = {}
+        ambiguous_count = 0
+        # OPs con algun comprobante sin bloque gasto pero con gasto del portal libre en
+        # su OC: si se enviaran, Paxapos autocrearia el gasto desde gasto_nro_comprobante.
+        ops_to_hold: set[tuple[int, int]] = set()
         for cc_key in included_cc_keys:
             cc_raw = cc_raw_by_key.get(cc_key)
             if cc_raw is None:
@@ -701,15 +723,64 @@ class OrdenPagoMapper:
             gasto, dedup_key = self._build_gasto_from_op_row(cc_raw_for_gasto)
             if gasto is None:
                 skipped_gastos_incomplete += 1
+                if pedido_id is not None and portal_by_pedido.get(pedido_id):
+                    for op_key in cc_key_to_op_keys.get(cc_key, []):
+                        ops_to_hold.add(op_key)
                 continue
             if dedup_key in seen_dedup_keys:
                 continue
             seen_dedup_keys.add(dedup_key)
+
+            if pedido_id is not None:
+                pool = portal_by_pedido.get(pedido_id, [])
+                match = elegir_gasto_portal(pool, gasto["Gasto"])
+                if match.gasto is not None:
+                    gasto["Gasto"] = self._merge_edit_gasto_portal(match.gasto, gasto["Gasto"])
+                    portal_by_pedido[pedido_id] = [g for g in pool if g is not match.gasto]
+                    matched_stats[match.matched_by] = matched_stats.get(match.matched_by, 0) + 1
+                elif match.candidates:
+                    ambiguous_count += 1
+                    nota = (
+                        f"REVISAR: posible duplicado de gasto(s) #{', #'.join(str(c) for c in match.candidates)} "
+                        f"en OC #{pedido_id}"
+                    )
+                    obs = gasto["Gasto"].get("observacion")
+                    gasto["Gasto"]["observacion"] = f"{obs} | {nota}" if obs else nota
+                    logger.warning(
+                        "Migrator [orden_pago] CC %s en OC %s: no se pudo parear con gastos %s; se crea marcado REVISAR",
+                        cc_key, pedido_id, match.candidates,
+                    )
+
             gastos_payload.append(gasto)
+            sk = json.dumps(gasto["external_id"], sort_keys=True)
+            raw_for_link = dict(cc_raw_for_gasto)
+            raw_for_link["_pedido_id"] = pedido_id
+            raw_for_link["_nro_comprobante"] = cc_key[1]
+            gasto_raw_by_sk[sk] = raw_for_link
+
+        if ops_to_hold:
+            ordenes_pago = [
+                op for op in ordenes_pago
+                if (op["external_id"]["ejercicio"], op["external_id"]["nro_op"]) not in ops_to_hold
+            ]
+            held_sks = set()
+            for op_key in ops_to_hold:
+                held_sks.add(self._op_source_key(op_key[0], op_key[1]))
+                self._enqueue_op(op_key, "comprobante sin datos y OC con gasto del portal sin parear", dry_run)
+            raw_by_source_key = {sk: r for sk, r in raw_by_source_key.items() if sk not in held_sks}
+            logger.warning(
+                "Migrator [orden_pago]: %d OPs retenidas (comprobante incompleto con gasto del portal en la OC)",
+                len(ops_to_hold),
+            )
         if skipped_gastos_incomplete:
             logger.info(
                 "Migrator [orden_pago]: %d comprobantes sin datos suficientes para auto-crear gasto",
                 skipped_gastos_incomplete,
+            )
+        if matched_stats or ambiguous_count:
+            logger.info(
+                "Migrator [orden_pago] pareo con gastos del portal: %s, ambiguos=%d",
+                matched_stats or {}, ambiguous_count,
             )
         if self._clasif_resolved_exact or self._clasif_resolved_fallback or self._clasif_missing:
             logger.info(
@@ -718,6 +789,10 @@ class OrdenPagoMapper:
                 self._clasif_resolved_fallback,
                 self._clasif_missing,
             )
+
+        if not ordenes_pago:
+            logger.info("Migrator [orden_pago]: lote vacio luego de retener OPs")
+            return None, {}
 
         payload = {
             "dry_run": dry_run,
@@ -733,7 +808,45 @@ class OrdenPagoMapper:
         self._last_grouped_oc_source_keys = grouped_oc_source_keys
         self._last_skipped_no_gasto = skipped_no_gasto
         self._last_gastos_count = len(gastos_payload)
+        self._last_gasto_raw_by_sk = gasto_raw_by_sk
         return payload, raw_by_source_key
+
+    def _fetch_gastos_portal(self, pedido_ids: list[int]) -> dict[int, list[dict]]:
+        """Gastos que Paxapos ya tiene en esas OCs, sin los que este script ya pareo."""
+        if not pedido_ids or self._resolve_gastos_fn is None:
+            return {}
+        resolver = self._resolve_gastos_fn(pedido_ids, []) or {}
+        gastos = resolver.get("gastos", []) if isinstance(resolver, dict) else []
+        ya_pareados = gasto_ids_pareados(self._link_store)
+        by_pedido: dict[int, list[dict]] = {}
+        for g in gastos:
+            if not isinstance(g, dict) or g.get("id") in (None, ""):
+                continue
+            if int(g["id"]) in ya_pareados:
+                continue
+            pid = to_int(g.get("pedido_id"))
+            if pid is None:
+                continue
+            by_pedido.setdefault(pid, []).append(g)
+        return by_pedido
+
+    @staticmethod
+    def _merge_edit_gasto_portal(portal: dict, rafam: dict) -> dict:
+        """Edit por id del gasto del portal: comprobante de RAFAM, importes/fecha del portal.
+
+        Paxapos guarda solo los campos enviados: el PDF (media_id) y la
+        observacion no viajan y quedan intactos. fecha/importes son obligatorios
+        para el receptor, asi que se reenvian los que ya tiene el gasto cuando
+        existen (los cargo el proveedor o los leyo la IA del comprobante real).
+        """
+        merged = dict(rafam)
+        merged["id"] = int(portal["id"])
+        for field in _PORTAL_KEEP_FIELDS:
+            value = portal.get(field)
+            if value in (None, "", 0, 0.0, "0", "0.00"):
+                continue
+            merged[field] = value
+        return merged
 
     
     def _build_gasto_from_op_row(self, raw: dict) -> tuple[dict | None, tuple | None]:
@@ -936,6 +1049,10 @@ class OrdenPagoMapper:
     def process_response(self, parsed: dict, raw_by_source_key: dict[str, dict], *, link_store, dry_run: bool) -> None:
         """Persist links y marcar OCs has_op despuÃ©s del POST."""
         persist_links_orden_pago(parsed, raw_by_source_key, link_store, dry_run)
+        if not dry_run:
+            # Los gastos editados/creados quedan vinculados por comprobante RAFAM; en la
+            # proxima corrida _fetch_gastos_portal los excluye del pool de candidatos.
+            persist_links_gastos(parsed, getattr(self, "_last_gasto_raw_by_sk", {}), link_store)
         self._mark_oc_has_op(parsed, link_store)
 
     def _mark_oc_has_op(self, parsed: dict, link_store) -> None:

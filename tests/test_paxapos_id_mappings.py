@@ -250,7 +250,10 @@ class TestPedidoInternalIdEnOrdenPago:
                 },
                 clear=False,
             ):
-                return MigratorExporter(dry_run=True)
+                exp = MigratorExporter(dry_run=True)
+        # Estos tests no cubren el pareo con gastos del portal: la OC no tiene ninguno.
+        exp._resolve_gastos_batch = lambda pedido_ids, comprobantes: {"success": True, "gastos": []}
+        return exp
 
     @staticmethod
     def _columns():
@@ -417,7 +420,9 @@ class TestNoCrearPagosEnCero:
                 },
                 clear=False,
             ):
-                return MigratorExporter(dry_run=True)
+                exp = MigratorExporter(dry_run=True)
+        exp._resolve_gastos_batch = lambda pedido_ids, comprobantes: {"success": True, "gastos": []}
+        return exp
 
     @staticmethod
     def _columns():

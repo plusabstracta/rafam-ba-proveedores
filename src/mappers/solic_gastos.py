@@ -11,6 +11,9 @@ import json
 import logging
 
 from ..utils import format_date_only, parse_money, to_int
+from .gasto_matching import comprobante_key as _comprobante_key
+from .gasto_matching import norm_nro as _norm_factura
+from .gasto_matching import pick_resolved as _pick_resolved
 
 logger = logging.getLogger(__name__)
 
@@ -427,76 +430,6 @@ class SolicGastosMapper:
 
 
 # ââ Persist Links ââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
-
-# Placeholders que deja el OCR del portal cuando no pudo leer el comprobante.
-_NRO_PLACEHOLDERS = frozenset({"SIN-NUMERO"})
-
-# Tolerancia para dar dos importes por iguales al desambiguar facturas de una OC.
-_IMPORTE_TOLERANCIA = 0.01
-
-
-def _norm_factura(value) -> str:
-    """Normaliza un numero de factura para comparar (sin ceros a izquierda).
-
-    Los placeholders del OCR y los valores solo-ceros quedan en '' (sin comprobante).
-    """
-    if value is None:
-        return ""
-    text = str(value).strip()
-    if text.upper() in _NRO_PLACEHOLDERS:
-        return ""
-    return text.lstrip("0")
-
-
-def _comprobante_key(data: dict) -> tuple | None:
-    """Identidad de comprobante normalizada (proveedor, pdv, nro, tipo).
-
-    Sirve para cruzar el gasto mapeado desde RAFAM con el que devuelve
-    resolver_gasto, que ya viene con pdv/nro paddeados a 5/20 por el backend.
-    """
-    if not isinstance(data, dict):
-        return None
-    factura_nro = _norm_factura(data.get("factura_nro"))
-    if not factura_nro:
-        return None
-    proveedor_id = data.get("proveedor_id")
-    tipo_factura_id = data.get("tipo_factura_id")
-    return (
-        int(proveedor_id) if proveedor_id not in (None, "") else None,
-        _norm_factura(data.get("punto_de_venta")),
-        factura_nro,
-        int(tipo_factura_id) if tipo_factura_id not in (None, "") else None,
-    )
-
-
-def _pick_resolved(candidates: list[dict], gasto_data: dict) -> dict | None:
-    """Elige el gasto resolver correcto cuando una OC tiene varias facturas.
-
-    Misma cascada que Gasto::matchParcialEnOc() del backend: con un solo
-    candidato lo devuelve; con varios desambigua por factura_nro y, si el OCR
-    leyo mal el numero, por importe_total (abs, +-_IMPORTE_TOLERANCIA). Si no
-    se puede, devuelve None (se omite para no enriquecer el gasto errado).
-    """
-    if len(candidates) == 1:
-        return candidates[0]
-    want = _norm_factura(gasto_data.get("factura_nro"))
-    if want:
-        by_nro = [c for c in candidates if _norm_factura(c.get("factura_nro")) == want]
-        if len(by_nro) == 1:
-            return by_nro[0]
-        if by_nro:
-            candidates = by_nro
-    importe = parse_money(gasto_data.get("importe_total"))
-    if importe is None or importe == 0:
-        return None
-    by_importe = [
-        c for c in candidates
-        if (ci := parse_money(c.get("importe_total"))) is not None
-        and round(abs(abs(ci) - abs(importe)), 2) <= _IMPORTE_TOLERANCIA
-    ]
-    if len(by_importe) == 1:
-        return by_importe[0]
-    return None
 
 
 def _stable_payload_hash(obj) -> str:
