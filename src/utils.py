@@ -73,6 +73,22 @@ def normalize_cuit(value: Any) -> str | None:
     return digits if len(digits) == 11 else None
 
 
+_CUIT_WEIGHTS = (5, 4, 3, 2, 7, 6, 5, 4, 3, 2)
+
+
+def is_valid_cuit(digits: str | None) -> bool:
+    """Digito verificador modulo 11, misma regla que validate_cuit_cuil() en CakePHP.
+
+    Un CUIT todo ceros pasa el modulo 11 pero no identifica a nadie (y el upsert
+    por CUIT del receptor mezclaria proveedores distintos): se trata como invalido.
+    """
+    if not digits or len(digits) != 11 or not digits.isdigit() or digits == "0" * 11:
+        return False
+    rem = sum(int(d) * w for d, w in zip(digits, _CUIT_WEIGHTS)) % 11
+    expected = 0 if rem == 0 else 11 - rem
+    return int(digits[10]) == expected
+
+
 def env_bool(name: str, default: str | bool = "true") -> bool:
     """Lee variable de entorno como bool. default puede ser str o bool."""
     if isinstance(default, bool):

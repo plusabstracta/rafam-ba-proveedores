@@ -104,6 +104,28 @@ class OrdenPagoMapper:
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning("No se pudo resolver OP %s-%s en la cola: %s", key[0], key[1], exc)
 
+    def _enqueue_missing_proveedores(
+        self, cod_provs: list[int], op_key: tuple[int, int], dry_run: bool
+    ) -> None:
+        """Pide a la entidad proveedores que traiga estos COD_PROV en la proxima corrida.
+
+        La clave es ``str(COD_PROV)`` (formato de _proveedores_retry_filter y del
+        link store). dependency_missing no cuenta intentos: espera lo que haga falta.
+        """
+        if self._retry_store is None or dry_run:
+            return
+        for cod_prov in cod_provs:
+            try:
+                self._retry_store.enqueue(
+                    "proveedores",
+                    str(cod_prov),
+                    REASON_DEPENDENCY_MISSING,
+                    f"proveedor requerido por OP {op_key[0]}-{op_key[1]}, sin link local",
+                    reason_detail="required_by_orden_pago",
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning("No se pudo encolar proveedor %s: %s", cod_prov, exc)
+
     def _choose_partida_code(self, counts: dict[str, int]) -> str | None:
         """Elige la partida representativa de un comprobante con imputacion repartida.
 
@@ -172,6 +194,8 @@ class OrdenPagoMapper:
         skipped_existing_keys: set[tuple[int, int]] = set()
         skipped_excluded_prov = 0
         skipped_permanent_keys: set[tuple[int, int]] = set()
+        skipped_prov_sin_link: dict[tuple[int, int], int] = {}
+        grouped_prov_sin_link: dict[tuple[int, int], list[int]] = {}
 
         # Una OP rechazada 'permanent' sigue entrando por la ventana de reproceso
         # (pending_reprocess_days) en cada corrida; sin esta exclusion se
@@ -327,6 +351,7 @@ class OrdenPagoMapper:
 
             # Resolver proveedor_id
             remote_prov_id: int | None = None
+            cod_provs_sin_link: list[int] = []
             for cod_prov in (raw.get("COD_PROV"), raw.get("OPI_COD_PROV"), raw.get("SG_OC_COD_PROV")):
                 cod_prov_norm = to_int(cod_prov)
                 if cod_prov_norm is None:
@@ -335,6 +360,10 @@ class OrdenPagoMapper:
                 if remote_prov:
                     remote_prov_id = int(remote_prov)
                     break
+                if cod_prov_norm not in cod_provs_sin_link:
+                    cod_provs_sin_link.append(cod_prov_norm)
+            if remote_prov_id is None and cod_provs_sin_link:
+                grouped_prov_sin_link[key] = cod_provs_sin_link
 
             # Validamos el importe usando la funcion centralizada de validacion.
             # Esto previene errores de overflow DECIMAL(14,2) en base de datos
@@ -539,6 +568,23 @@ class OrdenPagoMapper:
                     )
                     continue
 
+            prov_sin_link = grouped_prov_sin_link.get(key)
+            if prov_sin_link:
+                # Sin proveedor_id el receptor no puede auto-crear el gasto y rechaza
+                # la OP hasta agotar max_attempts. El proveedor no llego por el cursor
+                # FECHA_ULT_COMP (NULL cuando nunca compro): se encola en su propia
+                # cola para que _proveedores_retry_filter lo reinyecte por COD_PROV,
+                # y la OP espera como dependencia.
+                self._enqueue_missing_proveedores(prov_sin_link, key, dry_run)
+                self._enqueue_op(
+                    key,
+                    f"proveedor COD_PROV={prov_sin_link[0]} aun no migrado en Paxapos",
+                    dry_run,
+                    reason_detail="provider_not_migrated",
+                )
+                skipped_prov_sin_link[key] = prov_sin_link[0]
+                continue
+
             for cc_key in grouped_cc_keys.get(key, []):
                 if cc_key not in included_cc_key_set:
                     included_cc_key_set.add(cc_key)
@@ -668,10 +714,17 @@ class OrdenPagoMapper:
             )
         if skipped_excluded_prov:
             logger.info("Migrator [orden_pago]: %d OPs omitidas por proveedor excluido", skipped_excluded_prov)
+        if skipped_prov_sin_link:
+            logger.warning(
+                "Migrator [orden_pago]: %d OPs retenidas por proveedor sin migrar (encoladas junto con el "
+                "proveedor); COD_PROV: %s",
+                len(skipped_prov_sin_link),
+                sorted(set(skipped_prov_sin_link.values())),
+            )
         self._flush_retencion_skip_counters("orden_pago")
 
         if not ordenes_pago:
-            logger.info("Migrator [orden_pago]: lote vacÃ­o luego del mapeo")
+            logger.info("Migrator [orden_pago]: lote vacio luego del mapeo")
             return None, {}
 
         # Construir gastos[] con datos de CTA_COMPROB. Antes de crear, parear cada

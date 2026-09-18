@@ -1,5 +1,14 @@
+import logging
 import re
 from typing import Any
+
+from .utils import is_valid_cuit
+
+logger = logging.getLogger(__name__)
+
+# COD_PROV ya avisados en este proceso: el mapper corre en cada corrida y
+# repetir el warning cada 10 minutos por el mismo CUIT es ruido.
+_INVALID_CUIT_WARNED: set[str] = set()
 
 
 # Mapeo RAFAM PROVEEDORES.COD_IVA -> Paxapos iva_responsabilidades.id
@@ -167,6 +176,17 @@ def map_proveedor_row(raw: dict[str, Any]) -> dict[str, dict[str, Any]] | None:
         return None
 
     cuit = _normalize_cuit(raw.get("CUIT"))
+    if cuit is not None and not is_valid_cuit(cuit):
+        # CakePHP rechaza el proveedor entero por el CUIT; el modelo admite cuit
+        # vacio, asi que se envia sin CUIT para no bloquear sus OPs.
+        cod_prov = str(raw.get("COD_PROV"))
+        if cod_prov not in _INVALID_CUIT_WARNED:
+            _INVALID_CUIT_WARNED.add(cod_prov)
+            logger.warning(
+                "Migrator [proveedores] COD_PROV=%s: CUIT %r con digito verificador invalido en RAFAM; se envia sin CUIT",
+                cod_prov, raw.get("CUIT"),
+            )
+        cuit = None
     iva_code = (_clean(raw.get("COD_IVA")) or "").upper()
 
     domicilio = _join_address(raw.get("CALLE_LEGAL"), raw.get("NRO_LEGAL"))

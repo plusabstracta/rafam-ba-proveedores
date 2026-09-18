@@ -226,7 +226,7 @@ class RetencionesMapper:
             logger.warning("Migrator [retenciones]: no se pudo resolver %s en la cola: %s", op_sk, exc)
 
     def _map_deduccion_dict(self, ded: dict, ejercicio: int, nro_op: int) -> dict | None:
-        """Mapea una deducciÃ³n de ORDEN_PAGO_DEDUC al formato Paxapos."""
+        """Mapea una deduccion de ORDEN_PAGO_DEDUC al formato Paxapos."""
         codigo_deduc = ded.get("codigo_deduc")
         importe_reten = ded.get("importe_reten")
         if codigo_deduc is None or importe_reten is None:
