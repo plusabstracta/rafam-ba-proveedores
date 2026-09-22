@@ -31,6 +31,7 @@ from src.entity_link_store import EntityLinkStore
 from src.error_formatting import describe_exception, format_exception_context
 from src.exporter import BaseExporter, build_exporter, fetch_migrator_lookups, fetch_migrator_spec
 from src.logging_config import setup_file_logging
+from src.retry_labels import describe_retry_key
 from src.retry_store import RetryStore
 from src.run_history import record_run
 from src.source_repository import SourceRepository
@@ -63,6 +64,53 @@ def _infra_abort_after() -> int:
         return max(1, int(raw))
     except ValueError:
         return 2
+
+
+def _mail_retry_detail_limit() -> int:
+    """Tope de items individuales por entidad en la seccion COLA DE REINTENTOS del mail.
+
+    El resumen agrupado por causa no tiene tope (son pocas filas). El detalle
+    fila-a-fila si podria crecer sin limite con una cola grande, asi que se
+    corta a los N mas viejos (los mas urgentes) con un puntero a
+    `retry-queue --entity X` para ver el resto.
+    """
+    raw = os.getenv("RAFAM_MAIL_RETRY_DETAIL_LIMIT", "50")
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return 50
+
+
+def _build_retry_detail(retry_store: RetryStore, entities: list[str]) -> dict[str, dict]:
+    """Arma, por entidad, el detalle individual (label legible + motivo + intentos)
+    de lo que sigue pendiente/permanent AHORA MISMO, para el mail diario.
+
+    Snapshot en vivo (no historico): el detalle fila-a-fila no se persiste en
+    run_history.jsonl (solo los conteos agregados por `summary_by_reason`), asi
+    que se lee directo de retry_queue al armar el mail.
+    """
+    limit = _mail_retry_detail_limit()
+    detail: dict[str, dict] = {}
+    for entity in entities:
+        items = retry_store.list_items(entity=entity)
+        if not items:
+            continue
+        items = sorted(items, key=lambda it: it.first_seen or "")
+        rows = [
+            {
+                "label": describe_retry_key(entity, it.external_id),
+                "reason_code": it.reason_code,
+                "reason_detail": it.reason_detail,
+                "attempts": it.attempts,
+                "status": it.status,
+                "first_seen": it.first_seen,
+                "last_attempt": it.last_attempt,
+                "error_message": it.error_message,
+            }
+            for it in items[:limit]
+        ]
+        detail[entity] = {"items": rows, "total": len(items)}
+    return detail
 
 
 def _effective_batch_size(entity: str, requested_batch_size: int) -> int:
@@ -242,6 +290,7 @@ def _sync_entity(
     batch_times = []
     last_batch_error: str | None = None
     last_batch_error_detail: str | None = None
+    retry_lookup_failed_detail: str | None = None
     infra_streak = 0
     infra_abort_after = _infra_abort_after()
     abort_entity = False
@@ -308,8 +357,11 @@ def _sync_entity(
             try:
                 retry_keys = retry_store.pending_external_ids(entity)
             except Exception as retry_exc:  # pragma: no cover - defensive
+                retry_lookup_failed_detail = str(retry_exc)
                 logger.warning(
-                    "[%s] No se pudo leer la cola de reintentos: %s", entity, retry_exc
+                    "[%s] No se pudo leer la cola de reintentos: %s — esta corrida "
+                    "NO reinyecta pendientes de %s (se reintenta en la proxima).",
+                    entity, retry_exc, entity,
                 )
         result = source_repo.fetch_entity(entity, cp, retry_keys)
         query_duration = time.monotonic() - t_query_start
@@ -469,7 +521,12 @@ def _sync_entity(
         if dry_run:
             logger.info("[DRY RUN   ] %s — %d registros (sin avanzar checkpoint)", entity, total)
         else:
-            if failed_batches > 0 or migrator_errors > 0 or migrator_outcomes["invalid"] > 0:
+            if (
+                failed_batches > 0
+                or migrator_errors > 0
+                or migrator_outcomes["invalid"] > 0
+                or retry_lookup_failed_detail is not None
+            ):
                 # Hubo batches que fallaron pero la corrida siguió. Marcamos la
                 # entidad como con errores para que el caller devuelva exit!=0
                 # y el cron/operador se entere, pero no perdimos las filas OK.
@@ -487,20 +544,28 @@ def _sync_entity(
                         f"{migrator_outcomes['invalid']} fila(s) de origen no pudieron mapearse; "
                         "revisar errores del mapper"
                     )
-                else:
+                elif migrator_errors > 0:
                     msg = f"Paxapos rechazo {migrator_errors} item(s); quedaron registrados en la cola de reintentos"
+                else:
+                    msg = (
+                        f"No se pudo leer la cola de reintentos: {retry_lookup_failed_detail}. "
+                        "Esta corrida NO reinyecto los pendientes de esta entidad "
+                        "(se reintenta automaticamente en la proxima corrida)."
+                    )
                 engine.mark_error(entity, msg)
                 if failed_batches > 0:
                     logger.error(
                         "[%-11s] %s — %d filas leidas, %d batch(es) con error. Ultimo: %s",
                         mode, entity, total, failed_batches, last_batch_error,
                     )
-                else:
+                elif migrator_errors > 0 or migrator_outcomes["invalid"] > 0:
                     logger.error(
                         "[%-11s] %s — %d filas leidas, %d rechazo(s) de Paxapos, "
                         "%d fila(s) invalidas; revisar log y cola de reintentos.",
                         mode, entity, total, migrator_errors, migrator_outcomes["invalid"],
                     )
+                else:
+                    logger.error("[%-11s] %s — %s", mode, entity, msg)
                 metrics["success"] = False
                 metrics["error_msg"] = msg
                 metrics["duration_secs"] = time.monotonic() - t_start
@@ -858,17 +923,42 @@ def cmd_reconcile(args) -> None:
 
 
 def cmd_retry_queue(args) -> None:
-    """Inspecciona la cola de reintentos y reencola filas 'permanent'.
+    """Inspecciona la cola de reintentos, reencola 'permanent' y/o fuerza el reenvio YA.
 
     Una fila que agota max_attempts pasa a 'permanent' y deja de reinyectarse
     (``pending_external_ids`` solo mira 'pending'). Cuando el rechazo se
     arregla del lado del receptor (core#406), hay que devolverla a 'pending'
     a mano: sin eso, el fix del backend no desbloquea lo ya trabado.
+
+    ``--send-now`` fuerza el reenvio EN ESTE MISMO PROCESO en vez de esperar
+    al proximo cron: sin el, `--requeue` solo deja la fila en 'pending' y hay
+    que esperar (o correr `main.py run --entity X` a mano) para que se
+    reintente de verdad.
     """
+    send_now = bool(getattr(args, "send_now", False))
+    if send_now and not args.entity:
+        logger.error(
+            "--send-now requiere --entity (para forzar TODA la cola de todas las "
+            "entidades usa `main.py run`, que ya reinyecta todo lo 'pending')"
+        )
+        raise SystemExit(2)
+
+    if send_now:
+        with _exclusive_run_lock():
+            _cmd_retry_queue_locked(args)
+    else:
+        _cmd_retry_queue_locked(args)
+
+
+def _cmd_retry_queue_locked(args) -> None:
+    send_now = bool(getattr(args, "send_now", False))
     retry_store = RetryStore()
     try:
         if args.dismiss and args.requeue:
             logger.error("--dismiss y --requeue son operaciones excluyentes")
+            raise SystemExit(2)
+        if args.dismiss and send_now:
+            logger.error("--dismiss y --send-now son operaciones excluyentes")
             raise SystemExit(2)
         if args.dismiss:
             if not args.entity or not args.external_id or not args.note:
@@ -889,6 +979,11 @@ def cmd_retry_queue(args) -> None:
             logger.info("Filas reencoladas (permanent -> pending): %d", reencoladas)
             if not reencoladas:
                 logger.info("No habia filas 'permanent' con ese filtro.")
+            if not send_now:
+                return
+
+        if send_now:
+            _force_send_pending(retry_store, args.entity)
             return
 
         items = retry_store.list_items(
@@ -900,14 +995,17 @@ def cmd_retry_queue(args) -> None:
             print("\nCola de reintentos vacia (con los filtros dados).\n")
             return
 
-        col = "{:<14} {:<40} {:<22} {:<24} {:<8} {}"
+        col = "{:<14} {:<40} {:<28} {:<22} {:<24} {:<8} {}"
         print()
-        print(col.format("Entidad", "External ID", "Motivo", "Detalle", "Intentos", "Estado"))
-        print("─" * 140)
+        print(col.format(
+            "Entidad", "External ID", "Registro (OC/OP/etc)", "Motivo", "Detalle", "Intentos", "Estado",
+        ))
+        print("─" * 165)
         for it in items:
             print(col.format(
                 it.entity,
                 it.external_id[:40],
+                describe_retry_key(it.entity, it.external_id)[:28],
                 it.reason_code,
                 it.reason_detail or "legacy_unspecified",
                 it.attempts,
@@ -916,14 +1014,59 @@ def cmd_retry_queue(args) -> None:
         print()
         for it in items:
             print(
-                f"  {it.entity} {it.external_id}: first_seen={it.first_seen}, "
-                f"last_attempt={it.last_attempt or '—'}"
+                f"  {describe_retry_key(it.entity, it.external_id)} "
+                f"(entity={it.entity} external_id={it.external_id}): "
+                f"first_seen={it.first_seen}, last_attempt={it.last_attempt or '—'}"
             )
             if it.error_message:
                 print(f"    ultimo error: {it.error_message}")
         print()
     finally:
         retry_store.close()
+
+
+def _force_send_pending(retry_store: RetryStore, entity: str, batch_size: int = 500) -> None:
+    """Dispara YA la sincronizacion de `entity`, sin esperar al proximo cron.
+
+    Reusa el mismo camino que `main.py run --entity X`: `_sync_entity` reinyecta
+    los pendientes de retry_queue en la query (via `_op_retry_filter` /
+    `_sg_retry_filter` / `_proveedores_retry_filter`) sin importar la posicion
+    del cursor; para `oc_items`/`clasificaciones` (full_load) el proximo scan
+    ya los trae solos. Si habia filas 'permanent', usar `--requeue --send-now`
+    juntos para que primero vuelvan a 'pending' y despues se reenvien aca mismo.
+    """
+    exporter = None
+    try:
+        exporter = build_exporter(dry_run=False)
+        engine = _build_engine()
+        if hasattr(exporter, "attach_retry_store"):
+            exporter.attach_retry_store(retry_store)
+
+        source_engine = create_source_engine()
+        with source_engine.connect() as conn:
+            source_repo = SourceRepository(conn)
+            if hasattr(exporter, "attach_source"):
+                exporter.attach_source(source_repo)
+            ok, err_msg, metrics = _sync_entity(
+                source_repo, engine, exporter, entity, batch_size, None, False, retry_store,
+            )
+        if ok:
+            logger.info(
+                "retry-queue --send-now [%s]: reenvio forzado terminado OK "
+                "(%d registro(s) procesados en esta corrida).",
+                entity, metrics.get("records_ok", 0),
+            )
+        else:
+            logger.error(
+                "retry-queue --send-now [%s]: termino con errores: %s. "
+                "Revisar el log de arriba y `main.py retry-queue --entity %s` "
+                "para el estado actual de la cola.",
+                entity, err_msg, entity,
+            )
+            raise SystemExit(1)
+    finally:
+        if exporter:
+            exporter.close()
 
 
 # ─── backfill-gastos ──────────────────────────────────────────────────────────
@@ -1067,6 +1210,22 @@ def cmd_daily_report(args) -> None:
         return
 
     summary_data, entity_metrics = aggregate_runs(runs, target_date)
+
+    try:
+        retry_store = RetryStore()
+        try:
+            entities_in_report = sorted(
+                {m.get("entity") for m in entity_metrics if m.get("entity")}
+            )
+            summary_data["retry_detail_end"] = _build_retry_detail(retry_store, entities_in_report)
+        finally:
+            retry_store.close()
+    except Exception:
+        logger.warning(
+            "No se pudo armar el detalle individual de la cola de reintentos para el mail",
+            exc_info=True,
+        )
+
     sent = notify_run_report(summary_data, entity_metrics, dry_run=False)
     if sent:
         remaining = prune_reported(target_date)
@@ -1185,6 +1344,18 @@ def main() -> None:
         help="Descarta exactamente un retry; requiere --entity, --external-id y --note",
     )
     retry_p.add_argument("--note", help="Motivo de auditoria requerido por --dismiss")
+    retry_p.add_argument(
+        "--send-now",
+        action="store_true",
+        help=(
+            "Fuerza el reenvio YA (sin esperar al proximo cron) de lo 'pending' de "
+            "--entity, en este mismo proceso. Combinable con --requeue (primero "
+            "permanent -> pending, despues se reenvia) o --external-id (acota el "
+            "requeue a un registro puntual; el envio siempre reintenta TODO lo "
+            "'pending' de la entidad, que es el comportamiento correcto). "
+            "Requiere --entity."
+        ),
+    )
 
     daily_p = sub.add_parser(
         "daily-report",

@@ -25,6 +25,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from .retry_labels import describe_retry_key
+
 logger = logging.getLogger(__name__)
 
 _TABLE = "retry_queue"
@@ -186,6 +188,15 @@ class RetryStore:
                     payload_snapshot,
                 ),
             )
+            # WARNING desde el primer encolado (no solo al agotar intentos):
+            # el operador tiene que enterarse por log apenas un registro entra
+            # a la cola, con el numero de negocio (OC/OP/retencion/gasto), no
+            # 10 corridas despues cuando ya paso a 'permanent'.
+            logger.warning(
+                "[retry_store] %s encolado (entity=%s external_id=%s, motivo=%s/%s): %s",
+                describe_retry_key(entity, str(external_id)),
+                entity, external_id, reason_code, reason_detail, error_message,
+            )
         else:
             if reason_code in _NO_ATTEMPT_COUNT_REASONS:
                 attempts = existing["attempts"] or 0
@@ -200,9 +211,11 @@ class RetryStore:
                 # esta fila; si vuelven a loguear en cada corrida repetimos el
                 # mismo bug (loop infinito de ruido) solo que del lado local.
                 logger.warning(
-                    "[retry_store] %s %s pasa a 'permanent' tras %d intentos — "
-                    "no se reintenta mas (recuperable con requeue()); ultimo error: %s",
-                    entity, external_id, attempts, error_message,
+                    "[retry_store] %s pasa a 'permanent' tras %d intentos "
+                    "(entity=%s external_id=%s) — no se reintenta mas "
+                    "(recuperable con `retry-queue --requeue`); ultimo error: %s",
+                    describe_retry_key(entity, str(external_id)),
+                    attempts, entity, external_id, error_message,
                 )
             self._conn.execute(
                 f"""
@@ -271,7 +284,8 @@ class RetryStore:
         )
         self._commit()
         logger.warning(
-            "[retry_store] %s %s marcado 'permanent' (terminal): %s",
+            "[retry_store] %s marcado 'permanent' (terminal, entity=%s external_id=%s): %s",
+            describe_retry_key(entity, str(external_id)),
             entity, external_id, error_message,
         )
 

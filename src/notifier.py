@@ -454,7 +454,35 @@ def notify_run_report(
                 f"(desde {row.get('oldest_first_seen') or '—'}, último intento "
                 f"{row.get('last_attempt') or '—'}, máx. intentos {int(row.get('max_attempts', 0) or 0)})"
             )
+    retry_detail = summary_data.get("retry_detail_end") or {}
+    if retry_detail:
         lines.append("")
+        lines.append("  Detalle individual (mas viejos primero — quien necesita atencion):")
+        for ent in sorted(retry_detail):
+            info = retry_detail[ent]
+            rows = info.get("items") or []
+            total = int(info.get("total", len(rows)) or 0)
+            if not rows:
+                continue
+            lines.append(f"    [{ent}] — {total} registro(s) en cola")
+            for row in rows:
+                detail = row.get("reason_detail") or "legacy_unspecified"
+                lines.append(
+                    f"      · {row.get('label', '?')} — {row.get('status', '?')} "
+                    f"({row.get('reason_code', '?')}/{detail}, intento {row.get('attempts', 0)}, "
+                    f"desde {row.get('first_seen') or '—'}, ultimo intento {row.get('last_attempt') or '—'})"
+                )
+                error_message = row.get("error_message")
+                if error_message:
+                    lines.append(f"          error: {str(error_message)[:300]}")
+            if total > len(rows):
+                lines.append(
+                    f"      ... y {total - len(rows)} mas — ver "
+                    f"`main.py retry-queue --entity {ent}` (detalle completo) o el README "
+                    "seccion 'Fiabilidad: cola de reintentos' (como forzar el reenvio)."
+                )
+        lines.append("")
+    if retry_summary:
         lines.append("  Inspección: .venv/bin/python main.py retry-queue --entity <entidad>")
     lines.append("")
     lines.append(SEP)

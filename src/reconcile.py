@@ -52,6 +52,28 @@ RECONCILE_TARGETS: list[ReconcileTarget] = [
         "orden_pago",
         True,
     ),
+    ReconcileTarget(
+        "gastos",
+        "SOLIC_GASTOS",
+        ["EJERCICIO", "DELEG_SOLIC", "NRO_SOLIC"],
+        "gasto",
+        "solic_gastos",
+        True,
+    ),
+    # El universo de origen NO es "todas las OP confirmadas" (ORDEN_PAGO) --
+    # la mayoria no tiene deducciones y jamas genera link ni retry. El universo
+    # correcto es "OPs con al menos una fila en ORDEN_PAGO_DEDUC", que es
+    # exactamente distinct(EJERCICIO, NRO_OP) de esa tabla. Sin este target
+    # una OP migrada pero con sus retenciones todavia pendientes/permanent en
+    # su propia cola no aparecia en ningun reporte de drift.
+    ReconcileTarget(
+        "retenciones",
+        "ORDEN_PAGO_DEDUC",
+        ["EJERCICIO", "NRO_OP"],
+        "retenciones",
+        "retenciones",
+        True,
+    ),
 ]
 
 

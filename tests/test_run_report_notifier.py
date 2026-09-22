@@ -158,3 +158,70 @@ def test_notify_run_report_groups_retry_causes_without_ids(mock_send, mock_is_en
     assert "dependency_missing/payment_not_migrated: 2" in body
     assert "2026-07-01 08:00:00" in body
     assert "external_id" not in body
+
+
+@patch("src.notifier._is_enabled", return_value=True)
+@patch("src.notifier.send_notification")
+def test_notify_run_report_lista_detalle_individual_con_label_legible(mock_send, mock_is_enabled, clean_env):
+    """Pedido explicito del operador: el mail tiene que decir CON QUE OC/OP/
+    retencion se corresponde cada pendiente, no solo un conteo agrupado."""
+    with patch.dict(os.environ, {"NOTIFY_RUN_REPORT": "true", "NOTIFY_SMTP_HOST": "localhost"}):
+        summary_data = {
+            "hostname": "test-server",
+            "start_time": "2026-07-01 10:00:00",
+            "end_time": "2026-07-01 10:05:00",
+            "duration_formatted": "00:05:00",
+            "success": True,
+            "status_label": "CON ADVERTENCIAS",
+            "retry_counts_start": {},
+            "retry_counts_end": {"orden_pago": {"pending": 1}},
+            "retry_summary_end": [],
+            "retry_detail_end": {
+                "orden_pago": {
+                    "items": [
+                        {
+                            "label": "OP 2026-1023",
+                            "reason_code": "backend_rejected",
+                            "reason_detail": "validation_error",
+                            "attempts": 3,
+                            "status": "pending",
+                            "first_seen": "2026-06-30 09:00:00",
+                            "last_attempt": "2026-07-01 09:50:00",
+                            "error_message": "importe negativo",
+                        },
+                    ],
+                    "total": 5,
+                },
+            },
+        }
+    mock_send.return_value = True
+
+    notify_run_report(summary_data, [], dry_run=False)
+
+    _, body = mock_send.call_args.args[:2]
+    assert "OP 2026-1023" in body
+    assert "importe negativo" in body
+    assert "backend_rejected" in body
+    # total=5 pero solo 1 item mostrado -> tiene que avisar que faltan 4 y donde verlos.
+    assert "4 mas" in body
+    assert "retry-queue --entity orden_pago" in body
+
+
+@patch("src.notifier._is_enabled", return_value=True)
+@patch("src.notifier.send_notification")
+def test_notify_run_report_sin_retry_detail_no_rompe(mock_send, mock_is_enabled, clean_env):
+    """Compatibilidad hacia atras: summary_data sin `retry_detail_end` (ej. un
+    run_history.jsonl viejo agregado antes de este cambio) no debe romper."""
+    with patch.dict(os.environ, {"NOTIFY_RUN_REPORT": "true", "NOTIFY_SMTP_HOST": "localhost"}):
+        summary_data = {
+            "hostname": "test-server",
+            "start_time": "2026-07-01 10:00:00",
+            "end_time": "2026-07-01 10:05:00",
+            "duration_formatted": "00:05:00",
+            "success": True,
+            "retry_counts_start": {},
+            "retry_counts_end": {},
+        }
+    mock_send.return_value = True
+
+    assert notify_run_report(summary_data, [], dry_run=False) is True

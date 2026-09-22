@@ -198,9 +198,10 @@ def build_nodes(
 class ClasificacionesMapper:
     """Mapper del clasificador de gasto -> categorias anidadas Paxapos."""
 
-    def __init__(self, *, link_store, lookup_resolver=None):
+    def __init__(self, *, link_store, lookup_resolver=None, retry_store=None):
         self._link_store = link_store
         self._lookup = lookup_resolver  # no usado hoy; simetria con otros mappers
+        self._retry_store = retry_store
 
     def build_payload(
         self,
@@ -237,8 +238,27 @@ class ClasificacionesMapper:
         clasificaciones: list[dict] = []
         raw_by_source_key: dict[str, dict] = {}
 
+        # paxapos#489: clasificaciones es full_load (recorre GASTOS entero cada
+        # corrida) igual que oc_items — sin esta exclusion, un codigo que ya
+        # agoto sus reintentos y paso a 'permanent' se reenviaria (y fallaria)
+        # de nuevo en cada corrida para siempre. Recuperable a mano con
+        # `retry-queue --requeue` si la causa del rechazo se resuelve.
+        permanent_keys: set[str] = set()
+        if self._retry_store is not None:
+            try:
+                permanent_keys = self._retry_store.permanent_external_ids("clasificaciones")
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning(
+                    "Migrator [clasificaciones]: no se pudo leer permanent_external_ids: %s", exc
+                )
+        skipped_permanent = 0
+
         for node in nodes:
             code = node["code"]
+            source_key = json.dumps({"codigo": code}, sort_keys=True)
+            if source_key in permanent_keys:
+                skipped_permanent += 1
+                continue
             payload_row: dict = {
                 "external_id": {"codigo": code},
                 "Clasificacion": {
@@ -268,6 +288,17 @@ class ClasificacionesMapper:
                 "nivel": node["nivel"],
                 "parent_codigo": parent or "",
             }
+
+        if skipped_permanent:
+            logger.info(
+                "Migrator [clasificaciones]: %d codigo(s) omitidos por estar 'permanent' "
+                "en la cola de reintentos (recuperable con `retry-queue --requeue`)",
+                skipped_permanent,
+            )
+
+        if not clasificaciones:
+            logger.info("Migrator [clasificaciones]: lote vacio luego de excluir 'permanent'")
+            return None, {}
 
         payload = {
             "dry_run": dry_run,

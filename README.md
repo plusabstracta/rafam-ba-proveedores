@@ -424,15 +424,46 @@ Revisar tambien los logs del portal Paxapos si el migrator devuelve errores parc
 - **Cola de reintentos**: las filas salteadas por dependencia faltante o rechazadas por el
   receptor (207 por fila) se encolan en `retry_queue` y se **reinyectan en la query** de la
   proxima corrida para `proveedores`, `solic_gastos`, `orden_pago` y `retenciones`
-  (`oc_items` es full-scan y se auto-recupera). Las filas esperando una dependencia no
-  "queman" intentos; las rechazadas pasan a `permanent` tras 10 intentos.
-- **Reencolar lo `permanent`** (`main.py retry-queue`): una fila `permanent` NO se reinyecta
-  mas, asi que cuando el rechazo se arregla del lado de Paxapos hay que devolverla a la cola
-  a mano. `main.py retry-queue [--entity X] [--status permanent]` lista la cola con motivo,
-  intentos y el error del receptor; agregando `--requeue` (opcionalmente con `--external-id`)
-  esas filas vuelven a `pending` con los intentos en 0 y entran en la proxima corrida.
-  Caso tipico: core#406 — el gate de `cantidad > 0` tiraba la OC entera por un renglon con
-  cantidad 0; tras deployar el fix, `main.py retry-queue --entity ordenes_compra --requeue`.
+  (`oc_items` y `clasificaciones` son full-scan y se auto-recuperan solos — con la unica
+  excepcion de lo que ya paso a `permanent`, ver abajo). Las filas esperando una dependencia
+  no "queman" intentos; las rechazadas pasan a `permanent` tras 10 intentos.
+- **Invariante de checkpoint**: el watermark de una entidad NUNCA avanza sobre una fila que no
+  quedo, o bien confirmada por Paxapos, o bien registrada en `retry_queue`. Un batch cuyo POST
+  responde 200 pero trae un error de fila que el pipeline **no puede** encolar (external_id
+  ausente/incompleto en la respuesta del migrator) se trata igual que un batch que lanzo
+  excepcion: el checkpoint de esa entidad se congela por el resto de la corrida (ver
+  `main.py::_sync_entity`, freeze de `advance_partial`) y el error crudo queda en el log a
+  nivel `ERROR` para que se pueda diagnosticar. Sin esta garantia esa fila quedaria fuera de la
+  cola Y detras del cursor: bloqueada para siempre, sin que ni el forzado manual (`--requeue`)
+  pudiera encontrarla, porque nunca se guardo en ningun lado.
+- **Cada encolado se loguea apenas ocurre** (`WARNING`, no solo al llegar a `permanent`), con
+  el numero de negocio en texto plano — "OC 2026-3-1023", "OP 2026-1023", "Retencion de OP
+  2026-1023", "Gasto/Solicitud 2026-5-1023", "Proveedor COD_PROV=1234" — ademas del
+  `entity`/`external_id` crudos para poder filtrar por `grep` o pasarlos tal cual a
+  `--external-id`.
+- **Ver la cola COMPLETA (sin el tope del mail)**: `main.py retry-queue --entity X` (agregar
+  `--status pending` o `--status permanent` para filtrar) lista TODAS las filas de esa entidad,
+  con el label legible, motivo, detalle, intentos, estado, `first_seen`/`last_attempt` y el
+  ultimo error completo del receptor. Sin `--entity` lista toda la cola de todas las entidades.
+- **Reencolar lo `permanent`**: una fila `permanent` NO se reinyecta mas, asi que cuando el
+  rechazo se arregla del lado de Paxapos hay que devolverla a la cola a mano con `--requeue`
+  (opcionalmente con `--external-id` para acotar a una sola fila). Caso tipico: core#406 — el
+  gate de `cantidad > 0` tiraba la OC entera por un renglon con cantidad 0; tras deployar el
+  fix, `main.py retry-queue --entity ordenes_compra --requeue`.
+- **Forzar el reenvio YA (sin esperar al proximo cron)**:
+  - Un registro puntual: `main.py retry-queue --entity retenciones --external-id
+    '{"ejercicio": 2026, "nro_op": 123}' --requeue --send-now` (si ya estaba `pending`, se
+    puede omitir `--requeue`). `--send-now` toma el lock exclusivo (`state/migrator.lock`) y
+    corre la sincronizacion de esa entidad en el mismo proceso — no hace falta un segundo
+    comando ni esperar el cron. Ojo: el envio siempre reintenta TODO lo `pending` de esa
+    entidad (no solo el `--external-id` indicado), que es el comportamiento correcto: la query
+    reinyecta por cola, no por fila suelta.
+  - Toda la cola `permanent` de UNA entidad: `main.py retry-queue --entity oc_items --requeue
+    --send-now`.
+  - Toda la cola `pending` de TODAS las entidades (lo mas comun despues de un fix en Paxapos):
+    `main.py run` sin `--entity` — ya reinyecta automaticamente todo lo `pending` de cada
+    entidad, sin esperar el cron. Para `permanent`, primero `main.py retry-queue --requeue`
+    (sin `--entity` reencola TODAS las entidades) y despues `main.py run`.
 - **Inspeccionar una fila exacta**: `main.py retry-queue --entity retenciones --external-id
   '{"ejercicio": 2026, "nro_op": 123}'` muestra causa, detalle estable, primer registro,
   ultimo intento y error completo.
@@ -443,9 +474,18 @@ Revisar tambien los logs del portal Paxapos si el migrator devuelve errores parc
   El descarte no modifica checkpoints ni links. No usar `reset-*` para limpiar retries: esos
   comandos reinician estado de sincronizacion y pueden provocar reenvios masivos.
 - **Mail diario**: la seccion "COLA DE REINTENTOS" muestra el estado real de la cola al
-  inicio y fin del dia, agrupado por entidad, estado y causa. `CON ADVERTENCIAS` significa
+  inicio y fin del dia, agrupado por entidad, estado y causa, y ademas un **detalle
+  individual** por entidad (los mas viejos primero, con label legible, motivo, intentos y
+  error) acotado a `RAFAM_MAIL_RETRY_DETAIL_LIMIT` filas (default 50) para no volver
+  inmanejable el mail con una cola grande; si hay mas, el mail lo dice explicitamente y
+  apunta a `main.py retry-queue --entity X` para el resto. `CON ADVERTENCIAS` significa
   que solo quedan dependencias pendientes; `CON ERRORES` indica rechazos del backend,
   validaciones, filas `permanent` o fallas tecnicas.
+- **Reconciliacion** (`main.py reconcile`): compara origen RAFAM vs. migrado vs. cola para
+  `proveedores`, `ordenes_compra`, `ordenes_pago`, `gastos` (`SOLIC_GASTOS`) y `retenciones`
+  (universo = OPs con al menos una fila en `ORDEN_PAGO_DEDUC`). `drift != 0` en cualquier fila
+  es señal de perdida silenciosa a investigar — correrlo despues de un incidente grande de
+  backend es la forma mas rapida de confirmar que nada quedo afuera de la cola.
 - **Metricas del mail**: "Filas leidas de RAFAM" es trabajo del scanner, "Items enviados a
   Paxapos" es el payload real y "Altas nuevas" cuenta exclusivamente resultados
   `mode=create`. Actualizaciones, reemplazos, bajas y omitidos se informan por separado.

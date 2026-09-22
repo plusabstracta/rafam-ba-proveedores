@@ -289,6 +289,9 @@ class MigratorExporter(BaseExporter):
         # las OCs 'permanent' (ver OcItemsMapper.build_payload), a diferencia de
         # orden_pago/retenciones que se protegen solo con no-reinyeccion.
         self._oc_mapper._retry_store = retry_store
+        # Mismo motivo: clasificaciones tambien es full_load (ver
+        # ClasificacionesMapper.build_payload).
+        self._clasif_mapper._retry_store = retry_store
 
     # Seccion de la respuesta `results`/`errors` por nombre de entidad de config.
     _RESULT_SECTION_BY_ENTITY = {
@@ -298,6 +301,17 @@ class MigratorExporter(BaseExporter):
         "orden_pago": "ordenes_pago",
         "retenciones": "retenciones",
         "clasificaciones": "clasificaciones",
+    }
+
+    # Algunas entidades embeben MAS de una seccion en el mismo payload/respuesta
+    # (orden_pago manda ordenes_pago[] + gastos[] juntos). Sin este mapeo, un
+    # error de fila de la seccion secundaria (ej: "gastos" dentro de la
+    # respuesta de orden_pago) no matcheaba la seccion primaria del entity y se
+    # descartaba sin encolarse bajo NINGUNA entidad -- ni "orden_pago" ni
+    # "solic_gastos" -- y quedaba perdido para siempre: ningun checkpoint lo
+    # reinyecta jamas porque retry_queue nunca supo que existio.
+    _EXTRA_RESULT_SECTIONS_BY_ENTITY: dict[str, list[tuple[str, str]]] = {
+        "orden_pago": [("gastos", "solic_gastos")],
     }
 
     @staticmethod
@@ -321,30 +335,55 @@ class MigratorExporter(BaseExporter):
             return None
         return json.dumps(key_dict, sort_keys=True)
 
-    def _record_batch_outcomes(self, entity: str, parsed) -> None:
-        """Actualiza la cola de reintentos con el resultado por fila del batch."""
+    def _record_batch_outcomes(self, entity: str, parsed) -> int:
+        """Actualiza la cola de reintentos con el resultado por fila del batch.
+
+        Devuelve la cantidad de errores del receptor que NO se pudieron
+        encolar (external_id ausente o incompleto). `write_batch` usa ese
+        contador para tratar el batch como fallido: sin esto el checkpoint
+        avanzaria igual que si la fila se hubiera migrado y, al no estar en
+        retry_queue, tampoco se reinyecta en la proxima corrida -- la fila se
+        pierde en silencio y para siempre (el sintoma reportado por el
+        usuario: "el checkpoint avanza y el pendiente queda bloqueado").
+        """
         if self._retry_store is None or self._dry_run or not isinstance(parsed, dict):
-            return
-        section = self._RESULT_SECTION_BY_ENTITY.get(entity)
-        if section is None:
-            return
+            return 0
+        primary_section = self._RESULT_SECTION_BY_ENTITY.get(entity)
+        if primary_section is None:
+            return 0
+
+        section_pairs = [(primary_section, entity)]
+        section_pairs.extend(self._EXTRA_RESULT_SECTIONS_BY_ENTITY.get(entity, []))
+        handled_sections = {section for section, _ in section_pairs}
 
         results = parsed.get("results", {})
-        if isinstance(results, dict):
-            for result in results.get(section, []) or []:
-                if not isinstance(result, dict) or not result.get("success"):
-                    continue
-                key = self._outcome_key(section, result.get("external_id"))
-                if key is not None:
-                    self._retry_store.resolve(entity, key)
-
         errors = parsed.get("errors")
-        if isinstance(errors, list):
+        unrecorded = 0
+
+        for section, retry_entity in section_pairs:
+            if isinstance(results, dict):
+                for result in results.get(section, []) or []:
+                    if not isinstance(result, dict) or not result.get("success"):
+                        continue
+                    key = self._outcome_key(section, result.get("external_id"))
+                    if key is not None:
+                        self._retry_store.resolve(retry_entity, key)
+
+            if not isinstance(errors, list):
+                continue
             for err in errors:
                 if not isinstance(err, dict) or err.get("section") != section:
                     continue
                 key = self._outcome_key(section, err.get("external_id"))
                 if key is None:
+                    unrecorded += 1
+                    logger.error(
+                        "Migrator [%s]: error de seccion '%s' SIN external_id utilizable "
+                        "-- no se pudo encolar en retry_queue (se trata este batch como "
+                        "fallido para no perder la fila). Error crudo: %s",
+                        retry_entity, section,
+                        json.dumps(err, ensure_ascii=False, sort_keys=True)[:2000],
+                    )
                     continue
                 message = err.get("message") or "fila rechazada por el receptor"
                 validation_errors = err.get("validationErrors")
@@ -354,15 +393,37 @@ class MigratorExporter(BaseExporter):
                         json.dumps(validation_errors, ensure_ascii=False, sort_keys=True),
                     )
                 reason_code, reason_detail = classify_backend_error(err)
+                # `retry_store.enqueue` ya loguea un WARNING con el label legible
+                # apenas la fila queda pendiente (no solo al llegar a 'permanent').
                 self._retry_store.enqueue(
-                    entity,
+                    retry_entity,
                     key,
                     reason_code,
                     str(message)[:2000],
                     reason_detail=reason_detail,
                 )
                 if reason_code == REASON_DEPENDENCY_MISSING:
-                    self._on_backend_dependency_missing(entity, key, err)
+                    self._on_backend_dependency_missing(retry_entity, key, err)
+
+        # Errores cuya "section" no matchea ninguna seccion que este batch sabe
+        # interpretar: no es necesariamente un bug (el migrator puede listar
+        # secciones que esta entidad ni siquiera envio), pero si el contrato
+        # agrega una seccion nueva y el codigo se olvida de mapearla, mejor
+        # verlo en el log que perderla en silencio como pasaba antes.
+        if isinstance(errors, list):
+            unmapped = [
+                err for err in errors
+                if isinstance(err, dict) and err.get("section") not in handled_sections
+            ]
+            if unmapped:
+                logger.debug(
+                    "Migrator [%s]: %d error(es) de seccion no manejada por este batch "
+                    "(secciones esperadas: %s): %s",
+                    entity, len(unmapped), sorted(handled_sections),
+                    json.dumps(unmapped, ensure_ascii=False, sort_keys=True)[:1000],
+                )
+
+        return unrecorded
 
     def _on_backend_dependency_missing(self, entity: str, key: str, err: dict) -> None:
         """Reacciona a una dependencia que el receptor dice que no existe.
@@ -571,6 +632,7 @@ class MigratorExporter(BaseExporter):
     def write_batch(self, entity: str, columns: list[str], rows: list[tuple]) -> None:
         self._last_parsed = None
         self._reset_last_batch_migrator_metrics()
+        unrecorded_errors = 0
         try:
             self._dispatch_batch(entity, columns, rows)
         finally:
@@ -578,8 +640,23 @@ class MigratorExporter(BaseExporter):
             # `finally` para que un batch que termina en excepcion igual registre
             # lo que el receptor alcanzo a responder. Sin esta llamada la cola
             # nunca drena (las filas migradas OK no se resuelven) ni se encolan
-            # las rechazadas por el receptor.
-            self._record_batch_outcomes(entity, self._last_parsed)
+            # las rechazadas por el receptor. Si `_dispatch_batch` ya lanzo, esta
+            # cuenta se calcula igual pero la excepcion original se sigue
+            # propagando despues del finally (no llega a leerse mas abajo).
+            unrecorded_errors = self._record_batch_outcomes(entity, self._last_parsed)
+        if unrecorded_errors:
+            # Invariante critico (pedido explicito del operador): un batch que
+            # dejo rechazos SIN poder encolarlos no puede contar como exitoso.
+            # Lanzar aca hace que main.py lo trate igual que un batch fallido
+            # (failed_batches += 1) y el checkpoint se congele -- de lo
+            # contrario esas filas quedarian fuera de la cola Y detras del
+            # cursor: bloqueadas para siempre, sin que ni el forzado manual
+            # (retry-queue --requeue) pueda encontrarlas.
+            raise RuntimeError(
+                f"{unrecorded_errors} error(es) del migrator para '{entity}' sin "
+                "external_id utilizable -- no se pudieron encolar en retry_queue "
+                "(ver ERROR previo con el detalle crudo de cada uno)."
+            )
 
     def _dispatch_batch(self, entity: str, columns: list[str], rows: list[tuple]) -> None:
         if entity == "proveedores":
