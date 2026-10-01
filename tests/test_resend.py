@@ -548,7 +548,7 @@ class TestResendRecords:
         assert _by_key(report)["100"].status == main_module.RESEND_OK
         assert resend_env["posts"] == [[100]]
 
-    def test_batch_caido_se_aisla_clave_por_clave(self, resend_env):
+    def test_batch_caido_se_aisla_partiendo_el_batch(self, resend_env):
         resend_env["behavior"]["boom"] = {200}
         report = main_module._resend_records(
             resend_env["retry"], "proveedores", keys=["100", "200", "300"],
@@ -558,7 +558,30 @@ class TestResendRecords:
         assert res["300"].status == main_module.RESEND_OK
         assert res["200"].status == main_module.RESEND_FAILED
         assert "HTTP 500" in res["200"].detail
-        assert resend_env["posts"] == [[100, 200, 300], [100], [200], [300]]
+        # Biseccion: mitades [100, 200] / [300], despues [100] / [200].
+        assert resend_env["posts"] == [[100, 200, 300], [100, 200], [300], [100], [200]]
+        # El aislado queda en la cola (y dispara su mail por registro).
+        [item] = resend_env["retry"].list_items("proveedores")
+        assert (item.external_id, item.reason_code, item.reason_detail) == ("200", "batch_failed", "http_500")
+
+    def test_aislado_que_sigue_fallando_va_solo_y_suma_un_intento(self, resend_env):
+        retry = resend_env["retry"]
+        retry.enqueue("proveedores", "200", "batch_failed", "HTTP 500: Internal Server Error")
+        resend_env["behavior"]["boom"] = {200}
+        report = main_module._resend_records(retry, "proveedores", keys=["100", "200"])
+        assert resend_env["posts"] == [[100], [200]]
+        assert _by_key(report)["100"].status == main_module.RESEND_OK
+        assert _by_key(report)["200"].status == main_module.RESEND_FAILED
+        [item] = retry.list_items("proveedores")
+        assert item.attempts == 2
+
+    def test_dry_run_aisla_sin_tocar_la_cola(self, resend_env):
+        resend_env["behavior"]["boom"] = {200}
+        report = main_module._resend_records(
+            resend_env["retry"], "proveedores", keys=["100", "200"], dry_run=True,
+        )
+        assert _by_key(report)["200"].status == main_module.RESEND_FAILED
+        assert resend_env["retry"].list_items("proveedores") == []
 
     def test_backend_caido_corta_sin_aislar(self, resend_env):
         resend_env["behavior"]["infra"] = True

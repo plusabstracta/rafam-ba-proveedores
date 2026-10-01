@@ -12,7 +12,7 @@ Variables de entorno:
     NOTIFY_FROM             Dirección remitente (default: NOTIFY_SMTP_USER)
     NOTIFY_TO               Destinatarios separados por coma
     NOTIFY_SUBJECT_PREFIX   Prefijo del asunto (default: [RAFAM])
-    NOTIFY_ALERT_TO         Destinatarios de los mails por registro (default: NOTIFY_TO)
+    NOTIFY_ALERT_TO         Destinatarios de los mails por registro y por incidente (default: NOTIFY_TO)
 """
 
 from __future__ import annotations
@@ -350,6 +350,9 @@ def notify_run_report(
     total_invalid = sum(m.get("source_invalid", 0) for m in entity_metrics)
     total_batches_ok = sum(m.get("batches_ok", 0) for m in entity_metrics)
     total_batches_failed = sum(m.get("batches_failed", 0) for m in entity_metrics)
+    total_batches_recovered = sum(int(m.get("batches_recovered", 0) or 0) for m in entity_metrics)
+    total_records_isolated = sum(int(m.get("records_isolated", 0) or 0) for m in entity_metrics)
+    total_bisect_requests = sum(int(m.get("bisect_requests", 0) or 0) for m in entity_metrics)
     runs_count = summary_data.get("runs_count")
     global_speed_min = (total_records / run_mins) if run_mins > 0 else 0.0
     global_speed_sec = (total_records / run_secs) if run_secs > 0 else 0.0
@@ -386,10 +389,21 @@ def notify_run_report(
     lines.append(f"  • Rechazados por Paxapos : {total_migrator_errors:,}")
     lines.append(f"  • Diferidos (dependencia pendiente): {total_migrator_deferred:,}")
     lines.append(f"  • Batches OK / con error : {total_batches_ok} / {total_batches_failed}")
+    if total_batches_recovered or total_records_isolated:
+        lines.append(
+            f"  • Batches caidos recuperados: {total_batches_recovered:,}  "
+            f"({total_records_isolated:,} registro(s) aislado(s) en la cola, "
+            f"{total_bisect_requests:,} request(s) extra)"
+        )
     if summary_data.get("record_alerts_sent") is not None:
         lines.append(
             f"  • Alertas por registro enviadas: {int(summary_data.get('record_alerts_sent') or 0):,}"
             "  (un mail por cada registro rechazado u omitido por datos invalidos)"
+        )
+    if summary_data.get("incident_alerts_sent") is not None:
+        lines.append(
+            f"  • Avisos de incidente enviados: {int(summary_data.get('incident_alerts_sent') or 0):,}"
+            "  (entidad sin sincronizar: Paxapos caido o batch sin aislar)"
         )
     lines.append(f"  • Velocidad global       : {global_speed_min:,.1f} reg/min   ({global_speed_sec:,.1f} reg/s)")
     lines.append("  • Nota                  : filas leídas no equivale a altas nuevas en Paxapos")
@@ -438,6 +452,12 @@ def notify_run_report(
         lines.append(f"  Rechazados por Paxapos  : {migrator_errors:,}")
         lines.append(f"  Diferidos (dependencia) : {int(m.get('migrator_deferred', 0) or 0):,}")
         lines.append(f"  Batches OK / con error  : {m.get('batches_ok', 0)} / {m.get('batches_failed', 0)}")
+        if int(m.get("batches_recovered", 0) or 0) or int(m.get("records_isolated", 0) or 0):
+            lines.append(
+                f"  Batches recuperados     : {int(m.get('batches_recovered', 0) or 0):,}  "
+                f"(registros aislados: {int(m.get('records_isolated', 0) or 0):,}, "
+                f"requests extra: {int(m.get('bisect_requests', 0) or 0):,})"
+            )
         lines.append(f"  Duración                : {duration:.2f} s   ({dur_min:.2f} min)")
         lines.append(f"  Query origen (SQL)      : {query_dur:.2f} s")
         lines.append(f"  Velocidad               : {speed_min:,.1f} reg/min   ({speed_sec:,.1f} reg/s)")
@@ -521,6 +541,15 @@ _REASON_HEADLINE = {
     "batch_failed": "fallo el envio (aislado de un batch caido)",
 }
 
+# Contexto extra en el mail por registro, segun el motivo.
+_REASON_NOTE = {
+    "batch_failed": (
+        "El batch donde iba fallo entero; se partio hasta encontrar que este registro falla\n"
+        "SOLO (los demas se enviaron bien). Suele ser un dato que hace fallar a Paxapos:\n"
+        "revisar el log de Paxapos a la hora del ultimo intento."
+    ),
+}
+
 _CLI = ".venv/bin/python main.py"
 
 
@@ -570,6 +599,10 @@ def notify_record_failure(item, *, max_attempts: int) -> bool:
         SUB,
     ]
     lines.extend(f"  {line}" for line in str(item.error_message or "sin mensaje").splitlines())
+    note = _REASON_NOTE.get(item.reason_code)
+    if note:
+        lines.append("")
+        lines.extend(f"  {line}" for line in note.splitlines())
     lines += [
         "",
         "QUE HACER",
@@ -621,5 +654,109 @@ def notify_record_failures_overflow(items) -> bool:
         "",
         f"Ver todo: {_CLI} retry-queue --entity <entidad>",
         f"Reenviar: {_CLI} resend --entity <entidad> --from-queue --status all",
+    ]
+    return send_notification(subject, "\n".join(lines), recipients=_alert_recipients())
+
+
+# ─── Alertas por incidente (una entidad entera no se sincroniza) ─────────────
+
+_INCIDENT_HEADLINE = {
+    "backend": "Paxapos (o la red) falla: no son los datos",
+    "batch": "un batch se cae y no se pudo aislar el registro",
+    "error": "falla antes de enviar a Paxapos",
+}
+
+_INCIDENT_WHAT_TO_DO = {
+    "backend": [
+        "1. Revisar que Paxapos responda (y su log a esa hora).",
+        "2. En RAFAM no hay nada que corregir: cuando Paxapos vuelva, la proxima corrida",
+        "   reenvia sola lo atrasado. Los registros NO gastan intentos por esto.",
+    ],
+    "batch": [
+        "1. Ver en el log de la corrida el batch que falla (buscar 'FALLO').",
+        "2. Probar de a uno, con --dry-run, los registros que quedaron sin aislar (si figuran arriba).",
+        "3. Si es un dato puntual, corregirlo en RAFAM o descartarlo; el batch se destraba solo.",
+    ],
+    "error": [
+        "1. Ver el log de la corrida: la entidad no llego a enviar (conexion a RAFAM,",
+        "   estado local en state/, configuracion).",
+    ],
+}
+
+
+def _incident_label(entity: str) -> str:
+    return "La corrida" if entity == "corrida" else entity
+
+
+def notify_incident(entity: str, incident: dict) -> bool:
+    """Mail al abrir un incidente (ver src/incident_alerts.py). Uno por incidente."""
+    kind = str(incident.get("kind") or "error")
+    headline = _INCIDENT_HEADLINE.get(kind, kind)
+    since = utc_sql_to_local(incident.get("since"))
+    label = _incident_label(entity)
+    subject = f"{label}: NO SE ESTA SINCRONIZANDO — {headline}"
+
+    SEP = "=" * 70
+    SUB = "-" * 70
+    lines = [
+        SEP,
+        f"{label.upper()} NO SE ESTA SINCRONIZANDO CON PAXAPOS",
+        SEP,
+        f"Entidad        : {entity}",
+        f"Que pasa       : {headline}",
+        f"Desde          : {since} (hora local)",
+        f"Corridas       : {int(incident.get('runs') or 0)} seguida(s) con el mismo problema",
+        f"Servidor       : {socket.gethostname()}",
+        "",
+        "ULTIMO ERROR",
+        SUB,
+    ]
+    lines.extend(f"  {line}" for line in str(incident.get("detail") or "sin detalle").splitlines()[:40])
+    keys = incident.get("keys") or []
+    if keys:
+        lines += ["", "REGISTROS DEL BATCH QUE QUEDARON SIN AISLAR", SUB]
+        for key_label in keys:
+            lines.append(f'  {_CLI} resend --entity {entity} --key "{key_label}" --dry-run')
+    lines += [
+        "",
+        "QUE SIGNIFICA",
+        SUB,
+        "  No se pierde nada: el cursor de la entidad queda congelado y las filas se",
+        "  vuelven a leer en cada corrida hasta que pasen.",
+        "",
+        "QUE HACER",
+        SUB,
+    ]
+    lines.extend(f"  {line}" for line in _INCIDENT_WHAT_TO_DO.get(kind, _INCIDENT_WHAT_TO_DO["error"]))
+    if entity != "corrida":
+        lines += ["", "  Forzar una corrida ahora:", f"       {_CLI} run --entity {entity}"]
+    lines += [
+        "",
+        SEP,
+        "Se avisa una vez por incidente; cuando se normalice llega otro mail.",
+    ]
+    return send_notification(subject, "\n".join(lines), recipients=_alert_recipients())
+
+
+def notify_incident_resolved(entity: str, incident: dict, *, resolved_at: str) -> bool:
+    """Mail al cerrarse un incidente que ya se habia avisado."""
+    kind = str(incident.get("kind") or "error")
+    label = _incident_label(entity)
+    since = utc_sql_to_local(incident.get("since"))
+    subject = f"{label}: normalizado (con fallas desde {since})"
+    SEP = "=" * 70
+    lines = [
+        SEP,
+        f"{label.upper()} VOLVIO A SINCRONIZAR",
+        SEP,
+        f"Entidad        : {entity}",
+        f"Problema       : {_INCIDENT_HEADLINE.get(kind, kind)}",
+        f"Desde          : {since} (hora local)",
+        f"Hasta          : {utc_sql_to_local(resolved_at)} (hora local)",
+        f"Corridas       : {int(incident.get('runs') or 0)} con fallas",
+        "",
+        "La ultima corrida termino sin batches caidos: lo atrasado ya se envio.",
+        "Si quedo algun registro rechazado, llega (o llego) su propio mail.",
+        SEP,
     ]
     return send_notification(subject, "\n".join(lines), recipients=_alert_recipients())

@@ -27,14 +27,14 @@ from dotenv import load_dotenv
 from sqlalchemy.exc import SQLAlchemyError
 
 from src.batch_grouping import GROUPED_BATCH_FIELDS, ENTITY_LINK_NAMES, iter_grouped_batches
-from src.auth_circuit_breaker import AuthCircuitOpenError
-from src.backend_errors import BackendInfraError
+from src.batch_isolation import BatchIsolator, group_rows_by_key
 from src.checkpoint_store import CheckpointStore
 from src.config import ENTITY_CONFIGS, is_cod_prov_excluded
 from src.db import create_source_engine
 from src.entity_link_store import EntityLinkStore
 from src.error_formatting import describe_exception, format_exception_context
 from src.exporter import BaseExporter, build_exporter, fetch_migrator_lookups, fetch_migrator_spec
+from src.incident_alerts import RUN_ENTITY, update_incidents
 from src.gateway_mapper import map_proveedor_migrator_row
 from src.logging_config import setup_file_logging
 from src.models import Checkpoint
@@ -45,7 +45,6 @@ from src.retry_labels import (
     describe_retry_key,
     parse_record_key,
     record_base_key,
-    record_key_from_row,
 )
 from src.retry_store import STATUS_PENDING, STATUS_PERMANENT, RetryStore
 from src.run_history import record_run
@@ -328,6 +327,10 @@ def _sync_entity(
     infra_streak = 0
     infra_abort_after = _infra_abort_after()
     abort_entity = False
+    # Batches que quedaron caidos por el backend/red (vs. por un registro que
+    # no se pudo aislar): decide el tipo de incidente que se avisa por mail.
+    infra_failed_batches = 0
+    unresolved_keys: list[str] = []
     query_duration = 0.0
     total = 0
     migrator_sent = 0
@@ -367,6 +370,11 @@ def _sync_entity(
         "source_invalid": 0,
         "batches_ok": 0,
         "batches_failed": 0,
+        # Batches que fallaron enteros y se recuperaron aislando el/los
+        # registros que los rompian (src/batch_isolation.py).
+        "batches_recovered": 0,
+        "records_isolated": 0,
+        "bisect_requests": 0,
         "query_duration_secs": 0.0,
         "duration_secs": 0.0,
         "batch_times": [],
@@ -379,6 +387,12 @@ def _sync_entity(
         "migrator_error": None,    # mensaje crudo devuelto por el migrator
         # "backend_infra" cuando el fallo es del server Paxapos (SQL/PHP), no de los datos.
         "error_kind": None,
+        # Incidente de la entidad para src/incident_alerts.py (None = sin incidente):
+        # "backend" (Paxapos/red caidos), "batch" (batch caido sin aislar) o
+        # "error" (la entidad no pudo correr).
+        "incident_kind": None,
+        "incident_detail": None,
+        "incident_keys": [],
     }
 
     try:
@@ -436,28 +450,41 @@ def _sync_entity(
                 except (TypeError, ValueError):
                     pass
 
+        isolator = BatchIsolator(
+            exporter,
+            entity,
+            retry_store=retry_store,
+            dry_run=dry_run,
+            delay=batch_delay,
+            after_write=lambda _exc: record_migrator_metrics(),
+        )
+
         def process_batch(batch: list[tuple]) -> None:
             nonlocal last_id, last_ts, total, batch_count, failed_batches, last_batch_error, last_batch_error_detail, batches_ok
-            nonlocal infra_streak, abort_entity
+            nonlocal infra_streak, abort_entity, infra_failed_batches
             bid, bts = engine.extract_cursor_values(columns, batch, entity)
             if bid is not None:
                 last_id = max(last_id, bid) if last_id is not None else bid
             if bts is not None:
                 last_ts = max(last_ts, bts) if last_ts is not None else bts
 
-            if batch_delay > 0 and batch_count > 0:
-                time.sleep(batch_delay)
-
+            # El sleep entre requests (RAFAM_SYNC_BATCH_DELAY_SECONDS) lo hace
+            # el isolator, y solo si el request anterior llego a hacer un POST.
             t_batch_start = time.monotonic()
-            try:
-                exporter.write_batch(entity, columns, batch)
-                record_migrator_metrics()
-                batch_times.append(time.monotonic() - t_batch_start)
+            outcome = isolator.write(columns, batch)
+            batch_times.append(time.monotonic() - t_batch_start)
+            if outcome.recovered:
+                logger.warning(
+                    "[%-11s] %s — batch #%d (%d filas): %d registro(s) fallan solos y quedaron en la cola "
+                    "como batch_failed; el resto se envio (%d request(s) extra). Error: %s",
+                    mode, entity, batch_count + 1, len(batch), len(outcome.isolated),
+                    outcome.requests, outcome.first_error,
+                )
+            if outcome.ok:
                 batches_ok += 1
                 infra_streak = 0
-            except Exception as exc:
-                record_migrator_metrics()
-                batch_times.append(time.monotonic() - t_batch_start)
+            else:
+                exc = outcome.error
                 failed_batches += 1
                 last_batch_error = str(exc)
                 # Capturar contexto detallado (clase, archivo/línea, traceback,
@@ -471,19 +498,21 @@ def _sync_entity(
                 metrics["error_location"] = _info["error_location"]
                 metrics["error_trace"] = last_batch_error_detail
                 metrics["migrator_error"] = _info["error_message"]
-                if isinstance(exc, BackendInfraError):
+                if outcome.infra:
                     metrics["error_kind"] = "backend_infra"
+                    infra_failed_batches += 1
                     infra_streak += 1
                     if infra_streak >= infra_abort_after:
                         abort_entity = True
                 else:
                     infra_streak = 0
+                    unresolved_keys.extend(k for k in outcome.unresolved if k is not None)
                 logger.error(
                     "[%-11s] %s — batch #%d (%d filas) FALLO: %s. %s",
                     mode, entity, batch_count + 1, len(batch), exc,
                     "Backend caido: se corta la entidad por esta corrida." if abort_entity
                     else "Continuando con el siguiente batch.",
-                    exc_info=not isinstance(exc, BackendInfraError),
+                    exc_info=None if outcome.infra else exc,
                 )
                 batch_count += 1
                 return
@@ -551,6 +580,17 @@ def _sync_entity(
         metrics["batches_ok"] = batches_ok
         metrics["batches_failed"] = failed_batches
         metrics["batch_times"] = batch_times
+        metrics["batches_recovered"] = isolator.batches_recovered
+        metrics["records_isolated"] = isolator.records_isolated
+        metrics["bisect_requests"] = isolator.extra_requests
+        records_isolated = isolator.records_isolated
+
+        if failed_batches > 0 and not dry_run:
+            metrics["incident_kind"] = "backend" if infra_failed_batches else "batch"
+            metrics["incident_detail"] = last_batch_error
+            metrics["incident_keys"] = [
+                describe_retry_key(entity, key) for key in dict.fromkeys(unresolved_keys)
+            ][:10]
 
         if dry_run:
             logger.info("[DRY RUN   ] %s — %d registros (sin avanzar checkpoint)", entity, total)
@@ -559,6 +599,7 @@ def _sync_entity(
                 failed_batches > 0
                 or migrator_errors > 0
                 or migrator_outcomes["invalid"] > 0
+                or records_isolated > 0
                 or retry_lookup_failed_detail is not None
             ):
                 # Hubo batches que fallaron pero la corrida siguió. Marcamos la
@@ -578,6 +619,11 @@ def _sync_entity(
                         f"{migrator_outcomes['invalid']} fila(s) de origen no pudieron mapearse; "
                         "revisar errores del mapper"
                     )
+                elif records_isolated > 0:
+                    msg = (
+                        f"{records_isolated} registro(s) hacian fallar su batch entero; se aislaron en "
+                        "la cola de reintentos (batch_failed) y el resto del batch se envio"
+                    )
                 elif migrator_errors > 0:
                     msg = f"Paxapos rechazo {migrator_errors} item(s); quedaron registrados en la cola de reintentos"
                 else:
@@ -592,11 +638,12 @@ def _sync_entity(
                         "[%-11s] %s — %d filas leidas, %d batch(es) con error. Ultimo: %s",
                         mode, entity, total, failed_batches, last_batch_error,
                     )
-                elif migrator_errors > 0 or migrator_outcomes["invalid"] > 0:
+                elif migrator_errors > 0 or migrator_outcomes["invalid"] > 0 or records_isolated > 0:
                     logger.error(
                         "[%-11s] %s — %d filas leidas, %d rechazo(s) de Paxapos, "
-                        "%d fila(s) invalidas; revisar log y cola de reintentos.",
-                        mode, entity, total, migrator_errors, migrator_outcomes["invalid"],
+                        "%d fila(s) invalidas, %d registro(s) aislados de batches caidos; "
+                        "revisar log y cola de reintentos.",
+                        mode, entity, total, migrator_errors, migrator_outcomes["invalid"], records_isolated,
                     )
                 else:
                     logger.error("[%-11s] %s — %s", mode, entity, msg)
@@ -614,6 +661,8 @@ def _sync_entity(
     except Exception as exc:
         if not dry_run:
             engine.mark_error(entity, str(exc))
+            metrics["incident_kind"] = "error"
+            metrics["incident_detail"] = str(exc)
         logger.error("[%-11s] %s — ERROR: %s", mode, entity, exc, exc_info=True)
         _info = describe_exception(exc)
         metrics["success"] = False
@@ -668,6 +717,7 @@ def _cmd_run_locked(args) -> None:
     retry_summary_start = []
     retry_summary_end = []
     record_alerts_sent = 0
+    incident_alerts_sent = 0
     entity_metrics = []
 
     if _EJERCICIO_MIN:
@@ -755,6 +805,10 @@ def _cmd_run_locked(args) -> None:
         # omitido por datos invalidos (el resumen diario sigue igual).
         if retry_store and not args.dry_run:
             record_alerts_sent = _flush_record_alerts(retry_store)
+        # Un mail por incidente si una entidad entera no se pudo sincronizar
+        # (Paxapos caido, batch que no se pudo aislar) y otro al normalizarse.
+        if not args.dry_run:
+            incident_alerts_sent = _update_incidents(entity_metrics)
 
         # Calcular duración total
         run_duration_secs = time.monotonic() - run_t0
@@ -785,6 +839,7 @@ def _cmd_run_locked(args) -> None:
                 "retry_summary_start": retry_summary_start,
                 "retry_summary_end": retry_summary_end,
                 "record_alerts_sent": record_alerts_sent,
+                "incident_alerts_sent": incident_alerts_sent,
             }
             record_run(summary_data, entity_metrics)
         else:
@@ -800,6 +855,7 @@ def _cmd_run_locked(args) -> None:
                 "retry_summary_start": retry_summary_start,
                 "retry_summary_end": retry_summary_end,
                 "record_alerts_sent": record_alerts_sent,
+                "incident_alerts_sent": incident_alerts_sent,
             }
             record_run(summary_data, entity_metrics)
 
@@ -820,6 +876,10 @@ def _cmd_run_locked(args) -> None:
             "success": False,
             "error_msg": f"Excepción general de ejecución: {exc}",
         }
+        if not args.dry_run:
+            summary_data["incident_alerts_sent"] = _update_incidents(
+                entity_metrics, run_error=f"{type(exc).__name__}: {exc}",
+            )
         try:
             record_run(summary_data, entity_metrics)
         except Exception:
@@ -1077,6 +1137,30 @@ def _flush_record_alerts(retry_store: RetryStore) -> int:
         return 0
 
 
+def _update_incidents(entity_metrics: list[dict], run_error: str | None = None) -> int:
+    """Abre/cierra incidentes por entidad; un fallo del mail nunca corta la corrida."""
+    observations = [
+        {
+            "entity": m.get("entity"),
+            "kind": m.get("incident_kind"),
+            "detail": m.get("incident_detail"),
+            "keys": m.get("incident_keys") or [],
+        }
+        for m in entity_metrics
+        if m.get("entity")
+    ]
+    observations.append({
+        "entity": RUN_ENTITY,
+        "kind": "error" if run_error else None,
+        "detail": run_error,
+    })
+    try:
+        return update_incidents(observations)
+    except Exception:  # noqa: BLE001 - las alertas no pueden romper la corrida
+        logger.warning("No se pudieron actualizar los incidentes", exc_info=True)
+        return 0
+
+
 def _force_send_pending(retry_store: RetryStore, entity: str, batch_size: int | None = None) -> None:
     """Reenvia YA lo 'pending' de `entity` en la cola, sin esperar al proximo cron.
 
@@ -1113,7 +1197,8 @@ RESEND_NOT_SENT = "NO ENVIADO"
 # Espera maxima del lock para comandos manuales (una corrida de cron puede
 # tardar varios minutos).
 _RESEND_LOCK_WAIT_SECONDS = 600
-# Requests extra para aislar, clave por clave, un batch que fallo entero.
+# Requests extra por batch para aislar (biseccion) el registro que hace
+# fallar un batch entero.
 _RESEND_ISOLATION_MAX_REQUESTS = 50
 _RESEND_KEYS_BATCH_SIZE = 50
 _RESEND_WINDOW_BATCH_SIZE = 500
@@ -1159,14 +1244,6 @@ class ResendReport:
         return 1 if any(r.status in failing for r in self.results) else 0
 
 
-def _is_infra_failure(exc: Exception) -> bool:
-    """Fallo del backend/red (no de los datos): no tiene sentido aislar por clave."""
-    if isinstance(exc, (BackendInfraError, AuthCircuitOpenError, TimeoutError, ConnectionError)):
-        return True
-    msg = str(exc)
-    return msg.startswith("URL error") or "timed out" in msg.lower()
-
-
 def _queue_keys(retry_store: RetryStore, entity: str, status: str | None) -> list[str]:
     """Claves base de la cola de `entity` (dedup, en orden de la cola)."""
     keys: list[str] = []
@@ -1200,7 +1277,6 @@ class _ResendRun:
         # de omision se deduce de la fila cruda.
         self.raw_by_key: dict[str, dict] = {}
         self.aborted_reason: str | None = None
-        self.isolation_budget = _RESEND_ISOLATION_MAX_REQUESTS
 
     def see(self, key: str | None) -> None:
         if key is not None and key not in self._seen_set:
@@ -1217,26 +1293,10 @@ class _ResendRun:
                 self.outcomes.setdefault(base, []).append(outcome)
 
 
-def _group_rows_by_key(entity: str, columns: list[str], batch: list[tuple]) -> dict[str | None, list[tuple]]:
-    groups: dict[str | None, list[tuple]] = {}
-    for row in batch:
-        groups.setdefault(record_key_from_row(entity, dict(zip(columns, row))), []).append(row)
-    return groups
-
-
-def _resend_write(exporter, run: _ResendRun, columns: list[str], rows: list[tuple]) -> Exception | None:
-    """Un POST: junta los resultados por fila. Devuelve la excepcion si fallo."""
-    try:
-        exporter.write_batch(run.entity, columns, rows)
-        return None
-    except Exception as exc:  # noqa: BLE001 - se reporta por clave
-        return exc
-    finally:
-        run.add_outcomes(exporter.get_last_batch_outcomes())
-
-
-def _resend_batch(exporter, run: _ResendRun, columns: list[str], batch: list[tuple]) -> None:
-    groups = _group_rows_by_key(run.entity, columns, batch)
+def _resend_batch(isolator: BatchIsolator, run: _ResendRun, columns: list[str], batch: list[tuple]) -> None:
+    """Manda un batch del reenvio; si cae entero, el isolator aisla el registro
+    que lo rompe (y lo deja en la cola como batch_failed, salvo en dry-run)."""
+    groups = group_rows_by_key(run.entity, columns, batch)
     keys = [k for k in groups if k is not None]
     for key in keys:
         run.see(key)
@@ -1248,44 +1308,20 @@ def _resend_batch(exporter, run: _ResendRun, columns: list[str], batch: list[tup
             run.not_sent[key] = run.aborted_reason
         return
 
-    exc = _resend_write(exporter, run, columns, batch)
-    if exc is None:
+    result = isolator.write(columns, batch)
+    for key, message in result.isolated.items():
+        run.failed[key] = message
+    if result.ok:
         return
-
-    pending = [k for k in keys if k not in run.outcomes]
-    if _is_infra_failure(exc):
-        run.aborted_reason = f"backend/red caido, se corto el reenvio: {exc}"
+    pending = [k for k in result.unresolved if k is not None and k not in run.outcomes]
+    if result.infra:
+        run.aborted_reason = f"backend/red caido, se corto el reenvio: {result.error}"
         logger.error("resend [%s]: %s", run.entity, run.aborted_reason)
         for key in pending:
             run.not_sent[key] = run.aborted_reason
-        return
-
-    if len(pending) <= 1 or run.isolation_budget <= 0:
+    else:
         for key in pending:
-            run.failed[key] = str(exc)
-        return
-
-    # Un registro roto no tiene que hundir a los demas: reintentar uno por uno.
-    logger.warning(
-        "resend [%s]: el batch de %d registros fallo (%s); reintentando de a uno para aislar el que falla.",
-        run.entity, len(pending), exc,
-    )
-    for key in pending:
-        if run.aborted_reason is not None:
-            run.not_sent[key] = run.aborted_reason
-            continue
-        if run.isolation_budget <= 0:
-            run.failed[key] = f"{exc} (sin aislar: se agoto el tope de {_RESEND_ISOLATION_MAX_REQUESTS} reintentos)"
-            continue
-        run.isolation_budget -= 1
-        single_exc = _resend_write(exporter, run, columns, groups[key])
-        if single_exc is None:
-            continue
-        if _is_infra_failure(single_exc):
-            run.aborted_reason = f"backend/red caido, se corto el reenvio: {single_exc}"
-            run.not_sent[key] = run.aborted_reason
-        elif key not in run.outcomes:
-            run.failed[key] = str(single_exc)
+            run.failed[key] = str(result.error)
 
 
 def _iter_resend_batches(result, columns: list[str], entity: str, batch_size: int):
@@ -1315,6 +1351,10 @@ def _classify_resend_key(
         if errors:
             detail = " ; ".join(dict.fromkeys(o.message or "rechazado sin mensaje" for o in errors))
             return ResendResult(key, RESEND_REJECTED, detail)
+    # Su request fallo (aunque Paxapos haya llegado a responder algo de la fila).
+    if key in run.failed:
+        return ResendResult(key, RESEND_FAILED, run.failed[key])
+    if outcomes:
         not_found = [o for o in outcomes if o.mode == "skipped_not_found"]
         if not_found:
             return ResendResult(
@@ -1328,8 +1368,6 @@ def _classify_resend_key(
         if dry_run:
             detail += " (dry-run: Paxapos no persiste)"
         return ResendResult(key, RESEND_OK, detail)
-    if key in run.failed:
-        return ResendResult(key, RESEND_FAILED, run.failed[key])
     if key in run.not_sent:
         return ResendResult(key, RESEND_NOT_SENT, run.not_sent[key])
     if key not in run._seen_set:
@@ -1404,8 +1442,16 @@ def _resend_records(
             )
             result = source_repo.execute(stmt)
             columns = list(result.keys())
+            isolator = BatchIsolator(
+                exporter,
+                entity,
+                retry_store=retry_store,
+                dry_run=dry_run,
+                max_requests=_RESEND_ISOLATION_MAX_REQUESTS,
+                after_write=lambda _exc: run.add_outcomes(exporter.get_last_batch_outcomes()),
+            )
             for batch in _iter_resend_batches(result, columns, entity, batch_size):
-                _resend_batch(exporter, run, columns, batch)
+                _resend_batch(isolator, run, columns, batch)
     finally:
         exporter.close()
 

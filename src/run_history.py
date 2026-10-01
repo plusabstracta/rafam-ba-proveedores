@@ -100,6 +100,7 @@ def record_run(summary_data: dict, entity_metrics: list[dict]) -> None:
         "retry_summary_start": summary_data.get("retry_summary_start") or [],
         "retry_summary_end": summary_data.get("retry_summary_end") or [],
         "record_alerts_sent": int(summary_data.get("record_alerts_sent") or 0),
+        "incident_alerts_sent": int(summary_data.get("incident_alerts_sent") or 0),
         "entities": [
             {
                 "entity": m.get("entity"),
@@ -121,6 +122,9 @@ def record_run(summary_data: dict, entity_metrics: list[dict]) -> None:
                 "source_invalid": m.get("source_invalid", 0),
                 "batches_ok": m.get("batches_ok", 0),
                 "batches_failed": m.get("batches_failed", 0),
+                "batches_recovered": m.get("batches_recovered", 0),
+                "records_isolated": m.get("records_isolated", 0),
+                "bisect_requests": m.get("bisect_requests", 0),
                 "duration_secs": m.get("duration_secs", 0.0),
                 "query_duration_secs": m.get("query_duration_secs", 0.0),
                 # Resumen de latencia por batch: la lista cruda no se guarda
@@ -229,6 +233,9 @@ def aggregate_runs(runs: list[dict], date_str: str) -> tuple[dict, list[dict]]:
                     "source_invalid": 0,
                     "batches_ok": 0,
                     "batches_failed": 0,
+                    "batches_recovered": 0,
+                    "records_isolated": 0,
+                    "bisect_requests": 0,
                     "duration_secs": 0.0,
                     "query_duration_secs": 0.0,
                     "batch_times": [],
@@ -261,6 +268,8 @@ def aggregate_runs(runs: list[dict], date_str: str) -> tuple[dict, list[dict]]:
                 agg[key] += int(m.get(key, 0) or 0)
             agg["batches_ok"] += int(m.get("batches_ok", 0) or 0)
             agg["batches_failed"] += int(m.get("batches_failed", 0) or 0)
+            for key in ("batches_recovered", "records_isolated", "bisect_requests"):
+                agg[key] += int(m.get(key, 0) or 0)
             agg["duration_secs"] += float(m.get("duration_secs", 0.0) or 0.0)
             agg["query_duration_secs"] += float(m.get("query_duration_secs", 0.0) or 0.0)
             agg["batch_latency"] = merge_latency(
@@ -304,7 +313,7 @@ def aggregate_runs(runs: list[dict], date_str: str) -> tuple[dict, list[dict]]:
 
     retry_has_errors = any(
         row.get("status") == "permanent"
-        or row.get("reason_code") in {"backend_rejected", "backend_unavailable", "validation_client"}
+        or row.get("reason_code") in {"backend_rejected", "backend_unavailable", "validation_client", "batch_failed"}
         for row in retry_summary_end
     )
     retry_has_warnings = bool(retry_end or retry_summary_end)
@@ -330,5 +339,6 @@ def aggregate_runs(runs: list[dict], date_str: str) -> tuple[dict, list[dict]]:
         "retry_summary_start": retry_summary_start,
         "retry_summary_end": retry_summary_end,
         "record_alerts_sent": sum(int(r.get("record_alerts_sent") or 0) for r in runs),
+        "incident_alerts_sent": sum(int(r.get("incident_alerts_sent") or 0) for r in runs),
     }
     return summary_data, entity_metrics

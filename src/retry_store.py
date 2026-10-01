@@ -21,11 +21,12 @@ import os
 import sqlite3
 import getpass
 import socket
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from .retry_labels import describe_retry_key
+from .retry_labels import describe_retry_key, record_base_key
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +93,8 @@ class RetryStore:
         max_attempts: int = DEFAULT_MAX_ATTEMPTS,
     ):
         self._max_attempts = max_attempts
+        # Filas que ya sumaron un intento dentro del `attempt_scope` activo.
+        self._scope_counted: set[tuple[str, str]] | None = None
         if conn is not None:
             # Conexion compartida (ej. la del EntityLinkStore) → permite que el
             # enqueue/dequeue participe de la misma transaccion del batch.
@@ -169,6 +172,24 @@ class RetryStore:
 
     # ── escritura ─────────────────────────────────────────────────────────
 
+    @contextmanager
+    def attempt_scope(self):
+        """Dentro del bloque cada fila suma a lo sumo UN intento.
+
+        Al aislar un batch caido (src/batch_isolation.py) las mismas filas se
+        vuelven a mapear y enviar varias veces en la misma corrida; sin esto un
+        registro invalido sumaria un intento por cada sub-batch y pasaria a
+        'permanent' en una o dos corridas en vez de ``max_attempts``.
+        """
+        if self._scope_counted is not None:
+            yield
+            return
+        self._scope_counted = set()
+        try:
+            yield
+        finally:
+            self._scope_counted = None
+
     def enqueue(
         self,
         entity: str,
@@ -191,7 +212,10 @@ class RetryStore:
             (entity, str(external_id)),
         ).fetchone()
 
+        scope_key = (entity, str(external_id))
         if existing is None:
+            if self._scope_counted is not None:
+                self._scope_counted.add(scope_key)
             self._conn.execute(
                 f"""
                 INSERT INTO {_TABLE}
@@ -222,9 +246,15 @@ class RetryStore:
             if reason_code in _NO_ATTEMPT_COUNT_REASONS:
                 attempts = existing["attempts"] or 0
                 status = STATUS_PENDING
+            elif self._scope_counted is not None and scope_key in self._scope_counted:
+                # Ya sumo su intento en este batch (ver attempt_scope).
+                attempts = existing["attempts"] or 0
+                status = existing["status"]
             else:
                 attempts = (existing["attempts"] or 0) + 1
                 status = STATUS_PERMANENT if attempts >= self._max_attempts else STATUS_PENDING
+                if self._scope_counted is not None:
+                    self._scope_counted.add(scope_key)
             if status == STATUS_PERMANENT and existing["status"] != STATUS_PERMANENT:
                 # paxapos#489: logueamos la transicion UNA sola vez (aca, no en
                 # cada corrida). De aca en mas los callers que arman el payload
@@ -319,7 +349,25 @@ class RetryStore:
             f"DELETE FROM {_TABLE} WHERE entity = ? AND external_id = ?",
             (entity, str(external_id)),
         )
+        # Un gasto con varios comprobantes vuelve con `nro_comprob` en el
+        # external_id, pero si se aislo de un batch caido quedo encolado con
+        # la clave base de la solicitud.
+        base = record_base_key(entity, str(external_id))
+        if base is not None and base != str(external_id):
+            self._conn.execute(
+                f"DELETE FROM {_TABLE} WHERE entity = ? AND external_id = ? AND reason_code = ?",
+                (entity, base, REASON_BATCH_FAILED),
+            )
         self._commit()
+
+    def resolve_if_reason(self, entity: str, external_id: str, reason_code: str) -> bool:
+        """Saca la fila solo si sigue en la cola por ``reason_code``."""
+        cursor = self._conn.execute(
+            f"DELETE FROM {_TABLE} WHERE entity = ? AND external_id = ? AND reason_code = ?",
+            (entity, str(external_id), reason_code),
+        )
+        self._commit()
+        return cursor.rowcount > 0
 
     def requeue(self, entity: str | None = None, external_id: str | None = None) -> int:
         """Devuelve filas 'permanent' a 'pending' con los intentos en cero.

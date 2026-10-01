@@ -436,6 +436,24 @@ Revisar tambien los logs del portal Paxapos si el migrator devuelve errores parc
   nivel `ERROR` para que se pueda diagnosticar. Sin esta garantia esa fila quedaria fuera de la
   cola Y detras del cursor: bloqueada para siempre, sin que ni el forzado manual (`--requeue`)
   pudiera encontrarla, porque nunca se guardo en ningun lado.
+- **Batch caido = se parte hasta aislar el registro** (`src/batch_isolation.py`): si un batch
+  falla entero por algo que no es infraestructura (HTTP 500, respuesta invalida, el mapper que
+  explota con un dato raro), se parte en mitades por clave de negocio (una OC con sus items,
+  una OP con sus gastos) hasta encontrar el registro que falla **solo**. Ese queda en la cola
+  como `batch_failed` (con su mail) y todo lo demas se envia; con eso el batch cuenta como
+  recuperado y el watermark avanza. En las corridas siguientes ese registro se manda solo,
+  fuera del batch, hasta que pase o llegue a `permanent`.
+  - **No se parte** si el error es del backend o la red (SQLSTATE, timeout, HTTP 502/503/504,
+    401/403, respuesta no JSON) ni si **ningun** sub-batch pasa (Paxapos falla con todo): ahi
+    el batch queda caido como antes, el cursor se congela y avisa el mail de incidente.
+  - Un batch de un solo registro solo se le atribuye a ese registro si el backend ya respondio
+    bien en la corrida o si el registro ya venia fallando; si no, queda caido (puede ser el
+    backend).
+  - **Tope**: `RAFAM_BISECT_MAX_REQUESTS` (default 32) requests extra por batch; `0` desactiva.
+    Un registro malo en un batch de N cuesta ~2*log2(N) requests. Mientras se parte un batch,
+    cada registro suma a lo sumo un intento en la cola.
+  - El resumen diario muestra los batches recuperados, los registros aislados y los requests
+    extra.
 - **Cada encolado se loguea apenas ocurre** (`WARNING`, no solo al llegar a `permanent`), con
   el numero de negocio en texto plano — "OC 2026-3-1023", "OP 2026-1023", "Retencion de OP
   2026-1023", "Gasto/Solicitud 2026-5-1023", "Proveedor COD_PROV=1234" — ademas del
@@ -496,6 +514,19 @@ Revisar tambien los logs del portal Paxapos si el migrator devuelve errores parc
     el catalogo de Paxapos. Una OC cuyo proveedor no esta migrado encola al proveedor (espera,
     sin mail). Las deducciones no impositivas (`TIPO_DEDUC=O`: IPS, IOMA, garantias) quedan
     fuera de alcance y se cierran, igual que las OP `TIPO_OP=N`.
+- **Mail de incidente** (`src/incident_alerts.py`): cuando el problema es la entidad entera y
+  no un registro — Paxapos o la red caidos, un batch que no se pudo aislar, o la corrida que no
+  arranca (RAFAM caido) — llega UN mail por incidente con el ultimo error, desde cuando, y que
+  hacer (para un batch sin aislar, los `resend --dry-run` de sus registros). Mientras siga
+  abierto no se repite; cuando la entidad vuelve a correr sin batches caidos llega otro mail
+  avisando que se normalizo.
+  - Una falla de una sola corrida (un timeout suelto) no avisa: tiene que repetirse
+    `NOTIFY_INCIDENT_AFTER_RUNS` corridas seguidas (default 2, unos 10 minutos con el cron).
+  - Destinatarios: `NOTIFY_ALERT_TO`; se apaga con `NOTIFY_INCIDENT_ALERTS=false`. Estado en
+    `state/alert_incidents.json`.
+- **Delay entre batches**: `RAFAM_SYNC_BATCH_DELAY_SECONDS` solo se espera despues de un batch
+  que hizo POST; los batches donde todo esta sin cambios (la mayoria de `oc_items`, que es
+  full-scan) ya no esperan.
 - **Mail diario**: la seccion "COLA DE REINTENTOS" muestra el estado real de la cola al
   inicio y fin del dia, agrupado por entidad, estado y causa, y ademas un **detalle
   individual** por entidad (los mas viejos primero, con label legible, motivo, intentos y
@@ -576,7 +607,7 @@ python main.py resend --entity oc_items --key 2026-3-1023 --dry-run
 | `RECHAZADO` | Paxapos lo rechazo; muestra el error con `validationErrors`. Queda en la cola. |
 | `OMITIDO` | El script no lo envio y dice por que, con el comando a correr primero si falta una dependencia (ej. `resend --entity proveedores --key 2595`). |
 | `NO EXISTE EN RAFAM` | No hay filas con esa clave en el origen. |
-| `FALLO EL ENVIO` | El request fallo (HTTP 500, etc.). Si el batch tenia varios registros, se reintentan de a uno para aislar el que rompe. |
+| `FALLO EL ENVIO` | El request fallo (HTTP 500, etc.). Si el batch tenia varios registros, se parte hasta aislar el que rompe (los demas salen `OK`) y ese queda en la cola como `batch_failed`. |
 | `NO ENVIADO` | El backend o la red estaban caidos y se corto el reenvio. |
 | `NO APLICADO` | El id de Paxapos ya no existe (baja manual en destino). |
 | `SIN CAMBIOS` | (solo ventana) ya migrado y sin cambios en RAFAM. |
@@ -707,6 +738,7 @@ BATCH=500 LIMIT=100 CSV_DIR=output/rafam_ultimos_3_meses DEV_DB=state/dev_rafam.
 | `state/dev_rafam.db` | Snapshot SQLite de RAFAM para desarrollo. |
 | `state/checkpoint.db` | Checkpoints y vinculos RAFAM -> Paxapos. |
 | `state/migrator.lock` | Lock de corridas concurrentes (migrator). |
+| `state/alert_incidents.json` | Incidentes abiertos (entidades sin sincronizar) para no repetir el mail. |
 | `state/locks/pipeline.lock`, `daily_report.lock`, `integrity.lock`, `<entidad>.lock` | Locks de cron (flock) por job/entidad. |
 | `output/rafam_ultimos_3_meses/*.csv` | Snapshots de RAFAM (fuente para dev offline). |
 | `logs/rafam-{entidad}-YYYY-MM.log` | Logs rotativos mensuales por entidad (auto-generados). |
@@ -722,7 +754,7 @@ No commitear `.env`, `state/*.db`, logs ni CSVs productivos.
 | `ORA-12170` | Sin red/VPN hacia Oracle. | Verificar conectividad al host RAFAM. |
 | `ORA-01017` | Usuario/password Oracle incorrectos. | Revisar credenciales con DBA. |
 | `Respuesta no JSON` o redirect a login | Auth Paxapos incorrecta o endpoint equivocado. | Validar `PAXAPOS_API_KEY`, tenant y paths. |
-| Checkpoint no avanza | Hubo error en el lote. | Leer logs, corregir y reejecutar. |
+| Checkpoint no avanza | Un batch quedo caido sin poder aislar el registro (o Paxapos caido). | Ver el mail de incidente y el log (`FALLO`); probar los registros con `resend --dry-run`. |
 | Lock activo / exit 75 | Ya hay un `main.py run` corriendo. | Esperar a que termine; si quedo stale, verificar procesos antes de borrar `state/migrator.lock`. |
 
 ## Seguridad operativa
