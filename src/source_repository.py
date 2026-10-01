@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
-from sqlalchemy import Column, MetaData, Table, and_, case, func, literal_column, or_, select
+from sqlalchemy import Column, MetaData, Table, and_, case, false, func, literal_column, or_, select
 from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.engine import Connection
 from sqlalchemy.exc import SQLAlchemyError
@@ -85,6 +85,9 @@ class SourceRepository:
         entity: str,
         checkpoint: Checkpoint,
         retry_keys: set[str] | None = None,
+        *,
+        only_keys: set[str] | None = None,
+        date_range: tuple[date, date] | None = None,
     ) -> Select:
         """Arma la query de la entidad.
 
@@ -93,8 +96,22 @@ class SourceRepository:
         incremental para que una fila salteada por dependencia faltante vuelva a
         entrar aunque el watermark ya haya avanzado. Solo aplica a las entidades
         que encolan (orden_pago / retenciones).
+
+        Modos de ``main.py resend`` (excluyentes; ninguno mira el cursor):
+
+        - ``only_keys``: claves base (``retry_labels.record_base_key``). El WHERE
+          es SOLO ese filtro -- sin ejercicio_min, ventana de reproceso, ESTADO_OP
+          ni filtro de dependencias de OC -- para que la fila llegue al mapper y
+          sea el mapper quien informe por que no se envia (en vez de un
+          "no existe" enganoso). Claves que no parsean no amplian la query.
+        - ``date_range``: (desde, hasta) inclusivo sobre la columna de fecha de
+          la entidad, con el resto de los filtros del pipeline intactos.
         """
+        if only_keys is not None and date_range is not None:
+            raise ValueError("only_keys y date_range son excluyentes")
         cfg = ENTITY_CONFIGS[entity]
+        if (only_keys is not None or date_range is not None) and entity == "clasificaciones":
+            raise ValueError("clasificaciones no admite reenvio puntual (se envia el arbol completo)")
         if entity == "oc_items":
             # oc_items es full_load: cada corrida escanea todo, asi que las
             # filas rechazadas re-entran naturalmente (no necesita reinyeccion).
@@ -102,18 +119,24 @@ class SourceRepository:
             # (rechazo persistente, ej. Pedido destino borrado) — a esas hay que
             # excluirlas explicitamente, y eso lo hace OcItemsMapper.build_payload
             # via RetryStore.permanent_external_ids() (paxapos#489).
-            return self._build_oc_items_statement(cfg, checkpoint)
+            return self._build_oc_items_statement(
+                cfg, checkpoint, only_keys=only_keys, date_range=date_range,
+            )
         if entity == "solic_gastos":
-            return self._build_solic_gastos_statement(cfg, checkpoint, retry_keys)
-        if entity == "orden_pago":
-            return self._build_orden_pago_statement(cfg, checkpoint, retry_keys)
-        if entity == "retenciones":
+            return self._build_solic_gastos_statement(
+                cfg, checkpoint, retry_keys, only_keys=only_keys, date_range=date_range,
+            )
+        if entity in ("orden_pago", "retenciones"):
             # Retenciones escanea las mismas OP que orden_pago; el exporter
             # trae las deducciones por OP via fetch_deducciones_for_ops.
-            return self._build_orden_pago_statement(cfg, checkpoint, retry_keys)
+            return self._build_orden_pago_statement(
+                cfg, checkpoint, retry_keys, only_keys=only_keys, date_range=date_range,
+            )
         if entity == "clasificaciones":
             return self._build_clasificaciones_statement(cfg, checkpoint)
-        return self._build_simple_table_statement(cfg, checkpoint, retry_keys)
+        return self._build_simple_table_statement(
+            cfg, checkpoint, retry_keys, only_keys=only_keys, date_range=date_range,
+        )
 
     def execute(self, stmt: Select):
         return self._conn.execution_options(stream_results=True).execute(stmt)
@@ -514,16 +537,10 @@ class SourceRepository:
 
         stmt = select(*select_cols).select_from(from_clause)
 
-        key_filters = []
-        for k in oc_keys:
-            key_filters.append(
-                and_(
-                    oc_items.c.EJERCICIO == k["ejercicio"],
-                    oc_items.c.UNI_COMPRA == k["uni_compra"],
-                    oc_items.c.NRO_OC == k["nro_oc"]
-                )
-            )
-        stmt = stmt.where(or_(*key_filters))
+        stmt = stmt.where(self._oc_triples_predicate(
+            oc_items,
+            [(k["ejercicio"], k["uni_compra"], k["nro_oc"]) for k in oc_keys],
+        ))
         stmt = stmt.order_by(oc_items.c.EJERCICIO, oc_items.c.UNI_COMPRA, oc_items.c.NRO_OC, oc_items.c.ITEM_OC)
 
         result = self._conn.execute(stmt)
@@ -536,9 +553,17 @@ class SourceRepository:
         cfg: EntityConfig,
         checkpoint: Checkpoint,
         retry_keys: set[str] | None = None,
+        *,
+        only_keys: set[str] | None = None,
+        date_range: tuple[date, date] | None = None,
     ) -> Select:
         table = self._reflect_table(cfg.table_name)
         stmt = select(table)
+        only_filter = None
+        if only_keys is not None:
+            if cfg.name != "proveedores":
+                raise ValueError(f"{cfg.name} no admite reenvio puntual por clave")
+            only_filter = self._only(self._proveedores_key_filter(table, only_keys))
         # Reinyeccion de la cola de reintentos (hoy solo aplica a proveedores:
         # las demas entidades "simples" son full_load o no encolan). Sin esto,
         # un proveedor rechazado por el receptor quedaba fuera del cursor
@@ -552,6 +577,10 @@ class SourceRepository:
             cfg,
             checkpoint,
             extra_filters=[retry_filter] if retry_filter is not None else None,
+            only_filter=only_filter,
+            window_filter=self._date_window_filter(
+                self._safe_column(table, cfg.ts_field), date_range, cfg.name,
+            ),
         )
         ts_col = self._safe_column(table, cfg.ts_field)
         if ts_col is not None:
@@ -559,22 +588,39 @@ class SourceRepository:
             stmt = stmt.order_by(ts_col, *pk_cols)
         return stmt
 
+    @staticmethod
+    def _parse_cod_provs(keys) -> list[int]:
+        cods: list[int] = []
+        for key in keys or ():
+            try:
+                cods.append(int(str(key).strip()))
+            except (TypeError, ValueError):
+                continue
+        return cods
+
+    def _cod_provs_predicate(self, table, cods: list[int]):
+        cod_col = self._safe_column(table, "COD_PROV")
+        if not cods or cod_col is None:
+            return None
+        cods = sorted(set(cods))
+        clauses = [
+            cod_col.in_(cods[start:start + self._IN_CHUNK])
+            for start in range(0, len(cods), self._IN_CHUNK)
+        ]
+        return or_(*clauses) if len(clauses) > 1 else clauses[0]
+
+    def _proveedores_key_filter(self, table, keys):
+        """Predicado puro (sin tope ni log) para un set de claves de proveedores."""
+        return self._cod_provs_predicate(table, self._parse_cod_provs(keys))
+
     def _proveedores_retry_filter(self, table, retry_keys):
         """Predicado que reinyecta proveedores pendientes de la cola.
 
         Las claves son ``str(COD_PROV)`` (mismo formato que el link store y
         ``exporter._outcome_key``).
         """
-        cods: list[int] = []
-        for key in retry_keys or ():
-            try:
-                cods.append(int(str(key).strip()))
-            except (TypeError, ValueError):
-                continue
-        if not cods:
-            return None
-        cod_col = self._safe_column(table, "COD_PROV")
-        if cod_col is None:
+        cods = self._parse_cod_provs(retry_keys)
+        if not cods or self._safe_column(table, "COD_PROV") is None:
             return None
         if len(cods) > self._RETRY_REQUEUE_MAX:
             logger.warning(
@@ -582,22 +628,18 @@ class SourceRepository:
                 len(cods), self._RETRY_REQUEUE_MAX,
             )
             cods = sorted(cods)[: self._RETRY_REQUEUE_MAX]
-        cods = sorted(set(cods))
-        clauses = [
-            cod_col.in_(cods[start:start + self._IN_CHUNK])
-            for start in range(0, len(cods), self._IN_CHUNK)
-        ]
-        logger.info("Reinyectando %d proveedores pendientes de la cola de reintentos", len(cods))
-        return or_(*clauses) if len(clauses) > 1 else clauses[0]
+        clause = self._cod_provs_predicate(table, cods)
+        logger.info("Reinyectando %d proveedores pendientes de la cola de reintentos", len(set(cods)))
+        return clause
 
-    def _sg_retry_filter(self, table, retry_keys):
-        """Predicado que reinyecta solicitudes de gasto pendientes de la cola.
+    @staticmethod
+    def _parse_sg_keys(keys) -> list[tuple[int, int, int]]:
+        """Claves de gasto ``json({"deleg_solic", "ejercicio", "nro_solic"})`` a tuplas.
 
-        Las claves son ``json({"deleg_solic": D, "ejercicio": E, "nro_solic": N})``
-        (el external_id del gasto; se toleran campos extra como ``nro_comprob``).
+        Se toleran campos extra como ``nro_comprob`` (SG multi-comprobante).
         """
         triples: set[tuple[int, int, int]] = set()
-        for key in retry_keys or ():
+        for key in keys or ():
             try:
                 data = json.loads(key)
                 triples.add((
@@ -607,26 +649,99 @@ class SourceRepository:
                 ))
             except (TypeError, ValueError, KeyError):
                 continue
-        if not triples:
-            return None
+        return sorted(triples)
+
+    def _sg_triples_predicate(self, table, items: list[tuple[int, int, int]]):
         ej_col = self._safe_column(table, "EJERCICIO")
         deleg_col = self._safe_column(table, "DELEG_SOLIC")
         nro_col = self._safe_column(table, "NRO_SOLIC")
-        if ej_col is None or deleg_col is None or nro_col is None:
+        if not items or ej_col is None or deleg_col is None or nro_col is None:
             return None
-        items = sorted(triples)
+        clauses = [
+            and_(ej_col == ej, deleg_col == deleg, nro_col == nro)
+            for ej, deleg, nro in items
+        ]
+        return or_(*clauses) if len(clauses) > 1 else clauses[0]
+
+    def _sg_key_filter(self, table, keys):
+        """Predicado puro (sin tope ni log) para un set de claves de gasto."""
+        return self._sg_triples_predicate(table, self._parse_sg_keys(keys))
+
+    def _sg_retry_filter(self, table, retry_keys):
+        """Predicado que reinyecta solicitudes de gasto pendientes de la cola.
+
+        Las claves son ``json({"deleg_solic": D, "ejercicio": E, "nro_solic": N})``
+        (el external_id del gasto; se toleran campos extra como ``nro_comprob``).
+        """
+        items = self._parse_sg_keys(retry_keys)
+        if not items:
+            return None
         if len(items) > self._RETRY_REQUEUE_MAX:
             logger.warning(
                 "Cola de reintentos con %d gastos pendientes; se reinyectan %d en esta corrida.",
                 len(items), self._RETRY_REQUEUE_MAX,
             )
             items = items[: self._RETRY_REQUEUE_MAX]
+        clause = self._sg_triples_predicate(table, items)
+        if clause is not None:
+            logger.info("Reinyectando %d gastos pendientes de la cola de reintentos", len(items))
+        return clause
+
+    @staticmethod
+    def _parse_oc_keys(keys) -> list[tuple[int, int, int]]:
+        """Claves de OC ``json({"ejercicio", "nro_oc", "uni_compra"})`` a tuplas."""
+        triples: set[tuple[int, int, int]] = set()
+        for key in keys or ():
+            try:
+                data = json.loads(key)
+                triples.add((
+                    int(data["ejercicio"]),
+                    int(data["uni_compra"]),
+                    int(data["nro_oc"]),
+                ))
+            except (TypeError, ValueError, KeyError):
+                continue
+        return sorted(triples)
+
+    @staticmethod
+    def _oc_triples_predicate(oc_items, items):
         clauses = [
-            and_(ej_col == ej, deleg_col == deleg, nro_col == nro)
-            for ej, deleg, nro in items
+            and_(
+                oc_items.c.EJERCICIO == ej,
+                oc_items.c.UNI_COMPRA == uni,
+                oc_items.c.NRO_OC == nro,
+            )
+            for ej, uni, nro in items
         ]
-        logger.info("Reinyectando %d gastos pendientes de la cola de reintentos", len(items))
+        if not clauses:
+            return None
         return or_(*clauses) if len(clauses) > 1 else clauses[0]
+
+    def _oc_key_filter(self, oc_items, keys):
+        """Predicado puro para un set de claves de OC (resend)."""
+        return self._oc_triples_predicate(oc_items, self._parse_oc_keys(keys))
+
+    @staticmethod
+    def _only(predicate):
+        """Filtro de ``only_keys``: si ninguna clave parseo, no devolver NADA.
+
+        Sin esto un predicado None se interpretaria como "sin filtro" y un
+        `resend` con claves mal escritas reenviaria la tabla entera.
+        """
+        return predicate if predicate is not None else false()
+
+    def _date_window_filter(self, col, date_range, entity: str):
+        """Predicado ``desde <= col < hasta + 1 dia`` (hasta inclusivo)."""
+        if date_range is None:
+            return None
+        if col is None:
+            raise ValueError(f"{entity} no tiene columna de fecha para filtrar por ventana")
+        desde, hasta = date_range
+        start = datetime(desde.year, desde.month, desde.day)
+        end = datetime(hasta.year, hasta.month, hasta.day) + timedelta(days=1)
+        if self._conn.dialect.name == "sqlite":
+            return and_(col >= start.strftime("%Y-%m-%d"), col < end.strftime("%Y-%m-%d"))
+        return and_(col >= start, col < end)
 
     def _build_clasificaciones_statement(
         self,
@@ -665,6 +780,9 @@ class SourceRepository:
         self,
         cfg: EntityConfig,
         checkpoint: Checkpoint,
+        *,
+        only_keys: set[str] | None = None,
+        date_range: tuple[date, date] | None = None,
     ) -> Select:
         oc_items = self._reflect_table("OC_ITEMS")
         orden_compra = self._reflect_table("ORDEN_COMPRA")
@@ -721,22 +839,32 @@ class SourceRepository:
             ])
 
         stmt = select(*select_cols).select_from(from_clause)
-        stmt = self._apply_oc_dependency_filter(
-            stmt,
-            cfg,
-            {
-                "ejercicio": oc_items.c.EJERCICIO,
-                "uni_compra": oc_items.c.UNI_COMPRA,
-                "nro_oc": oc_items.c.NRO_OC,
-            },
-            fech_confirm_col=orden_compra.c.FECH_CONFIRM,
+        only_filter = (
+            self._only(self._oc_key_filter(oc_items, only_keys))
+            if only_keys is not None
+            else None
         )
+        if only_filter is None:
+            # Con claves explicitas NO se aplica el corte por ejercicio ni la
+            # dependencia OP->OC: el operador pidio esa OC puntual.
+            stmt = self._apply_oc_dependency_filter(
+                stmt,
+                cfg,
+                {
+                    "ejercicio": oc_items.c.EJERCICIO,
+                    "uni_compra": oc_items.c.UNI_COMPRA,
+                    "nro_oc": oc_items.c.NRO_OC,
+                },
+                fech_confirm_col=orden_compra.c.FECH_CONFIRM,
+            )
         stmt = self._apply_incremental_filters(
             stmt,
             oc_items,
             cfg,
             checkpoint,
             apply_ejercicio_min=False,
+            only_filter=only_filter,
+            window_filter=self._date_window_filter(orden_compra.c.FECH_OC, date_range, cfg.name),
         )
         return stmt.order_by(oc_items.c.EJERCICIO, oc_items.c.UNI_COMPRA, oc_items.c.NRO_OC, oc_items.c.ITEM_OC)
 
@@ -745,6 +873,9 @@ class SourceRepository:
         cfg: EntityConfig,
         checkpoint: Checkpoint,
         retry_keys: set[str] | None = None,
+        *,
+        only_keys: set[str] | None = None,
+        date_range: tuple[date, date] | None = None,
     ) -> Select:
         solic_gastos = self._reflect_table("SOLIC_GASTOS")
         oc_items = self._reflect_table("OC_ITEMS")
@@ -821,6 +952,14 @@ class SourceRepository:
             cfg,
             checkpoint,
             extra_filters=[retry_filter] if retry_filter is not None else None,
+            only_filter=(
+                self._only(self._sg_key_filter(solic_gastos, only_keys))
+                if only_keys is not None
+                else None
+            ),
+            window_filter=self._date_window_filter(
+                self._safe_column(solic_gastos, cfg.ts_field), date_range, cfg.name,
+            ),
         )
         return stmt.order_by(solic_gastos.c.FECH_SOLIC, solic_gastos.c.EJERCICIO, solic_gastos.c.DELEG_SOLIC, solic_gastos.c.NRO_SOLIC)
 
@@ -1350,29 +1489,11 @@ class SourceRepository:
                 continue
         return pairs
 
-    def _op_retry_filter(self, table, retry_keys):
-        """Predicado OR que reinyecta las OP pendientes en la cola de reintentos.
-
-        Sin esto, una OP salteada por dependencia faltante (OC aún no migrada,
-        comprobante ausente) quedaba fuera del cursor para siempre porque el
-        watermark avanza igual.
-        """
-        pairs = self._parse_op_retry_keys(retry_keys)
-        if not pairs:
-            return None
-
+    def _op_pairs_predicate(self, table, pairs: list[tuple[int, int]]):
         ej_col = self._safe_column(table, "EJERCICIO")
         nro_col = self._safe_column(table, "NRO_OP")
-        if ej_col is None or nro_col is None:
+        if not pairs or ej_col is None or nro_col is None:
             return None
-
-        if len(pairs) > self._RETRY_REQUEUE_MAX:
-            logger.warning(
-                "Cola de reintentos con %d OPs pendientes; se reinyectan las %d mas "
-                "antiguas en esta corrida (el resto entra en las proximas).",
-                len(pairs), self._RETRY_REQUEUE_MAX,
-            )
-            pairs = sorted(pairs)[: self._RETRY_REQUEUE_MAX]
 
         by_ejercicio: dict[int, set[int]] = {}
         for ejercicio, nro_op in pairs:
@@ -1387,18 +1508,47 @@ class SourceRepository:
 
         if not clauses:
             return None
-
-        logger.info(
-            "Reinyectando %d OPs pendientes de la cola de reintentos en la query",
-            len(pairs),
-        )
         return or_(*clauses) if len(clauses) > 1 else clauses[0]
+
+    def _op_key_filter(self, table, keys):
+        """Predicado puro (sin tope ni log) para un set de claves de OP."""
+        return self._op_pairs_predicate(table, self._parse_op_retry_keys(keys))
+
+    def _op_retry_filter(self, table, retry_keys):
+        """Predicado OR que reinyecta las OP pendientes en la cola de reintentos.
+
+        Sin esto, una OP salteada por dependencia faltante (OC aún no migrada,
+        comprobante ausente) quedaba fuera del cursor para siempre porque el
+        watermark avanza igual.
+        """
+        pairs = self._parse_op_retry_keys(retry_keys)
+        if not pairs:
+            return None
+
+        if len(pairs) > self._RETRY_REQUEUE_MAX:
+            logger.warning(
+                "Cola de reintentos con %d OPs pendientes; se reinyectan las %d mas "
+                "antiguas en esta corrida (el resto entra en las proximas).",
+                len(pairs), self._RETRY_REQUEUE_MAX,
+            )
+            pairs = sorted(pairs)[: self._RETRY_REQUEUE_MAX]
+
+        clause = self._op_pairs_predicate(table, pairs)
+        if clause is not None:
+            logger.info(
+                "Reinyectando %d OPs pendientes de la cola de reintentos en la query",
+                len(pairs),
+            )
+        return clause
 
     def _build_orden_pago_statement(
         self,
         cfg: EntityConfig,
         checkpoint: Checkpoint,
         retry_keys: set[str] | None = None,
+        *,
+        only_keys: set[str] | None = None,
+        date_range: tuple[date, date] | None = None,
     ) -> Select:
         orden_pago = self._reflect_table("ORDEN_PAGO")
         # NOTE: las deducciones/retenciones NO se joinean acá — se traen aparte
@@ -1471,6 +1621,12 @@ class SourceRepository:
             checkpoint,
             extra_filters=[retry_filter] if retry_filter is not None else None,
             base_condition=base_condition,
+            only_filter=(
+                self._only(self._op_key_filter(orden_pago, only_keys))
+                if only_keys is not None
+                else None
+            ),
+            window_filter=self._date_window_filter(fech_confirm_col, date_range, cfg.name),
         )
         return stmt.order_by(orden_pago.c.FECH_CONFIRM, orden_pago.c.EJERCICIO, orden_pago.c.NRO_OP)
 
@@ -1510,13 +1666,26 @@ class SourceRepository:
         extra_filters: list | None = None,
         apply_ejercicio_min: bool = True,
         base_condition=None,
+        only_filter=None,
+        window_filter=None,
     ) -> Select:
+        # resend por claves: el WHERE es SOLO el filtro de claves (ver build_statement).
+        if only_filter is not None:
+            return stmt.where(only_filter)
+
         if apply_ejercicio_min and cfg.ejercicio_min is not None:
             ej_col = self._safe_column(table, "EJERCICIO")
             if ej_col is not None:
                 stmt = stmt.where(
                     self._ejercicio_boundary_filter(table, cfg.ejercicio_min, ej_col)
                 )
+
+        # resend por ventana de fechas: filtros del pipeline, pero la ventana
+        # reemplaza al cursor y a la ventana de reproceso.
+        if window_filter is not None:
+            if base_condition is not None:
+                stmt = stmt.where(base_condition)
+            return stmt.where(window_filter)
 
         if cfg.full_load or cp.is_fresh or (cp.last_id is None and cp.last_ts is None):
             if base_condition is not None:

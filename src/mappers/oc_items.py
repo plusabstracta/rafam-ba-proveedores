@@ -11,13 +11,23 @@ import logging
 
 from .. import config as _config
 from ..change_detection import compute_payload_hash
+from ..record_events import note_skip
 from ..utils import format_date_only, normalize_text, to_int
 
 logger = logging.getLogger(__name__)
 
 
+def _oc_source_key(key: tuple[int, int, int]) -> str:
+    return json.dumps({"ejercicio": key[0], "nro_oc": key[2], "uni_compra": key[1]}, sort_keys=True)
+
+
 class OcItemsMapper:
     """Mapper stateful para OC_ITEMS: acumula contadores cross-batch."""
+
+    # `main.py resend`: claves a reenviar aunque esten "sin cambios"/'permanent'
+    # (MigratorExporter.set_force_keys) y sink de motivos de omision.
+    _force_keys: frozenset = frozenset()
+    _events = None
 
     def __init__(self, *, link_store, lookup_resolver, retry_store=None):
         self._link_store = link_store
@@ -66,6 +76,10 @@ class OcItemsMapper:
                         "Migrator [oc_items] OC %s-%s-%s: omitida â proveedor excluido (COD_PROV=%s)",
                         ejercicio, uni_compra, nro_oc, cod_prov,
                     )
+                    note_skip(
+                        self._events, "oc_items", _oc_source_key(key),
+                        f"proveedor excluido por configuracion (COD_PROV={cod_prov})",
+                    )
                     skipped_no_prov.add(key)
                     continue
                 # Normalizar la clave igual que al guardarla (int → str): un
@@ -82,6 +96,11 @@ class OcItemsMapper:
                     logger.warning(
                         "Migrator [oc_items] OC %s-%s-%s: omitida â sin proveedor (COD_PROV=%s)",
                         ejercicio, uni_compra, nro_oc, cod_prov,
+                    )
+                    note_skip(
+                        self._events, "oc_items", _oc_source_key(key),
+                        f"el proveedor COD_PROV={cod_prov} no esta migrado (sin link local); "
+                        f"primero: resend --entity proveedores --key {cod_prov_norm if cod_prov_norm is not None else cod_prov}",
                     )
                     skipped_no_prov.add(key)
                     continue
@@ -173,6 +192,7 @@ class OcItemsMapper:
                 sort_keys=True,
             )
 
+            forced = source_key in self._force_keys
             link_previo = self._link_store.get_link("orden_compra", source_key)
             # `or ""`: links creados antes del ALTER TABLE pueden tener
             # estado_oc NULL y .strip() sobre None tiraba AttributeError.
@@ -184,7 +204,7 @@ class OcItemsMapper:
             # permanent por el antiguo 409; esa causa ya fue corregida en el receptor.
             if estado_actual == "A":
                 if link_previo and link_previo.get("remote_id"):
-                    if estado_previo == "A" and link_previo.get("deleted_at"):
+                    if estado_previo == "A" and link_previo.get("deleted_at") and not forced:
                         # Baja ya confirmada por Paxapos en una corrida anterior.
                         # Sin este corte, oc_items (full_load) reenviaba las
                         # mismas ~12 bajas en cada corrida (1.728 por dia).
@@ -194,13 +214,21 @@ class OcItemsMapper:
                     oc_data["Pedido"]["deleted"] = 1
                     ocs_to_anular.append(oc_data)
                 else:
+                    note_skip(
+                        self._events, "oc_items", source_key,
+                        "OC anulada (estado A) que nunca se migro: no hay nada que dar de baja en Paxapos",
+                    )
                     ocs_to_skip_register.append(key)
                 continue
 
             if not oc_data["items"]:
+                note_skip(
+                    self._events, "oc_items", source_key,
+                    "ningun item mapeable (sin mercaderia identificable o sin cantidad)",
+                )
                 continue
 
-            if source_key in permanent_keys:
+            if source_key in permanent_keys and not forced:
                 ocs_to_skip_permanent.append(key)
                 continue
 
@@ -222,7 +250,7 @@ class OcItemsMapper:
                     # asumirlo "al dia" y backfillear el hash sin enviar
                     # enmascararia para siempre un cambio real ya ocurrido.
                     stored_hash = link_previo.get("payload_hash")
-                    if not stored_hash or current_hash != stored_hash:
+                    if forced or not stored_hash or current_hash != stored_hash:
                         ocs_to_create.append(oc_data)
                         resent_hash += 1
                     else:
@@ -241,6 +269,11 @@ class OcItemsMapper:
                     )
                     ocs_to_create.append(oc_data)
                 else:
+                    note_skip(
+                        self._events, "oc_items", source_key,
+                        f"estado {estado_actual or '(vacio)'} sin comprobante ni OP: "
+                        "solo se migran OCs confirmadas (R) o con comprobante/OP",
+                    )
                     ocs_to_skip_register.append(key)
 
         # ââ 3. Registrar en link TODAS las OCs (con o sin envÃ­o) ââââââââââ

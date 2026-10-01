@@ -449,15 +449,14 @@ Revisar tambien los logs del portal Paxapos si el migrator devuelve errores parc
   rechazo se arregla del lado de Paxapos hay que devolverla a la cola a mano con `--requeue`
   (opcionalmente con `--external-id` para acotar a una sola fila). Caso tipico: core#406 — el
   gate de `cantidad > 0` tiraba la OC entera por un renglon con cantidad 0; tras deployar el
-  fix, `main.py retry-queue --entity ordenes_compra --requeue`.
+  fix, `main.py retry-queue --entity oc_items --requeue` (la cola usa el nombre de la
+  entidad del pipeline, `oc_items`, no la seccion `ordenes_compra` del migrator).
 - **Forzar el reenvio YA (sin esperar al proximo cron)**:
-  - Un registro puntual: `main.py retry-queue --entity retenciones --external-id
-    '{"ejercicio": 2026, "nro_op": 123}' --requeue --send-now` (si ya estaba `pending`, se
-    puede omitir `--requeue`). `--send-now` toma el lock exclusivo (`state/migrator.lock`) y
-    corre la sincronizacion de esa entidad en el mismo proceso — no hace falta un segundo
-    comando ni esperar el cron. Ojo: el envio siempre reintenta TODO lo `pending` de esa
-    entidad (no solo el `--external-id` indicado), que es el comportamiento correcto: la query
-    reinyecta por cola, no por fila suelta.
+  - Uno o varios registros puntuales, esten o no en la cola: `main.py resend` (ver
+    [Reenviar registros puntuales](#reenviar-registros-puntuales-mainpy-resend)).
+  - Todo lo `pending` de UNA entidad: `main.py retry-queue --entity orden_pago --send-now`.
+    Manda SOLO las claves de la cola (no la entidad entera), no toca el checkpoint y muestra
+    el resultado de cada una. Toma el lock exclusivo (`state/migrator.lock`).
   - Toda la cola `permanent` de UNA entidad: `main.py retry-queue --entity oc_items --requeue
     --send-now`.
   - Toda la cola `pending` de TODAS las entidades (lo mas comun despues de un fix en Paxapos):
@@ -503,6 +502,63 @@ Revisar tambien los logs del portal Paxapos si el migrator devuelve errores parc
 - **Backups**: `check_integrity` deja un backup diario de `state/checkpoint.db` en
   `state/backups/` (retencion 7 dias) antes de operar.
 
+## Reenviar registros puntuales (`main.py resend`)
+
+Manda a Paxapos **solo** los registros indicados, en el momento, y muestra que paso con cada
+uno. No lee ni escribe checkpoints: no hace falta resetear nada ni reenviar la entidad entera.
+
+```bash
+# Por clave (se puede repetir --key). Acepta la forma corta o el label tal cual sale en el mail.
+python main.py resend --entity oc_items --key 2026-3-1023
+python main.py resend --entity orden_pago --key "OP 2026-1023" --key "OP 2026-1024"
+python main.py resend --entity retenciones --key "Retencion de OP 2026-1023"
+python main.py resend --entity solic_gastos --key "Gasto/Solicitud 2026-1-58"
+python main.py resend --entity proveedores --key 110
+
+# Muchas claves: un archivo con una por linea ('#' = comentario).
+python main.py resend --entity orden_pago --keys-file claves.txt
+
+# Lo que esta en la cola de reintentos (pending por defecto; --status permanent|all).
+python main.py resend --entity retenciones --from-queue --status all
+
+# Una ventana de fechas (FECH_CONFIRM para OP/retenciones, FECH_SOLIC para gastos,
+# FECH_OC para OCs, FECHA_ULT_COMP para proveedores). --hasta es inclusivo (default: hoy).
+python main.py resend --entity orden_pago --desde 2026-09-01 --hasta 2026-09-15
+
+# Siempre se puede probar antes: Paxapos valida pero no persiste, y la cola no se toca.
+python main.py resend --entity oc_items --key 2026-3-1023 --dry-run
+```
+
+**Claves vs. ventana**:
+
+- Con claves (`--key`, `--keys-file`, `--from-queue`) el reenvio **se fuerza** aunque el
+  registro figure "sin cambios" en el link local o este `permanent` en la cola (en ese caso se
+  reencola con 0 intentos antes de enviar). La query ignora cursor, ventana de 30 dias,
+  `RAFAM_EJERCICIO_MIN` y `ESTADO_OP`, para que el registro llegue al mapper y el reporte diga
+  el motivo real si no se puede enviar.
+- Con `--desde/--hasta` se aplican las reglas normales del pipeline sobre esa ventana: solo
+  se manda lo nuevo o lo que cambio. Sirve para "pasar de nuevo" un periodo sin riesgo de
+  reenviar miles de registros identicos.
+- Las reglas de negocio se respetan siempre: una OC anulada sin migrar, una OP no confirmada
+  o un proveedor excluido no se envian aunque se pidan por clave.
+
+**Resultado por registro**:
+
+| Resultado | Significado |
+| --- | --- |
+| `OK` | Paxapos lo acepto (muestra modo e id de Paxapos). |
+| `RECHAZADO` | Paxapos lo rechazo; muestra el error con `validationErrors`. Queda en la cola. |
+| `OMITIDO` | El script no lo envio y dice por que, con el comando a correr primero si falta una dependencia (ej. `resend --entity proveedores --key 2595`). |
+| `NO EXISTE EN RAFAM` | No hay filas con esa clave en el origen. |
+| `FALLO EL ENVIO` | El request fallo (HTTP 500, etc.). Si el batch tenia varios registros, se reintentan de a uno para aislar el que rompe. |
+| `NO ENVIADO` | El backend o la red estaban caidos y se corto el reenvio. |
+| `NO APLICADO` | El id de Paxapos ya no existe (baja manual en destino). |
+| `SIN CAMBIOS` | (solo ventana) ya migrado y sin cambios en RAFAM. |
+
+Exit code: `0` si todo quedo OK, `1` si algun registro no (con `--from-queue` y en ventana,
+`OMITIDO` no cuenta como fallo), `2` si los argumentos son invalidos y `75` si el cron siguio
+corriendo despues de esperarlo 10 minutos (el comando espera el lock en vez de salir de una).
+
 ## Recuperacion y re-ejecucion
 
 Si una corrida falla:
@@ -510,6 +566,9 @@ Si una corrida falla:
 1. El checkpoint de la entidad queda en error o sin avanzar.
 2. Corregir la causa en datos/configuracion/mapeo.
 3. Ejecutar nuevamente el mismo comando.
+
+Para reenviar uno o pocos registros no hace falta resetear: usar `main.py resend` (ver
+[Reenviar registros puntuales](#reenviar-registros-puntuales-mainpy-resend)).
 
 Para forzar recarga completa de una entidad:
 
@@ -606,6 +665,7 @@ Y agregar las siguientes líneas:
 | `make sync-proveedores` | Detecta y re-envía proveedores modificados en RAFAM. |
 | `make sync-oc` | Detecta y re-envía OCs modificadas en RAFAM. |
 | `make sync-all` | Ejecuta la detección de cambios para proveedores y OCs. |
+| `python main.py resend --entity X --key K` | Reenvia registros puntuales sin tocar checkpoints (ver arriba). |
 | `make test` | Corre pytest. |
 
 Variables Make utiles:

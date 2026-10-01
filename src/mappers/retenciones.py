@@ -11,6 +11,7 @@ import json
 import logging
 
 from ..config import is_cod_prov_excluded
+from ..record_events import note_skip
 from ..retry_store import REASON_DEPENDENCY_MISSING
 from ..utils import normalize_text, to_int
 from ..validation import validate_amount
@@ -20,6 +21,11 @@ logger = logging.getLogger(__name__)
 
 class RetencionesMapper:
     """Mapper para retenciones standalone (F3)."""
+
+    # `main.py resend`: claves a reenviar aunque esten "sin cambios"/'permanent'
+    # (MigratorExporter.set_force_keys) y sink de motivos de omision.
+    _force_keys: frozenset = frozenset()
+    _events = None
 
     def __init__(self, *, link_store, lookup_resolver, source_repo=None, retry_store=None):
         self._link_store = link_store
@@ -100,10 +106,15 @@ class RetencionesMapper:
 
         for ejercicio, nro_op in op_keys:
             op_sk = json.dumps({"ejercicio": ejercicio, "nro_op": nro_op}, sort_keys=True)
-            if op_sk in permanent_keys:
+            forced = op_sk in self._force_keys
+            if op_sk in permanent_keys and not forced:
                 skipped_permanent += 1
                 continue
             if is_cod_prov_excluded(prov_by_key.get((ejercicio, nro_op))):
+                note_skip(
+                    self._events, "retenciones", op_sk,
+                    f"proveedor excluido por configuracion (COD_PROV={prov_by_key.get((ejercicio, nro_op))})",
+                )
                 # Misma blocklist que orden_pago (sueldos, IPS, IOMA, cajas chicas):
                 # sus deducciones no son retenciones a proveedores. Cerrar la cola
                 # si quedo encolada antes de la exclusion.
@@ -114,6 +125,7 @@ class RetencionesMapper:
             deducciones = deducciones_by_op.get((ejercicio, nro_op), [])
             if not deducciones:
                 skipped_no_deduc += 1
+                note_skip(self._events, "retenciones", op_sk, "la OP no tiene deducciones en ORDEN_PAGO_DEDUC")
                 # Sin deducciones no hay nada que migrar: si estaba en la cola
                 # (p.ej. por un tipo de retencion no resuelto), cerrarla.
                 self._resolve_retry(op_sk, dry_run)
@@ -122,6 +134,11 @@ class RetencionesMapper:
             op_link = self._link_store.get_link("orden_pago", op_sk)
             if not op_link or not op_link.get("remote_id"):
                 skipped_no_link += 1
+                note_skip(
+                    self._events, "retenciones", op_sk,
+                    f"la OP {ejercicio}-{nro_op} aun no esta migrada; primero: "
+                    f"resend --entity orden_pago --key {ejercicio}-{nro_op}",
+                )
                 if self._retry_store is not None and not dry_run:
                     self._retry_store.enqueue(
                         "retenciones",
@@ -135,6 +152,10 @@ class RetencionesMapper:
                 # El Egreso destino fue borrado en Paxapos (baja manual, terminal
                 # por contrato): no hay a que aplicarle las retenciones.
                 skipped_permanent += 1
+                note_skip(
+                    self._events, "retenciones", op_sk,
+                    f"el Egreso id={op_link.get('remote_id')} de la OP fue borrado en Paxapos",
+                )
                 continue
 
             mapped: list[dict] = []
@@ -151,16 +172,17 @@ class RetencionesMapper:
                 #    (o el lookup fallo al cargarse): eso si es un pendiente real.
                 # Ambas se encolan (para no perderlas si el catalogo cambia) pero
                 # con reason_detail distinto para que el reporte no las mezcle.
+                if _all_non_tax(deducciones):
+                    detail = "non_tax_deduction"
+                    msg = (
+                        f"OP {ejercicio}-{nro_op}: {len(deducciones)} deduccion(es) no impositivas "
+                        f"(TIPO_DEDUC=O: {_describe(deducciones)}); Paxapos no las modela como retencion"
+                    )
+                else:
+                    detail = "retention_type_unresolved"
+                    msg = f"OP {ejercicio}-{nro_op}: {len(deducciones)} deduccion(es) sin tipo de retencion resoluble"
+                note_skip(self._events, "retenciones", op_sk, msg)
                 if self._retry_store is not None and not dry_run:
-                    if _all_non_tax(deducciones):
-                        detail = "non_tax_deduction"
-                        msg = (
-                            f"OP {ejercicio}-{nro_op}: {len(deducciones)} deduccion(es) no impositivas "
-                            f"(TIPO_DEDUC=O: {_describe(deducciones)}); Paxapos no las modela como retencion"
-                        )
-                    else:
-                        detail = "retention_type_unresolved"
-                        msg = f"OP {ejercicio}-{nro_op}: {len(deducciones)} deduccion(es) sin tipo de retencion resoluble"
                     self._retry_store.enqueue(
                         "retenciones",
                         op_sk,
@@ -173,7 +195,7 @@ class RetencionesMapper:
             # Idempotencia
             fingerprint = _retenciones_fingerprint(mapped)
             ret_link = self._link_store.get_link("retenciones", op_sk)
-            if ret_link and ret_link.get("fingerprint") == fingerprint:
+            if ret_link and ret_link.get("fingerprint") == fingerprint and not forced:
                 skipped_unchanged += 1
                 # Ya migrada y al dia: si venia de la cola de reintentos (152
                 # entradas legacy quedaron asi desde agosto), cerrarla.

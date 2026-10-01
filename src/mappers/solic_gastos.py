@@ -10,6 +10,8 @@ import hashlib
 import json
 import logging
 
+from ..record_events import note_skip
+from ..retry_labels import record_base_key, record_key_from_row
 from ..utils import format_date_only, parse_money, to_int
 from .gasto_matching import comprobante_key as _comprobante_key
 from .gasto_matching import norm_nro as _norm_factura
@@ -38,6 +40,14 @@ ENRICHABLE_GASTO_FIELDS = frozenset({
 
 class SolicGastosMapper:
     """Mapper para gastos de solicitud (SOLIC_GASTOS + CTA_COMPROB)."""
+
+    # `main.py resend`: claves a reenviar aunque esten "sin cambios"
+    # (MigratorExporter.set_force_keys) y sink de motivos de omision.
+    _force_keys: frozenset = frozenset()
+    _events = None
+
+    def _note_skip(self, key, reason: str) -> None:
+        note_skip(self._events, "solic_gastos", key, reason)
 
     def __init__(self, *, link_store, lookup_resolver, resolve_gastos_fn=None, source_repo=None):
         self._link_store = link_store
@@ -95,6 +105,11 @@ class SolicGastosMapper:
             gasto = self._map_solic_gasto(raw)
             if gasto is not None:
                 candidates.append((gasto, raw))
+            else:
+                self._note_skip(
+                    record_key_from_row("solic_gastos", raw),
+                    "la solicitud no se pudo mapear (sin comprobante o datos incompletos)",
+                )
 
         candidates.extend(self._expand_multi_comprobante(multi_pending))
 
@@ -105,6 +120,11 @@ class SolicGastosMapper:
             rafam_ref = _gasto_ref_from_external_id(ext) if ext else ""
             if rafam_ref not in allowed_refs:
                 skipped_no_oc += 1
+                self._note_skip(
+                    ext,
+                    "ninguna OC enviada a Paxapos referencia esta solicitud "
+                    "(el gasto se enriquece solo sobre OCs migradas)",
+                )
                 continue
             sk = json.dumps(ext, sort_keys=True) if ext else None
             mapped.append({
@@ -185,8 +205,17 @@ class SolicGastosMapper:
             if resolved is None:
                 if candidates:
                     skipped_ambiguous += 1
+                    self._note_skip(
+                        m["external_id"],
+                        "ambiguo: la OC tiene varias facturas en Paxapos y no se pudo elegir una",
+                    )
                 else:
                     skipped_no_match += 1
+                    self._note_skip(
+                        m["external_id"],
+                        "Paxapos no tiene un gasto parcial para este comprobante "
+                        "(el proveedor aun no subio la factura)",
+                    )
                 continue
 
             empty_fields = resolved.get("empty_fields") or []
@@ -207,18 +236,27 @@ class SolicGastosMapper:
             }
             if not enrich:
                 skipped_complete += 1
+                self._note_skip(
+                    m["external_id"],
+                    f"el gasto id={resolved.get('id')} ya esta completo en Paxapos: no hay campos vacios para enriquecer",
+                )
                 continue
 
             gasto_id = resolved.get("id")
             if gasto_id is None:
                 skipped_no_match += 1
+                self._note_skip(m["external_id"], "resolver_gasto devolvio el gasto sin id")
                 continue
 
             payload_hash = _stable_payload_hash({"id": gasto_id, "enrich": enrich})
             sk = m["sk"]
             if sk is not None:
                 existing_link = self._link_store.get_link("gasto", sk)
-                if existing_link and existing_link.get("payload_hash") == payload_hash:
+                if (
+                    existing_link
+                    and existing_link.get("payload_hash") == payload_hash
+                    and record_base_key("solic_gastos", sk) not in self._force_keys
+                ):
                     skipped_same_hash += 1
                     continue
 

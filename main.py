@@ -7,6 +7,7 @@ Usage:
     python main.py reset --entity=proveedores
     python main.py reset --all
     python main.py run [--entity=proveedores]
+    python main.py resend --entity=orden_pago --key "OP 2026-1023"
 """
 
 import argparse
@@ -14,25 +15,38 @@ import fcntl
 import json
 import logging
 import os
+import re
 import sys
 import time
 from contextlib import contextmanager
+from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 
 from dotenv import load_dotenv
 from sqlalchemy.exc import SQLAlchemyError
 
 from src.batch_grouping import GROUPED_BATCH_FIELDS, ENTITY_LINK_NAMES, iter_grouped_batches
+from src.auth_circuit_breaker import AuthCircuitOpenError
 from src.backend_errors import BackendInfraError
 from src.checkpoint_store import CheckpointStore
-from src.config import ENTITY_CONFIGS
+from src.config import ENTITY_CONFIGS, is_cod_prov_excluded
 from src.db import create_source_engine
 from src.entity_link_store import EntityLinkStore
 from src.error_formatting import describe_exception, format_exception_context
 from src.exporter import BaseExporter, build_exporter, fetch_migrator_lookups, fetch_migrator_spec
+from src.gateway_mapper import map_proveedor_migrator_row
 from src.logging_config import setup_file_logging
-from src.retry_labels import describe_retry_key
-from src.retry_store import RetryStore
+from src.models import Checkpoint
+from src.record_events import RecordEventSink
+from src.retry_labels import (
+    RESENDABLE_ENTITIES,
+    describe_retry_key,
+    parse_record_key,
+    record_base_key,
+    record_key_from_row,
+)
+from src.retry_store import STATUS_PENDING, STATUS_PERMANENT, RetryStore
 from src.run_history import record_run
 from src.source_repository import SourceRepository
 from src.sync_engine import SyncEngine
@@ -144,27 +158,45 @@ def _build_engine() -> SyncEngine:
 _LOCK_PATH = Path(__file__).resolve().parent / "state" / "migrator.lock"
 
 
+_LOCK_POLL_SECONDS = 2.0
+
+
 @contextmanager
-def _exclusive_run_lock():
+def _exclusive_run_lock(wait_seconds: float = 0):
     """Lock exclusivo via fcntl.flock para que dos cron concurrentes no se pisen.
 
     Si otro proceso esta corriendo `main.py run`, este sale con codigo 75
     (EX_TEMPFAIL) en vez de avanzar checkpoints en paralelo. El lock se libera
     automaticamente al cerrar el FD (fin de proceso o context exit).
+
+    Con ``wait_seconds > 0`` (comandos manuales como `resend`) espera hasta
+    ese tiempo a que termine la corrida en curso antes de rendirse.
     """
     _LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
     # "a" y NO "w": abrir con "w" trunca el archivo ANTES de intentar el flock,
     # asi que un contendiente que pierde el lock borraba el PID del dueno.
     fd = open(_LOCK_PATH, "a")
     try:
-        try:
-            fcntl.flock(fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            logger.error(
-                "Otro proceso ya esta ejecutando el sync (lock: %s). Saliendo sin avanzar checkpoints.",
-                _LOCK_PATH,
-            )
-            sys.exit(75)
+        deadline = time.monotonic() + max(0.0, wait_seconds)
+        warned = False
+        while True:
+            try:
+                fcntl.flock(fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    logger.error(
+                        "Otro proceso ya esta ejecutando el sync (lock: %s). Saliendo sin avanzar checkpoints.",
+                        _LOCK_PATH,
+                    )
+                    sys.exit(75)
+                if not warned:
+                    logger.info(
+                        "Hay una corrida del sync en curso; esperando hasta %.0f s a que termine...",
+                        wait_seconds,
+                    )
+                    warned = True
+                time.sleep(_LOCK_POLL_SECONDS)
         # Marca PID del owner para diagnostico.
         try:
             fd.seek(0)
@@ -1025,48 +1057,493 @@ def _cmd_retry_queue_locked(args) -> None:
         retry_store.close()
 
 
-def _force_send_pending(retry_store: RetryStore, entity: str, batch_size: int = 500) -> None:
-    """Dispara YA la sincronizacion de `entity`, sin esperar al proximo cron.
+def _force_send_pending(retry_store: RetryStore, entity: str, batch_size: int | None = None) -> None:
+    """Reenvia YA lo 'pending' de `entity` en la cola, sin esperar al proximo cron.
 
-    Reusa el mismo camino que `main.py run --entity X`: `_sync_entity` reinyecta
-    los pendientes de retry_queue en la query (via `_op_retry_filter` /
-    `_sg_retry_filter` / `_proveedores_retry_filter`) sin importar la posicion
-    del cursor; para `oc_items`/`clasificaciones` (full_load) el proximo scan
-    ya los trae solos. Si habia filas 'permanent', usar `--requeue --send-now`
-    juntos para que primero vuelvan a 'pending' y despues se reenvien aca mismo.
+    Manda SOLO las claves de la cola (via `_resend_records`, el mismo camino
+    que `main.py resend --from-queue`): no corre la entidad entera ni toca el
+    checkpoint -- eso lo sigue haciendo el cron. Si habia filas 'permanent',
+    usar `--requeue --send-now` juntos para que primero vuelvan a 'pending'.
     """
-    exporter = None
+    keys = _queue_keys(retry_store, entity, STATUS_PENDING)
+    if not keys:
+        logger.info("retry-queue --send-now [%s]: no hay registros 'pending' en la cola.", entity)
+        return
+    report = _resend_records(retry_store, entity, keys=keys, batch_size=batch_size)
+    _print_resend_report(report)
+    # Un registro que sigue esperando una dependencia (OMITIDO) es normal en la
+    # cola; solo un rechazo o un envio caido hacen fallar el comando.
+    if report.exit_code(strict=False):
+        raise SystemExit(1)
+
+
+# ─── resend ───────────────────────────────────────────────────────────────────
+
+# Resultados posibles por registro en `main.py resend`.
+RESEND_OK = "OK"
+RESEND_REJECTED = "RECHAZADO"
+RESEND_NOT_APPLIED = "NO APLICADO"
+RESEND_SKIPPED = "OMITIDO"
+RESEND_UNCHANGED = "SIN CAMBIOS"
+RESEND_NOT_FOUND = "NO EXISTE EN RAFAM"
+RESEND_FAILED = "FALLO EL ENVIO"
+RESEND_NOT_SENT = "NO ENVIADO"
+
+# Espera maxima del lock para comandos manuales (una corrida de cron puede
+# tardar varios minutos).
+_RESEND_LOCK_WAIT_SECONDS = 600
+# Requests extra para aislar, clave por clave, un batch que fallo entero.
+_RESEND_ISOLATION_MAX_REQUESTS = 50
+_RESEND_KEYS_BATCH_SIZE = 50
+_RESEND_WINDOW_BATCH_SIZE = 500
+
+
+@dataclass
+class ResendResult:
+    key: str
+    status: str
+    detail: str = ""
+
+
+@dataclass
+class ResendReport:
+    entity: str
+    dry_run: bool
+    by_keys: bool
+    results: list[ResendResult] = field(default_factory=list)
+    # Filas de OTRAS entidades que vinieron en la misma respuesta (gastos
+    # embebidos en el payload de orden_pago).
+    related: list[tuple[str, str, str]] = field(default_factory=list)
+    requeued: int = 0
+    aborted_reason: str | None = None
+
+    def counts(self) -> dict[str, int]:
+        out: dict[str, int] = {}
+        for res in self.results:
+            out[res.status] = out.get(res.status, 0) + 1
+        return out
+
+    def exit_code(self, strict: bool | None = None) -> int:
+        """1 si algun registro no quedo OK.
+
+        ``strict`` (default: modo por claves): un OMITIDO tambien cuenta como
+        fallo -- el operador pidio ese registro puntual y no se envio. En modo
+        ventana o desde la cola, OMITIDO/SIN CAMBIOS son esperables.
+        """
+        if strict is None:
+            strict = self.by_keys
+        failing = {RESEND_REJECTED, RESEND_NOT_APPLIED, RESEND_FAILED, RESEND_NOT_SENT}
+        if strict:
+            failing |= {RESEND_SKIPPED, RESEND_NOT_FOUND}
+        return 1 if any(r.status in failing for r in self.results) else 0
+
+
+def _is_infra_failure(exc: Exception) -> bool:
+    """Fallo del backend/red (no de los datos): no tiene sentido aislar por clave."""
+    if isinstance(exc, (BackendInfraError, AuthCircuitOpenError, TimeoutError, ConnectionError)):
+        return True
+    msg = str(exc)
+    return msg.startswith("URL error") or "timed out" in msg.lower()
+
+
+def _queue_keys(retry_store: RetryStore, entity: str, status: str | None) -> list[str]:
+    """Claves base de la cola de `entity` (dedup, en orden de la cola)."""
+    keys: list[str] = []
+    for item in retry_store.list_items(entity=entity, status=status):
+        base = record_base_key(entity, item.external_id)
+        if base is not None and base not in keys:
+            keys.append(base)
+    return keys
+
+
+def _queue_reason(retry_store: RetryStore, entity: str, base_key: str) -> str | None:
+    for item in retry_store.list_items(entity=entity):
+        if record_base_key(entity, item.external_id) == base_key:
+            motivo = item.reason_detail or item.reason_code
+            return f"en cola ({item.status}, {motivo}): {item.error_message or 'sin detalle'}"
+    return None
+
+
+class _ResendRun:
+    """Estado acumulado de un reenvio (claves vistas, resultados, fallos)."""
+
+    def __init__(self, entity: str):
+        self.entity = entity
+        self.seen: list[str] = []
+        self._seen_set: set[str] = set()
+        self.outcomes: dict[str, list] = {}
+        self.related: list = []
+        self.failed: dict[str, str] = {}
+        self.not_sent: dict[str, str] = {}
+        # Solo proveedores: su mapper es funcional (sin sink), asi que el motivo
+        # de omision se deduce de la fila cruda.
+        self.raw_by_key: dict[str, dict] = {}
+        self.aborted_reason: str | None = None
+        self.isolation_budget = _RESEND_ISOLATION_MAX_REQUESTS
+
+    def see(self, key: str | None) -> None:
+        if key is not None and key not in self._seen_set:
+            self._seen_set.add(key)
+            self.seen.append(key)
+
+    def add_outcomes(self, outcomes) -> None:
+        for outcome in outcomes:
+            if outcome.entity != self.entity:
+                self.related.append(outcome)
+                continue
+            base = outcome.base_key
+            if base is not None:
+                self.outcomes.setdefault(base, []).append(outcome)
+
+
+def _group_rows_by_key(entity: str, columns: list[str], batch: list[tuple]) -> dict[str | None, list[tuple]]:
+    groups: dict[str | None, list[tuple]] = {}
+    for row in batch:
+        groups.setdefault(record_key_from_row(entity, dict(zip(columns, row))), []).append(row)
+    return groups
+
+
+def _resend_write(exporter, run: _ResendRun, columns: list[str], rows: list[tuple]) -> Exception | None:
+    """Un POST: junta los resultados por fila. Devuelve la excepcion si fallo."""
     try:
-        exporter = build_exporter(dry_run=False)
-        engine = _build_engine()
-        if hasattr(exporter, "attach_retry_store"):
-            exporter.attach_retry_store(retry_store)
+        exporter.write_batch(run.entity, columns, rows)
+        return None
+    except Exception as exc:  # noqa: BLE001 - se reporta por clave
+        return exc
+    finally:
+        run.add_outcomes(exporter.get_last_batch_outcomes())
+
+
+def _resend_batch(exporter, run: _ResendRun, columns: list[str], batch: list[tuple]) -> None:
+    groups = _group_rows_by_key(run.entity, columns, batch)
+    keys = [k for k in groups if k is not None]
+    for key in keys:
+        run.see(key)
+        if run.entity == "proveedores":
+            run.raw_by_key[key] = dict(zip(columns, groups[key][0]))
+
+    if run.aborted_reason is not None:
+        for key in keys:
+            run.not_sent[key] = run.aborted_reason
+        return
+
+    exc = _resend_write(exporter, run, columns, batch)
+    if exc is None:
+        return
+
+    pending = [k for k in keys if k not in run.outcomes]
+    if _is_infra_failure(exc):
+        run.aborted_reason = f"backend/red caido, se corto el reenvio: {exc}"
+        logger.error("resend [%s]: %s", run.entity, run.aborted_reason)
+        for key in pending:
+            run.not_sent[key] = run.aborted_reason
+        return
+
+    if len(pending) <= 1 or run.isolation_budget <= 0:
+        for key in pending:
+            run.failed[key] = str(exc)
+        return
+
+    # Un registro roto no tiene que hundir a los demas: reintentar uno por uno.
+    logger.warning(
+        "resend [%s]: el batch de %d registros fallo (%s); reintentando de a uno para aislar el que falla.",
+        run.entity, len(pending), exc,
+    )
+    for key in pending:
+        if run.aborted_reason is not None:
+            run.not_sent[key] = run.aborted_reason
+            continue
+        if run.isolation_budget <= 0:
+            run.failed[key] = f"{exc} (sin aislar: se agoto el tope de {_RESEND_ISOLATION_MAX_REQUESTS} reintentos)"
+            continue
+        run.isolation_budget -= 1
+        single_exc = _resend_write(exporter, run, columns, groups[key])
+        if single_exc is None:
+            continue
+        if _is_infra_failure(single_exc):
+            run.aborted_reason = f"backend/red caido, se corto el reenvio: {single_exc}"
+            run.not_sent[key] = run.aborted_reason
+        elif key not in run.outcomes:
+            run.failed[key] = str(single_exc)
+
+
+def _iter_resend_batches(result, columns: list[str], entity: str, batch_size: int):
+    group_fields = GROUPED_BATCH_FIELDS.get(entity)
+    if group_fields:
+        yield from iter_grouped_batches(result, columns, group_fields, batch_size)
+        return
+    while True:
+        rows = result.fetchmany(batch_size)
+        if not rows:
+            return
+        yield [tuple(row) for row in rows]
+
+
+def _classify_resend_key(
+    run: _ResendRun,
+    key: str,
+    *,
+    by_keys: bool,
+    dry_run: bool,
+    sink: RecordEventSink,
+    retry_store: RetryStore,
+) -> ResendResult:
+    outcomes = run.outcomes.get(key)
+    if outcomes:
+        errors = [o for o in outcomes if not o.ok]
+        if errors:
+            detail = " ; ".join(dict.fromkeys(o.message or "rechazado sin mensaje" for o in errors))
+            return ResendResult(key, RESEND_REJECTED, detail)
+        not_found = [o for o in outcomes if o.mode == "skipped_not_found"]
+        if not_found:
+            return ResendResult(
+                key, RESEND_NOT_APPLIED,
+                f"el id Paxapos {not_found[0].remote_id} ya no existe (baja manual en destino); no se modifico nada",
+            )
+        last = outcomes[-1]
+        detail = f"modo={last.mode or '?'}"
+        if last.remote_id is not None:
+            detail += f", id Paxapos={last.remote_id}"
+        if dry_run:
+            detail += " (dry-run: Paxapos no persiste)"
+        return ResendResult(key, RESEND_OK, detail)
+    if key in run.failed:
+        return ResendResult(key, RESEND_FAILED, run.failed[key])
+    if key in run.not_sent:
+        return ResendResult(key, RESEND_NOT_SENT, run.not_sent[key])
+    if key not in run._seen_set:
+        return ResendResult(key, RESEND_NOT_FOUND, "no hay filas en RAFAM con esa clave")
+
+    reason = sink.reason_for(run.entity, key)
+    if reason is None and run.entity == "proveedores":
+        if is_cod_prov_excluded(key):
+            reason = "proveedor excluido por configuracion"
+        elif map_proveedor_migrator_row(run.raw_by_key.get(key, {})) is None:
+            reason = "fila invalida en RAFAM: no se pudo mapear (falta FANTASIA/RAZON_SOCIAL)"
+    if reason is None:
+        reason = _queue_reason(retry_store, run.entity, key)
+    if reason is None:
+        if not by_keys:
+            return ResendResult(key, RESEND_UNCHANGED, "ya migrado y sin cambios en RAFAM")
+        reason = "omitido por el script sin motivo registrado (ver log)"
+    return ResendResult(key, RESEND_SKIPPED, reason)
+
+
+def _resend_records(
+    retry_store: RetryStore,
+    entity: str,
+    *,
+    keys: list[str] | None = None,
+    date_range: tuple[date, date] | None = None,
+    dry_run: bool = False,
+    batch_size: int | None = None,
+) -> ResendReport:
+    """Envia a Paxapos SOLO los registros pedidos, sin tocar checkpoints.
+
+    ``keys`` (claves base) fuerza el reenvio aunque el registro este "sin
+    cambios" o 'permanent'; ``date_range`` reevalua una ventana con las reglas
+    normales del pipeline (ver `SourceRepository.build_statement`).
+    """
+    if (keys is None) == (date_range is None):
+        raise ValueError("_resend_records requiere keys o date_range (uno solo)")
+    by_keys = keys is not None
+    keys = list(dict.fromkeys(keys)) if keys is not None else None
+    if batch_size is None:
+        batch_size = _RESEND_KEYS_BATCH_SIZE if by_keys else _RESEND_WINDOW_BATCH_SIZE
+    batch_size = _effective_batch_size(entity, batch_size)
+
+    report = ResendReport(entity=entity, dry_run=dry_run, by_keys=by_keys)
+    run = _ResendRun(entity)
+    sink = RecordEventSink()
+    exporter = build_exporter(dry_run=dry_run)
+    try:
+        # Un 'permanent' reenviado a mano arranca de cero: si vuelve a fallar se
+        # reencola con attempts=1 en vez de quedar trabado en 'permanent'.
+        if by_keys and not dry_run:
+            wanted = set(keys)
+            for item in retry_store.list_items(entity=entity, status=STATUS_PERMANENT):
+                if record_base_key(entity, item.external_id) in wanted:
+                    report.requeued += retry_store.requeue(entity=entity, external_id=item.external_id)
+
+        exporter.attach_retry_store(retry_store)
+        exporter.attach_event_sink(sink)
+        if by_keys:
+            exporter.set_force_keys(entity, keys)
 
         source_engine = create_source_engine()
         with source_engine.connect() as conn:
             source_repo = SourceRepository(conn)
-            if hasattr(exporter, "attach_source"):
-                exporter.attach_source(source_repo)
-            ok, err_msg, metrics = _sync_entity(
-                source_repo, engine, exporter, entity, batch_size, None, False, retry_store,
+            exporter.attach_source(source_repo)
+            # Checkpoint sintetico: nunca se lee ni se escribe state/checkpoint.db.
+            stmt = source_repo.build_statement(
+                entity,
+                Checkpoint(entity=entity),
+                only_keys=set(keys) if by_keys else None,
+                date_range=date_range,
             )
-        if ok:
-            logger.info(
-                "retry-queue --send-now [%s]: reenvio forzado terminado OK "
-                "(%d registro(s) procesados en esta corrida).",
-                entity, metrics.get("records_ok", 0),
-            )
-        else:
-            logger.error(
-                "retry-queue --send-now [%s]: termino con errores: %s. "
-                "Revisar el log de arriba y `main.py retry-queue --entity %s` "
-                "para el estado actual de la cola.",
-                entity, err_msg, entity,
-            )
-            raise SystemExit(1)
+            result = source_repo.execute(stmt)
+            columns = list(result.keys())
+            for batch in _iter_resend_batches(result, columns, entity, batch_size):
+                _resend_batch(exporter, run, columns, batch)
     finally:
-        if exporter:
-            exporter.close()
+        exporter.close()
+
+    report.aborted_reason = run.aborted_reason
+    for key in (keys if by_keys else run.seen):
+        report.results.append(_classify_resend_key(
+            run, key, by_keys=by_keys, dry_run=dry_run, sink=sink, retry_store=retry_store,
+        ))
+    for outcome in run.related:
+        status = RESEND_OK if outcome.ok else RESEND_REJECTED
+        detail = (
+            f"modo={outcome.mode or '?'}, id Paxapos={outcome.remote_id}"
+            if outcome.ok
+            else (outcome.message or "rechazado sin mensaje")
+        )
+        report.related.append((describe_retry_key(outcome.entity, outcome.key), status, detail))
+    return report
+
+
+def _print_resend_report(report: ResendReport) -> None:
+    title = f"Reenvio de {report.entity}"
+    if report.dry_run:
+        title += " [DRY-RUN: Paxapos no persiste nada]"
+    print()
+    print(title)
+    print("─" * 100)
+    if report.requeued:
+        print(f"  {report.requeued} registro(s) estaban 'permanent' en la cola: se reencolaron (pending, 0 intentos).")
+    if report.by_keys:
+        shown = report.results
+    else:
+        # Ventana: puede traer miles de registros. Se detalla lo que fallo y los
+        # omitidos se agrupan por motivo.
+        shown = [
+            r for r in report.results
+            if r.status not in (RESEND_OK, RESEND_UNCHANGED, RESEND_SKIPPED)
+        ]
+    col = "  {:<32} {:<20} {}"
+    if shown:
+        print(col.format("Registro", "Resultado", "Detalle"))
+        for res in shown:
+            print(col.format(describe_retry_key(report.entity, res.key)[:32], res.status, res.detail))
+    if not report.by_keys:
+        by_reason: dict[str, list[str]] = {}
+        for res in report.results:
+            if res.status == RESEND_SKIPPED:
+                by_reason.setdefault(_reason_category(res.detail), []).append(
+                    describe_retry_key(report.entity, res.key)
+                )
+        if by_reason:
+            print()
+            print("  Omitidos por motivo (detalle de cada uno: resend --key <registro>):")
+            for reason, labels in sorted(by_reason.items(), key=lambda kv: -len(kv[1])):
+                ejemplos = ", ".join(labels[:3]) + (" ..." if len(labels) > 3 else "")
+                print(f"    {len(labels):>5} x {reason}  [{ejemplos}]")
+    if report.related:
+        print()
+        print("  Registros relacionados en la misma respuesta:")
+        for label, status, detail in report.related:
+            print(col.format(label[:32], status, detail))
+    print()
+    counts = report.counts()
+    resumen = ", ".join(f"{status}: {n}" for status, n in sorted(counts.items())) or "sin registros"
+    print(f"  Total {len(report.results)} registro(s) — {resumen}")
+    if report.aborted_reason:
+        print(f"  ATENCION: {report.aborted_reason}")
+    print()
+
+
+def _reason_category(detail: str) -> str:
+    """Motivo sin numeros ni comando sugerido, para agrupar omitidos de una ventana."""
+    reason = detail.split("; primero:", 1)[0]
+    return re.sub(r"\d[\d.-]*", "#", reason)
+
+
+def _read_keys_file(path: str) -> list[str]:
+    lines: list[str] = []
+    with open(path, encoding="utf-8") as fh:
+        for line in fh:
+            line = line.split("#", 1)[0].strip()
+            if line:
+                lines.append(line)
+    return lines
+
+
+def _parse_iso_date(value: str, flag: str) -> date:
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        logger.error("%s debe tener formato YYYY-MM-DD (recibido: %r)", flag, value)
+        raise SystemExit(2)
+
+
+def cmd_resend(args) -> None:
+    """Reenvia registros puntuales (o una ventana de fechas) sin tocar checkpoints."""
+    entity = args.entity
+    keys: list[str] | None = None
+    date_range: tuple[date, date] | None = None
+
+    if args.status and not args.from_queue:
+        logger.error("--status solo aplica junto con --from-queue")
+        raise SystemExit(2)
+    if args.hasta and not args.desde:
+        logger.error("--hasta requiere --desde")
+        raise SystemExit(2)
+
+    if args.key or args.keys_file:
+        raw_keys = list(args.key or [])
+        if args.keys_file:
+            try:
+                raw_keys.extend(_read_keys_file(args.keys_file))
+            except OSError as exc:
+                logger.error("No se pudo leer --keys-file %s: %s", args.keys_file, exc)
+                raise SystemExit(2)
+        keys, errors = [], []
+        for raw in raw_keys:
+            try:
+                keys.append(parse_record_key(entity, raw))
+            except ValueError as exc:
+                errors.append(str(exc))
+        if errors:
+            for err in errors:
+                logger.error(err)
+            raise SystemExit(2)
+        if not keys:
+            logger.error("No se indico ninguna clave")
+            raise SystemExit(2)
+    elif args.desde:
+        desde = _parse_iso_date(args.desde, "--desde")
+        hasta = _parse_iso_date(args.hasta, "--hasta") if args.hasta else date.today()
+        if desde > hasta:
+            logger.error("--desde (%s) es posterior a --hasta (%s)", desde, hasta)
+            raise SystemExit(2)
+        date_range = (desde, hasta)
+
+    with _exclusive_run_lock(wait_seconds=_RESEND_LOCK_WAIT_SECONDS):
+        retry_store = RetryStore()
+        try:
+            if args.from_queue:
+                status = None if args.status == "all" else (args.status or STATUS_PENDING)
+                keys = _queue_keys(retry_store, entity, status)
+                if not keys:
+                    print(f"\nLa cola de reintentos de {entity} no tiene registros (status={args.status or STATUS_PENDING}).\n")
+                    return
+            report = _resend_records(
+                retry_store,
+                entity,
+                keys=keys,
+                date_range=date_range,
+                dry_run=bool(args.dry_run),
+                batch_size=args.batch_size,
+            )
+        finally:
+            retry_store.close()
+
+    _print_resend_report(report)
+    code = report.exit_code(strict=not args.from_queue and keys is not None)
+    if code:
+        raise SystemExit(code)
 
 
 # ─── backfill-gastos ──────────────────────────────────────────────────────────
@@ -1348,13 +1825,57 @@ def main() -> None:
         "--send-now",
         action="store_true",
         help=(
-            "Fuerza el reenvio YA (sin esperar al proximo cron) de lo 'pending' de "
-            "--entity, en este mismo proceso. Combinable con --requeue (primero "
-            "permanent -> pending, despues se reenvia) o --external-id (acota el "
-            "requeue a un registro puntual; el envio siempre reintenta TODO lo "
-            "'pending' de la entidad, que es el comportamiento correcto). "
+            "Reenvia YA (sin esperar al proximo cron) SOLO las claves 'pending' de "
+            "--entity en la cola, y muestra el resultado de cada una (mismo camino "
+            "que `resend --from-queue`; no toca el checkpoint). Combinable con "
+            "--requeue (primero permanent -> pending, despues se reenvia). "
             "Requiere --entity."
         ),
+    )
+
+    resend_p = sub.add_parser(
+        "resend",
+        help="Reenvia registros puntuales (o una ventana de fechas) sin tocar checkpoints",
+        description=(
+            "Reenvia a Paxapos SOLO los registros indicados y muestra el resultado de cada uno. "
+            "Con claves (--key/--keys-file/--from-queue) se fuerza el reenvio aunque el registro "
+            "este 'sin cambios' o 'permanent' (las reglas de negocio se respetan). Con --desde/--hasta "
+            "se reevalua la ventana con las reglas normales (solo se manda lo que cambio). "
+            "Exit 0 si todo quedo OK, 1 si algun registro no."
+        ),
+    )
+    resend_p.add_argument("--entity", required=True, choices=RESENDABLE_ENTITIES)
+    resend_mode = resend_p.add_mutually_exclusive_group(required=True)
+    resend_mode.add_argument(
+        "--key",
+        action="append",
+        metavar="CLAVE",
+        help=(
+            "Clave a reenviar (repetible). Formas: OC 2026-3-1023, OP 2026-1023, gasto 2026-1-58, "
+            "proveedor 1234; tambien el label del mail ('OP 2026-1023') o el JSON de retry-queue"
+        ),
+    )
+    resend_mode.add_argument("--keys-file", metavar="ARCHIVO", help="Archivo con una clave por linea ('#' = comentario)")
+    resend_mode.add_argument(
+        "--from-queue", action="store_true", help="Reenvia las claves de la cola de reintentos de --entity",
+    )
+    resend_mode.add_argument("--desde", metavar="YYYY-MM-DD", help="Inicio de la ventana de fechas (inclusive)")
+    resend_p.add_argument("--hasta", metavar="YYYY-MM-DD", help="Fin de la ventana (inclusive; default: hoy)")
+    resend_p.add_argument(
+        "--status",
+        choices=["pending", "permanent", "all"],
+        help="Con --from-queue: que filas de la cola reenviar (default: pending)",
+    )
+    resend_p.add_argument(
+        "--batch-size",
+        type=int,
+        metavar="N",
+        help=f"Filas por request (default: {_RESEND_KEYS_BATCH_SIZE} con claves, {_RESEND_WINDOW_BATCH_SIZE} con ventana)",
+    )
+    resend_p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Envia con dry_run=true (Paxapos valida pero no persiste); no toca la cola",
     )
 
     daily_p = sub.add_parser(
@@ -1375,6 +1896,7 @@ def main() -> None:
         "backfill-gastos": cmd_backfill_gastos,
         "sync-changes": cmd_sync_changes,
         "retry-queue": cmd_retry_queue,
+        "resend": cmd_resend,
         "daily-report": cmd_daily_report,
     }[args.command](args)
 

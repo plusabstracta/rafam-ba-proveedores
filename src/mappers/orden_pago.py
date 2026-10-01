@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 
+from ..record_events import note_skip
 from ..utils import env_bool, format_date_only, parse_money, to_int
 from ..retry_store import REASON_DEPENDENCY_MISSING
 from ..validation import validate_amount
@@ -40,6 +41,14 @@ def _partida_code_from_op_raw(raw: dict) -> str | None:
 
 class OrdenPagoMapper:
     """Mapper stateful para ORDEN_PAGO."""
+
+    # `main.py resend`: claves a reenviar aunque esten "sin cambios"/'permanent'
+    # (MigratorExporter.set_force_keys) y sink de motivos de omision.
+    _force_keys: frozenset = frozenset()
+    _events = None
+
+    def _note_skip(self, key: tuple[int, int], reason: str) -> None:
+        note_skip(self._events, "orden_pago", self._op_source_key(key[0], key[1]), reason)
 
     def __init__(self, *, link_store, lookup_resolver, source_repo=None, retry_store=None, resolve_gastos_fn=None):
         self._link_store = link_store
@@ -82,6 +91,7 @@ class OrdenPagoMapper:
         Sin esto la OP se pierde para siempre: el watermark del checkpoint avanza
         igual que si se hubiera migrado y la fila nunca vuelve a entrar en la query.
         """
+        self._note_skip(key, f"queda en espera: {reason}")
         if self._retry_store is None or dry_run:
             return
         try:
@@ -287,18 +297,24 @@ class OrdenPagoMapper:
             estado = str(raw.get("ESTADO_OP", "")).strip().upper()
             if estado != "C":
                 skipped_estado[estado or "(vacio)"] = skipped_estado.get(estado or "(vacio)", 0) + 1
+                self._note_skip(
+                    key, f"ESTADO_OP={estado or '(vacio)'}: solo se migran OPs confirmadas (ESTADO_OP=C)",
+                )
                 continue
             confirmado = str(raw.get("CONFIRMADO", "")).strip().upper()
             if confirmado != "S":
                 skipped_confirmado[confirmado or "(vacio)"] = skipped_confirmado.get(confirmado or "(vacio)", 0) + 1
+                self._note_skip(key, f"CONFIRMADO={confirmado or '(vacio)'}: solo se migran OPs con CONFIRMADO=S")
                 continue
             fecha_confirm = format_date_only(raw.get("FECH_CONFIRM") or "")
             if not fecha_confirm:
                 skipped_no_fech_confirm += 1
+                self._note_skip(key, "sin FECH_CONFIRM en RAFAM")
                 continue
 
             sk = json.dumps({"ejercicio": ejercicio, "nro_op": nro_op}, sort_keys=True)
-            if sk in permanent_keys:
+            forced = sk in self._force_keys
+            if sk in permanent_keys and not forced:
                 skipped_permanent_keys.add(key)
                 continue
             # ABM: si la OP ya fue migrada, re-enviarla como MODIFICACION solo si
@@ -316,7 +332,7 @@ class OrdenPagoMapper:
                     and (existing_op.get("fech_confirm") or None) == (fecha_confirm or None)
                     and (existing_op.get("importe_total") or None) == importe_snap
                 )
-                if unchanged:
+                if unchanged and not forced:
                     skipped_existing_keys.add(key)
                     # Ya migrada y al dia: si venia de la cola de reintentos, cerrarla.
                     self._resolve_op(key, dry_run)
@@ -340,6 +356,7 @@ class OrdenPagoMapper:
             )
             if is_cod_prov_excluded(prov_candidate):
                 skipped_excluded_prov += 1
+                self._note_skip(key, f"proveedor excluido por configuracion (COD_PROV={prov_candidate})")
                 # Nunca va a migrar: si quedo encolada antes de excluirla, cerrarla.
                 self._resolve_op(key, dry_run)
                 logger.info(
@@ -378,6 +395,7 @@ class OrdenPagoMapper:
             )
             if not res_importe.ok:
                 reason = res_importe.reason or ""
+                self._note_skip(key, f"IMPORTE_TOTAL={importe_raw!r} invalido: {reason}")
                 if "requerido y vacio" in reason:
                     skipped_importe_invalido["null"] = skipped_importe_invalido.get("null", 0) + 1
                     logger.warning(
@@ -481,6 +499,7 @@ class OrdenPagoMapper:
                         # uno. Encolarla como dependencia la dejaba 'pending' para
                         # siempre (340 OP en sep-2026). Fuera de alcance: se cierra.
                         skipped_no_presupuestaria += 1
+                        self._note_skip(key, "OP no presupuestaria (TIPO_OP=N) sin imputacion: fuera de alcance")
                         self._resolve_op(key, dry_run)
                         logger.debug(
                             "Migrator [orden_pago] OP %s-%s omitida: TIPO_OP=N sin imputacion (fuera de alcance)",
@@ -555,6 +574,15 @@ class OrdenPagoMapper:
                         continue
                 else:
                     skipped_no_oc_link += 1
+                    oc_cortas = [
+                        "{ejercicio}-{uni_compra}-{nro_oc}".format(**json.loads(sk))
+                        for sk in oc_source_keys
+                    ]
+                    self._note_skip(
+                        key,
+                        f"OC {', '.join(oc_cortas)} aun no migrada en Paxapos; primero: "
+                        + " ".join(f"resend --entity oc_items --key {oc}" for oc in oc_cortas),
+                    )
                     self._enqueue_op(
                         key,
                         "OC aun no migrada en Paxapos",
@@ -576,6 +604,11 @@ class OrdenPagoMapper:
                 # cola para que _proveedores_retry_filter lo reinyecte por COD_PROV,
                 # y la OP espera como dependencia.
                 self._enqueue_missing_proveedores(prov_sin_link, key, dry_run)
+                self._note_skip(
+                    key,
+                    f"proveedor COD_PROV={prov_sin_link[0]} aun no migrado en Paxapos; primero: "
+                    f"resend --entity proveedores --key {prov_sin_link[0]}",
+                )
                 self._enqueue_op(
                     key,
                     f"proveedor COD_PROV={prov_sin_link[0]} aun no migrado en Paxapos",
