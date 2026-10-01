@@ -249,12 +249,14 @@ class TestRetencionesEgresoBorrado:
         assert retry.pending_external_ids("retenciones") == set()
         retry.close()
 
-    def test_deducciones_no_impositivas_se_encolan_con_detalle_propio(self, monkeypatch, tmp_path):
-        """IPS/IOMA/garantia (TIPO_DEDUC=O) no son retenciones para Paxapos: no es
-        un problema de catalogo, y el reporte debe distinguirlo de 'unresolved'."""
+    def test_deducciones_no_impositivas_quedan_fuera_de_alcance(self, monkeypatch, tmp_path):
+        """IPS/IOMA/garantia (TIPO_DEDUC=O) no son retenciones para Paxapos: no
+        hay nada que reintentar (igual que una OP TIPO_OP=N), asi que no se
+        encolan y, si habia una entrada vieja en la cola, se cierra."""
         exporter = _migrator(monkeypatch, tmp_path)
         retry = RetryStore(db_path=str(tmp_path / "retry.db"))
         exporter.attach_retry_store(retry)
+        retry.enqueue("retenciones", _OP_SK, REASON_DEPENDENCY_MISSING, "legacy", reason_detail="non_tax_deduction")
         exporter._link_store.save_link("orden_pago", _OP_SK, "5001")
         exporter.attach_source(_FakeSourceRepo({(2026, 100): [
             {"codigo_deduc": "4", "importe_reten": 10.0, "descripcion": "Garantia", "tipo_deduc": "O"},
@@ -265,10 +267,7 @@ class TestRetencionesEgresoBorrado:
             exporter.write_batch("retenciones", _RET_COLUMNS, [(2026, 100)])
             post.assert_not_called()
 
-        item = retry.list_items("retenciones")[0]
-        assert item.reason_code == REASON_DEPENDENCY_MISSING
-        assert item.reason_detail == "non_tax_deduction"
-        assert "Garantia" in item.error_message
+        assert retry.list_items("retenciones") == []
         retry.close()
 
     def test_impositiva_sin_match_sigue_siendo_unresolved(self, monkeypatch, tmp_path):
@@ -286,7 +285,11 @@ class TestRetencionesEgresoBorrado:
             exporter.write_batch("retenciones", _RET_COLUMNS, [(2026, 100)])
             post.assert_not_called()
 
-        assert retry.list_items("retenciones")[0].reason_detail == "retention_type_unresolved"
+        [item] = retry.list_items("retenciones")
+        assert item.reason_detail == "retention_type_unresolved"
+        # Es un pendiente real del catalogo de Paxapos: alerta y cuenta intentos.
+        assert item.reason_code == "validation_client"
+        assert "Profesiones Liberales" in item.error_message
         retry.close()
 
     def test_op_de_proveedor_excluido_no_se_envia_y_cierra_la_cola(self, monkeypatch, tmp_path):

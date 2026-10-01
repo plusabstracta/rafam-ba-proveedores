@@ -38,6 +38,7 @@ from src.exporter import BaseExporter, build_exporter, fetch_migrator_lookups, f
 from src.gateway_mapper import map_proveedor_migrator_row
 from src.logging_config import setup_file_logging
 from src.models import Checkpoint
+from src.record_alerts import flush_record_alerts
 from src.record_events import RecordEventSink
 from src.retry_labels import (
     RESENDABLE_ENTITIES,
@@ -50,6 +51,7 @@ from src.retry_store import STATUS_PENDING, STATUS_PERMANENT, RetryStore
 from src.run_history import record_run
 from src.source_repository import SourceRepository
 from src.sync_engine import SyncEngine
+from src.utils import utc_sql_to_local
 
 load_dotenv()
 
@@ -665,6 +667,7 @@ def _cmd_run_locked(args) -> None:
     retry_counts_end = {}
     retry_summary_start = []
     retry_summary_end = []
+    record_alerts_sent = 0
     entity_metrics = []
 
     if _EJERCICIO_MIN:
@@ -748,6 +751,11 @@ def _cmd_run_locked(args) -> None:
         except Exception:  # pragma: no cover - defensive
             pass
 
+        # Un mail por cada registro que en esta corrida quedo rechazado u
+        # omitido por datos invalidos (el resumen diario sigue igual).
+        if retry_store and not args.dry_run:
+            record_alerts_sent = _flush_record_alerts(retry_store)
+
         # Calcular duración total
         run_duration_secs = time.monotonic() - run_t0
         hours, rem = divmod(int(run_duration_secs), 3600)
@@ -776,6 +784,7 @@ def _cmd_run_locked(args) -> None:
                 "retry_counts_end": retry_counts_end,
                 "retry_summary_start": retry_summary_start,
                 "retry_summary_end": retry_summary_end,
+                "record_alerts_sent": record_alerts_sent,
             }
             record_run(summary_data, entity_metrics)
         else:
@@ -790,6 +799,7 @@ def _cmd_run_locked(args) -> None:
                 "retry_counts_end": retry_counts_end,
                 "retry_summary_start": retry_summary_start,
                 "retry_summary_end": retry_summary_end,
+                "record_alerts_sent": record_alerts_sent,
             }
             record_run(summary_data, entity_metrics)
 
@@ -1048,13 +1058,23 @@ def _cmd_retry_queue_locked(args) -> None:
             print(
                 f"  {describe_retry_key(it.entity, it.external_id)} "
                 f"(entity={it.entity} external_id={it.external_id}): "
-                f"first_seen={it.first_seen}, last_attempt={it.last_attempt or '—'}"
+                f"first_seen={utc_sql_to_local(it.first_seen)}, "
+                f"last_attempt={utc_sql_to_local(it.last_attempt)} (hora local)"
             )
             if it.error_message:
                 print(f"    ultimo error: {it.error_message}")
         print()
     finally:
         retry_store.close()
+
+
+def _flush_record_alerts(retry_store: RetryStore) -> int:
+    """Mails individuales pendientes; un fallo del mail nunca corta el comando."""
+    try:
+        return flush_record_alerts(retry_store)
+    except Exception:  # noqa: BLE001 - las alertas no pueden romper la corrida
+        logger.warning("No se pudieron enviar las alertas por registro", exc_info=True)
+        return 0
 
 
 def _force_send_pending(retry_store: RetryStore, entity: str, batch_size: int | None = None) -> None:
@@ -1071,6 +1091,7 @@ def _force_send_pending(retry_store: RetryStore, entity: str, batch_size: int | 
         return
     report = _resend_records(retry_store, entity, keys=keys, batch_size=batch_size)
     _print_resend_report(report)
+    _flush_record_alerts(retry_store)
     # Un registro que sigue esperando una dependencia (OMITIDO) es normal en la
     # cola; solo un rechazo o un envio caido hacen fallar el comando.
     if report.exit_code(strict=False):
@@ -1537,6 +1558,8 @@ def cmd_resend(args) -> None:
                 dry_run=bool(args.dry_run),
                 batch_size=args.batch_size,
             )
+            if not args.dry_run:
+                _flush_record_alerts(retry_store)
         finally:
             retry_store.close()
 

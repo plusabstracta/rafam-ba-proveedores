@@ -12,6 +12,7 @@ Variables de entorno:
     NOTIFY_FROM             Dirección remitente (default: NOTIFY_SMTP_USER)
     NOTIFY_TO               Destinatarios separados por coma
     NOTIFY_SUBJECT_PREFIX   Prefijo del asunto (default: [RAFAM])
+    NOTIFY_ALERT_TO         Destinatarios de los mails por registro (default: NOTIFY_TO)
 """
 
 from __future__ import annotations
@@ -24,6 +25,9 @@ import ssl
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from typing import Sequence
+
+from .retry_labels import describe_retry_key
+from .utils import utc_sql_to_local
 
 logger = logging.getLogger(__name__)
 
@@ -40,11 +44,19 @@ def _is_enabled() -> bool:
     return bool(_env("NOTIFY_SMTP_HOST"))
 
 
+def notifications_enabled() -> bool:
+    return _is_enabled()
+
+
+def _split_recipients(raw: str) -> list[str]:
+    return [r.strip() for r in raw.split(",") if r.strip()]
+
+
 def _build_recipients() -> list[str]:
     raw = _env("NOTIFY_TO")
     if not raw:
         return []
-    return [r.strip() for r in raw.split(",") if r.strip()]
+    return _split_recipients(raw)
 
 
 def send_notification(
@@ -53,6 +65,7 @@ def send_notification(
     *,
     is_html: bool = False,
     extra_recipients: Sequence[str] = (),
+    recipients: Sequence[str] | None = None,
 ) -> bool:
     """Envía una notificación por email.
 
@@ -61,6 +74,7 @@ def send_notification(
         body: Cuerpo del mensaje (texto plano o HTML según is_html).
         is_html: Si True, envía como text/html; si False, como text/plain.
         extra_recipients: Destinatarios adicionales a los configurados en NOTIFY_TO.
+        recipients: Si se pasa, reemplaza a NOTIFY_TO (ej. NOTIFY_ALERT_TO).
 
     Returns:
         True si el envío fue exitoso, False en caso contrario.
@@ -84,7 +98,8 @@ def send_notification(
     from_addr = _env("NOTIFY_FROM") or smtp_user
     subject_prefix = _env("NOTIFY_SUBJECT_PREFIX", "[RAFAM]")
 
-    recipients = _build_recipients() + list(extra_recipients)
+    base_recipients = list(recipients) if recipients else _build_recipients()
+    recipients = base_recipients + list(extra_recipients)
     if not recipients:
         logger.warning("notifier: NOTIFY_TO no configurado — no hay destinatarios")
         return False
@@ -371,6 +386,11 @@ def notify_run_report(
     lines.append(f"  • Rechazados por Paxapos : {total_migrator_errors:,}")
     lines.append(f"  • Diferidos (dependencia pendiente): {total_migrator_deferred:,}")
     lines.append(f"  • Batches OK / con error : {total_batches_ok} / {total_batches_failed}")
+    if summary_data.get("record_alerts_sent") is not None:
+        lines.append(
+            f"  • Alertas por registro enviadas: {int(summary_data.get('record_alerts_sent') or 0):,}"
+            "  (un mail por cada registro rechazado u omitido por datos invalidos)"
+        )
     lines.append(f"  • Velocidad global       : {global_speed_min:,.1f} reg/min   ({global_speed_sec:,.1f} reg/s)")
     lines.append("  • Nota                  : filas leídas no equivale a altas nuevas en Paxapos")
     lines.append("")
@@ -451,8 +471,8 @@ def notify_run_report(
             lines.append(
                 f"    - {row.get('entity', '?')} | {row.get('status', '?')} | "
                 f"{row.get('reason_code', '?')}/{detail}: {int(row.get('count', 0) or 0):,} "
-                f"(desde {row.get('oldest_first_seen') or '—'}, último intento "
-                f"{row.get('last_attempt') or '—'}, máx. intentos {int(row.get('max_attempts', 0) or 0)})"
+                f"(desde {utc_sql_to_local(row.get('oldest_first_seen'))}, último intento "
+                f"{utc_sql_to_local(row.get('last_attempt'))}, máx. intentos {int(row.get('max_attempts', 0) or 0)})"
             )
     retry_detail = summary_data.get("retry_detail_end") or {}
     if retry_detail:
@@ -470,7 +490,8 @@ def notify_run_report(
                 lines.append(
                     f"      · {row.get('label', '?')} — {row.get('status', '?')} "
                     f"({row.get('reason_code', '?')}/{detail}, intento {row.get('attempts', 0)}, "
-                    f"desde {row.get('first_seen') or '—'}, ultimo intento {row.get('last_attempt') or '—'})"
+                    f"desde {utc_sql_to_local(row.get('first_seen'))}, "
+                    f"ultimo intento {utc_sql_to_local(row.get('last_attempt'))})"
                 )
                 error_message = row.get("error_message")
                 if error_message:
@@ -490,3 +511,115 @@ def notify_run_report(
 
     body = "\n".join(lines)
     return send_notification(subject, body, is_html=False)
+
+
+# ─── Alertas por registro (un mail por registro que no llego a Paxapos) ──────
+
+_REASON_HEADLINE = {
+    "backend_rejected": "Paxapos lo rechazo",
+    "validation_client": "no se envio (datos invalidos)",
+    "batch_failed": "fallo el envio (aislado de un batch caido)",
+}
+
+_CLI = ".venv/bin/python main.py"
+
+
+def _alert_recipients() -> list[str] | None:
+    raw = _env("NOTIFY_ALERT_TO")
+    return _split_recipients(raw) if raw else None
+
+
+def notify_record_failure(item, *, max_attempts: int) -> bool:
+    """Mail SOLO de este registro (rechazado por Paxapos u omitido por datos invalidos).
+
+    ``item`` es un `retry_store.RetryItem`. Se manda al entrar a la cola y otra
+    vez si pasa a 'permanent' (ver RetryStore.pending_alerts).
+    """
+    label = describe_retry_key(item.entity, item.external_id)
+    headline = _REASON_HEADLINE.get(item.reason_code, item.reason_code)
+    permanent = item.status == "permanent"
+    if permanent:
+        subject = f"{label}: PASO A PERMANENT ({headline})"
+        estado = (
+            f"PERMANENT — agoto {item.attempts} intento(s) y ya no se reintenta solo"
+        )
+    else:
+        subject = f"{label}: {headline}"
+        estado = (
+            f"pendiente — se reintenta solo en cada corrida "
+            f"(intento {item.attempts} de {max_attempts})"
+        )
+
+    SEP = "=" * 70
+    SUB = "-" * 70
+    external_id = str(item.external_id).replace("'", "'\\''")
+    lines = [
+        SEP,
+        "REGISTRO QUE NO LLEGO A PAXAPOS",
+        SEP,
+        f"Registro       : {label}",
+        f"Entidad        : {item.entity}",
+        f"Que paso       : {headline}",
+        f"Motivo         : {item.reason_code} / {item.reason_detail or 'sin detalle'}",
+        f"Estado         : {estado}",
+        f"Primera falla  : {utc_sql_to_local(item.first_seen)} (hora local)",
+        f"Ultimo intento : {utc_sql_to_local(item.last_attempt)} (hora local)",
+        f"Servidor       : {socket.gethostname()}",
+        "",
+        "ERROR",
+        SUB,
+    ]
+    lines.extend(f"  {line}" for line in str(item.error_message or "sin mensaje").splitlines())
+    lines += [
+        "",
+        "QUE HACER",
+        SUB,
+        "  1. Corregir la causa (el dato en RAFAM o la configuracion en Paxapos).",
+        "  2. Reenviarlo (probar antes agregando --dry-run):",
+        f'       {_CLI} resend --entity {item.entity} --key "{label}"',
+        "",
+        "  Ver el detalle en la cola:",
+        f"       {_CLI} retry-queue --entity {item.entity} --external-id '{external_id}'",
+        "  Si no corresponde migrarlo:",
+        f"       {_CLI} retry-queue --dismiss --entity {item.entity} "
+        f"--external-id '{external_id}' --note 'motivo'",
+        "",
+        SEP,
+        "Se avisa una vez por registro (y otra si pasa a permanent). El resumen diario sigue igual.",
+    ]
+    return send_notification(subject, "\n".join(lines), recipients=_alert_recipients())
+
+
+def notify_record_failures_overflow(items) -> bool:
+    """Un unico mail con los registros que superaron el tope de alertas por corrida."""
+    SEP = "=" * 70
+    subject = f"{len(items)} registro(s) mas no llegaron a Paxapos (resumen por tope de alertas)"
+    lines = [
+        SEP,
+        f"{len(items)} REGISTRO(S) MAS NO LLEGARON A PAXAPOS",
+        SEP,
+        "Se supero el tope de mails individuales por corrida (NOTIFY_RECORD_ALERT_MAX_PER_RUN).",
+        "Si son muchos con el mismo error, probablemente sea un cambio o falla del lado de Paxapos.",
+        "",
+        "Por causa:",
+    ]
+    by_cause: dict[tuple[str, str], int] = {}
+    for item in items:
+        cause = (item.entity, f"{item.reason_code}/{item.reason_detail or 'sin detalle'}")
+        by_cause[cause] = by_cause.get(cause, 0) + 1
+    for (entity, cause), count in sorted(by_cause.items(), key=lambda kv: -kv[1]):
+        lines.append(f"  {count:>5} x {entity} — {cause}")
+    lines += ["", "Detalle:"]
+    for item in items:
+        label = describe_retry_key(item.entity, item.external_id)
+        headline = _REASON_HEADLINE.get(item.reason_code, item.reason_code)
+        estado = "PERMANENT" if item.status == "permanent" else "pendiente"
+        first_line = str(item.error_message or "sin mensaje").splitlines()[0][:200]
+        lines.append(f"  · {label} — {headline} — {estado}")
+        lines.append(f"      {first_line}")
+    lines += [
+        "",
+        f"Ver todo: {_CLI} retry-queue --entity <entidad>",
+        f"Reenviar: {_CLI} resend --entity <entidad> --from-queue --status all",
+    ]
+    return send_notification(subject, "\n".join(lines), recipients=_alert_recipients())

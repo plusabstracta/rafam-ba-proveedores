@@ -12,7 +12,7 @@ import logging
 
 from ..config import is_cod_prov_excluded
 from ..record_events import note_skip
-from ..retry_store import REASON_DEPENDENCY_MISSING
+from ..retry_store import REASON_DEPENDENCY_MISSING, REASON_VALIDATION_CLIENT
 from ..utils import normalize_text, to_int
 from ..validation import validate_amount
 
@@ -166,29 +166,33 @@ class RetencionesMapper:
             if not mapped:
                 # Hay deducciones pero ninguna mapeo. Dos causas distintas:
                 #  - todas son TIPO_DEDUC='O' (IPS, IOMA, sindicato, garantia...):
-                #    no son retenciones impositivas y Paxapos no las modela; no
-                #    hay nada que "resolver" del lado del catalogo;
+                #    no son retenciones impositivas y Paxapos no las modela. Fuera
+                #    de alcance (igual que una OP TIPO_OP=N): no hay nada que
+                #    reintentar, asi que se cierra la cola en vez de encolar.
                 #  - hay alguna 'I' que el catalogo tipos_retencion no matchea
-                #    (o el lookup fallo al cargarse): eso si es un pendiente real.
-                # Ambas se encolan (para no perderlas si el catalogo cambia) pero
-                # con reason_detail distinto para que el reporte no las mezcle.
+                #    (o el lookup fallo al cargarse): un pendiente real que alguien
+                #    tiene que resolver en el catalogo -> validation_client, que
+                #    cuenta intentos y dispara el mail del registro.
                 if _all_non_tax(deducciones):
-                    detail = "non_tax_deduction"
                     msg = (
                         f"OP {ejercicio}-{nro_op}: {len(deducciones)} deduccion(es) no impositivas "
                         f"(TIPO_DEDUC=O: {_describe(deducciones)}); Paxapos no las modela como retencion"
                     )
-                else:
-                    detail = "retention_type_unresolved"
-                    msg = f"OP {ejercicio}-{nro_op}: {len(deducciones)} deduccion(es) sin tipo de retencion resoluble"
+                    note_skip(self._events, "retenciones", op_sk, msg)
+                    self._resolve_retry(op_sk, dry_run)
+                    continue
+                msg = (
+                    f"OP {ejercicio}-{nro_op}: {len(deducciones)} deduccion(es) sin tipo de retencion "
+                    f"resoluble en el catalogo tipos_retencion de Paxapos ({_describe(deducciones)})"
+                )
                 note_skip(self._events, "retenciones", op_sk, msg)
                 if self._retry_store is not None and not dry_run:
                     self._retry_store.enqueue(
                         "retenciones",
                         op_sk,
-                        REASON_DEPENDENCY_MISSING,
+                        REASON_VALIDATION_CLIENT,
                         msg,
-                        reason_detail=detail,
+                        reason_detail="retention_type_unresolved",
                     )
                 continue
 

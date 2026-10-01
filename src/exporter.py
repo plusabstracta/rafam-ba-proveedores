@@ -73,7 +73,7 @@ from .mappers.clasificaciones import (
     persist_links as clasif_persist_links,
 )
 from .record_events import RecordOutcome
-from .retry_store import REASON_BACKEND_REJECTED, REASON_DEPENDENCY_MISSING
+from .retry_store import REASON_BACKEND_REJECTED, REASON_DEPENDENCY_MISSING, REASON_VALIDATION_CLIENT
 from .backend_errors import (
     BackendInfraError,
     classify_backend_error,
@@ -297,6 +297,9 @@ class MigratorExporter(BaseExporter):
         # Mismo motivo: clasificaciones tambien es full_load (ver
         # ClasificacionesMapper.build_payload).
         self._clasif_mapper._retry_store = retry_store
+        # solic_gastos cierra en la cola los gastos que ya estan completos en
+        # Paxapos (si no, quedaban 'pending' para siempre).
+        self._sg_mapper._retry_store = retry_store
 
     def _class_mappers(self) -> dict[str, object]:
         return {
@@ -923,9 +926,39 @@ class MigratorExporter(BaseExporter):
     def _compose_oc_observacion(raw: dict) -> str | None:
         return oc_compose_oc_observacion(raw)
 
+    def _enqueue_invalid_proveedores(self, columns, rows) -> None:
+        """Encola (validation_client) los proveedores que el mapper no puede mapear.
+
+        `map_rows` solo los cuenta como "invalidos" y los saltea: sin cola, ni
+        el reenvio ni el mail del registro se enteraban de cual era. Es el
+        mismo criterio del mapper (`map_proveedor_migrator_row` None y no
+        excluido por configuracion).
+        """
+        retry_store = getattr(self, "_retry_store", None)
+        if retry_store is None or getattr(self, "_dry_run", False):
+            return
+        from .config import is_cod_prov_excluded
+        from .gateway_mapper import map_proveedor_migrator_row
+
+        for row in rows:
+            raw = dict(zip(columns, row))
+            cod_prov = to_int(raw.get("COD_PROV"))
+            if cod_prov is None or is_cod_prov_excluded(cod_prov):
+                continue
+            if map_proveedor_migrator_row(raw) is None:
+                retry_store.enqueue(
+                    "proveedores",
+                    str(cod_prov),
+                    REASON_VALIDATION_CLIENT,
+                    f"Proveedor COD_PROV={cod_prov}: fila invalida en RAFAM "
+                    "(sin FANTASIA ni RAZON_SOCIAL), no se puede enviar",
+                    reason_detail="invalid_row",
+                )
+
     def _write_batch_proveedores(self, columns, rows):
         """Delegado a EntityWriter."""
         writer = self._writers["proveedores"]
+        self._enqueue_invalid_proveedores(columns, rows)
         force_external_ids = set(getattr(self, "_force_keys", {}).get("proveedores", ()))
         if getattr(self, "_retry_store", None) is not None:
             force_external_ids |= self._retry_store.pending_external_ids("proveedores")

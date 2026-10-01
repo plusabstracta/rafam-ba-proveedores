@@ -513,8 +513,10 @@ class TestResendRecords:
         assert "excluido" in res["50001"].detail
         assert res["999"].status == main_module.RESEND_NOT_FOUND
         assert report.exit_code() == 1
-        # La cola refleja el resultado real: el rechazo queda, el OK no.
-        assert [it.external_id for it in resend_env["retry"].list_items("proveedores")] == ["200"]
+        # La cola refleja el resultado real: el rechazo y la fila invalida
+        # quedan (cada una con su motivo), el OK no.
+        queue = {it.external_id: it.reason_code for it in resend_env["retry"].list_items("proveedores")}
+        assert queue == {"200": "backend_rejected", "400": "validation_client"}
 
     def test_permanent_se_reencola_y_se_resuelve(self, resend_env):
         retry = resend_env["retry"]

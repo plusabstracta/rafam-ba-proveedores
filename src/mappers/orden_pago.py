@@ -11,7 +11,7 @@ import logging
 
 from ..record_events import note_skip
 from ..utils import env_bool, format_date_only, parse_money, to_int
-from ..retry_store import REASON_DEPENDENCY_MISSING
+from ..retry_store import REASON_DEPENDENCY_MISSING, REASON_VALIDATION_CLIENT
 from ..validation import validate_amount
 from .clasificaciones import code_str as clasif_code_str
 from .clasificaciones import parent_code as clasif_parent_code
@@ -85,20 +85,26 @@ class OrdenPagoMapper:
         reason: str,
         dry_run: bool,
         reason_detail: str = "dependency_missing",
+        reason_code: str = REASON_DEPENDENCY_MISSING,
     ) -> None:
-        """Encola una OP salteada por dependencia faltante para reintentarla.
+        """Encola una OP salteada para reintentarla (por defecto, por dependencia faltante).
 
         Sin esto la OP se pierde para siempre: el watermark del checkpoint avanza
         igual que si se hubiera migrado y la fila nunca vuelve a entrar en la query.
+        Con ``reason_code=validation_client`` (dato invalido en RAFAM) cuenta
+        intentos y dispara el mail individual del registro.
         """
-        self._note_skip(key, f"queda en espera: {reason}")
+        if reason_code == REASON_DEPENDENCY_MISSING:
+            self._note_skip(key, f"queda en espera: {reason}")
+        else:
+            self._note_skip(key, reason)
         if self._retry_store is None or dry_run:
             return
         try:
             self._retry_store.enqueue(
                 "orden_pago",
                 self._op_source_key(key[0], key[1]),
-                REASON_DEPENDENCY_MISSING,
+                reason_code,
                 f"OP {key[0]}-{key[1]}: {reason}",
                 reason_detail=reason_detail,
             )
@@ -201,6 +207,9 @@ class OrdenPagoMapper:
         skipped_confirmado: dict[str, int] = {}
         skipped_no_fech_confirm = 0
         skipped_importe_invalido: dict[str, int] = {}
+        # Una OP trae una fila por comprobante imputado: encolar el importe
+        # invalido una sola vez por OP y por batch (cada enqueue suma un intento).
+        invalid_importe_keys: set[tuple[int, int]] = set()
         skipped_existing_keys: set[tuple[int, int]] = set()
         skipped_excluded_prov = 0
         skipped_permanent_keys: set[tuple[int, int]] = set()
@@ -396,12 +405,17 @@ class OrdenPagoMapper:
             if not res_importe.ok:
                 reason = res_importe.reason or ""
                 self._note_skip(key, f"IMPORTE_TOTAL={importe_raw!r} invalido: {reason}")
+                # NULL o no parseable es un dato roto en RAFAM: va a la cola
+                # (y al mail del registro). <= 0 es un ajuste contable o una
+                # anulacion esperable: solo se loguea.
+                invalid_msg = None
                 if "requerido y vacio" in reason:
                     skipped_importe_invalido["null"] = skipped_importe_invalido.get("null", 0) + 1
                     logger.warning(
                         "Migrator [orden_pago] OP %s-%s omitida: IMPORTE_TOTAL es NULL en RAFAM",
                         ejercicio, nro_op,
                     )
+                    invalid_msg = "no se envio: IMPORTE_TOTAL es NULL en RAFAM"
                 elif "negativo" in reason or "cero" in reason:
                     skipped_importe_invalido["<=0"] = skipped_importe_invalido.get("<=0", 0) + 1
                     logger.warning(
@@ -413,6 +427,12 @@ class OrdenPagoMapper:
                     logger.warning(
                         "Migrator [orden_pago] OP %s-%s omitida: IMPORTE_TOTAL %r no parseable o invalido: %s",
                         ejercicio, nro_op, importe_raw, reason,
+                    )
+                    invalid_msg = f"no se envio: IMPORTE_TOTAL {importe_raw!r} invalido ({reason})"
+                if invalid_msg and key not in invalid_importe_keys:
+                    invalid_importe_keys.add(key)
+                    self._enqueue_op(
+                        key, invalid_msg, dry_run, "invalid_amount", reason_code=REASON_VALIDATION_CLIENT,
                     )
                 continue
             total = res_importe.value
@@ -641,6 +661,22 @@ class OrdenPagoMapper:
                         "Descartando retenciones para evitar rechazo de Paxapos.",
                         key[0], key[1], suma_retenciones, total_egreso,
                     )
+                    # La OP sale igual, sin retenciones: dejarlo en la cola de
+                    # retenciones para que no sea una perdida silenciosa. Si la
+                    # entidad retenciones (corre despues) logra enviarlas o
+                    # confirma que ya estan, la fila se resuelve sola.
+                    if self._retry_store is not None and not dry_run:
+                        try:
+                            self._retry_store.enqueue(
+                                "retenciones",
+                                self._op_source_key(key[0], key[1]),
+                                REASON_VALIDATION_CLIENT,
+                                f"OP {key[0]}-{key[1]}: retenciones (${suma_retenciones:,.2f}) superan el "
+                                f"total de la OP (${total_egreso:,.2f}); la OP se envio sin retenciones",
+                                reason_detail="retentions_exceed_total",
+                            )
+                        except Exception as exc:  # pragma: no cover - defensive
+                            logger.warning("No se pudo encolar retenciones de OP %s-%s: %s", key[0], key[1], exc)
                 else:
                     op["retenciones"] = ret_payload
 

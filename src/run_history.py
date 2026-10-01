@@ -99,6 +99,7 @@ def record_run(summary_data: dict, entity_metrics: list[dict]) -> None:
         "retry_counts_end": summary_data.get("retry_counts_end") or {},
         "retry_summary_start": summary_data.get("retry_summary_start") or [],
         "retry_summary_end": summary_data.get("retry_summary_end") or [],
+        "record_alerts_sent": int(summary_data.get("record_alerts_sent") or 0),
         "entities": [
             {
                 "entity": m.get("entity"),
@@ -328,5 +329,6 @@ def aggregate_runs(runs: list[dict], date_str: str) -> tuple[dict, list[dict]]:
         "retry_counts_end": retry_end,
         "retry_summary_start": retry_summary_start,
         "retry_summary_end": retry_summary_end,
+        "record_alerts_sent": sum(int(r.get("record_alerts_sent") or 0) for r in runs),
     }
     return summary_data, entity_metrics

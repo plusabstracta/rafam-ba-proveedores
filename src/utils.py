@@ -11,6 +11,7 @@ import logging
 import os
 import re
 import unicodedata
+from datetime import datetime, timezone
 from typing import Any
 
 from .validation import validate_amount as _validate_amount, validate_date_only as _validate_date_only
@@ -165,3 +166,19 @@ def split_ref_set(value: Any) -> set[str]:
     if not value:
         return set()
     return {part.strip() for part in str(value).split(",") if part.strip()}
+
+
+def utc_sql_to_local(value: str | None) -> str:
+    """Convierte un timestamp UTC de SQLite (``datetime('now')``) a hora local.
+
+    retry_queue guarda ``first_seen``/``last_attempt`` en UTC, pero los mails
+    los lee gente en hora local: sin esto un rechazo de las 10:00 figuraba a
+    las 13:00. Valores que no parsean se devuelven tal cual.
+    """
+    if not value:
+        return "—"
+    try:
+        parsed = datetime.strptime(str(value), "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return str(value)
+    return parsed.replace(tzinfo=timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S")

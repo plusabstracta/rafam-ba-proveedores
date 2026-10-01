@@ -2,6 +2,7 @@ import os
 from unittest.mock import patch, MagicMock
 import pytest
 from src.notifier import notify_run_report
+from src.utils import utc_sql_to_local
 
 @pytest.fixture
 def clean_env():
@@ -156,7 +157,8 @@ def test_notify_run_report_groups_retry_causes_without_ids(mock_send, mock_is_en
     subject, body = mock_send.call_args.args[:2]
     assert "CON ADVERTENCIAS" in subject
     assert "dependency_missing/payment_not_migrated: 2" in body
-    assert "2026-07-01 08:00:00" in body
+    # Los timestamps de la cola son UTC y el mail los muestra en hora local.
+    assert utc_sql_to_local("2026-07-01 08:00:00") in body
     assert "external_id" not in body
 
 

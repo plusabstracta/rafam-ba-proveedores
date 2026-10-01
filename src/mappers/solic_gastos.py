@@ -45,9 +45,25 @@ class SolicGastosMapper:
     # (MigratorExporter.set_force_keys) y sink de motivos de omision.
     _force_keys: frozenset = frozenset()
     _events = None
+    _retry_store = None
 
     def _note_skip(self, key, reason: str) -> None:
         note_skip(self._events, "solic_gastos", key, reason)
+
+    def _resolve_retry(self, sk: str | None, dry_run: bool) -> None:
+        """Cierra en la cola un gasto que ya esta bien en Paxapos.
+
+        solic_gastos es UPDATE-ONLY: un gasto encolado (p.ej. por un rechazo
+        de la seccion "gastos" de orden_pago) que este mapper declara completo
+        o sin cambios no tiene nada mas que hacer, y sin esto quedaba
+        'pending' para siempre.
+        """
+        if self._retry_store is None or dry_run or sk is None:
+            return
+        try:
+            self._retry_store.resolve("solic_gastos", sk)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("Migrator [solic_gastos]: no se pudo resolver %s en la cola: %s", sk, exc)
 
     def __init__(self, *, link_store, lookup_resolver, resolve_gastos_fn=None, source_repo=None):
         self._link_store = link_store
@@ -236,6 +252,7 @@ class SolicGastosMapper:
             }
             if not enrich:
                 skipped_complete += 1
+                self._resolve_retry(m["sk"], dry_run)
                 self._note_skip(
                     m["external_id"],
                     f"el gasto id={resolved.get('id')} ya esta completo en Paxapos: no hay campos vacios para enriquecer",
@@ -258,6 +275,7 @@ class SolicGastosMapper:
                     and record_base_key("solic_gastos", sk) not in self._force_keys
                 ):
                     skipped_same_hash += 1
+                    self._resolve_retry(sk, dry_run)
                     continue
 
             entry_gasto = {"id": gasto_id, "merge": "fill_empty"}

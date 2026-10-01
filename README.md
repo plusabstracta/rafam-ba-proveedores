@@ -472,6 +472,30 @@ Revisar tambien los logs del portal Paxapos si el migrator devuelve errores parc
   '{"ejercicio": 2026, "nro_op": 123}' --note 'retencion historica fuera de alcance'`.
   El descarte no modifica checkpoints ni links. No usar `reset-*` para limpiar retries: esos
   comandos reinician estado de sincronizacion y pueden provocar reenvios masivos.
+- **Mail por registro** (`src/record_alerts.py`): ademas del resumen diario, cada registro
+  que no llega a Paxapos genera un mail SOLO de ese registro, con el error de Paxapos (o el
+  motivo por el que el script no lo envio), los intentos, las horas en hora local y el
+  comando `resend` listo para copiar. Se manda al final de cada corrida del cron, de
+  `resend` y de `retry-queue --send-now`.
+  - **Que avisa**: rechazos de Paxapos (`backend_rejected`), registros omitidos por datos
+    invalidos (`validation_client`) y registros aislados de un batch caido (`batch_failed`).
+    Esperar una dependencia (`dependency_missing`) y el backend caido (`backend_unavailable`)
+    no generan mails por registro.
+  - **Cuando**: al entrar a la cola, al pasar a `permanent` y, si se reenvia a mano (`resend`
+    sobre un `permanent`), cuando vuelve a fallar. La misma falla repetida en cada corrida no
+    vuelve a avisar. Lo que ya estaba en la cola al deployar esta version no dispara mails.
+  - **Tope**: `NOTIFY_RECORD_ALERT_MAX_PER_RUN` (default 25) mails individuales por corrida;
+    el resto va en un unico mail resumen agrupado por causa. Si el SMTP falla, no se marca
+    nada como avisado y se reintenta en la proxima corrida.
+  - **Destinatarios**: `NOTIFY_ALERT_TO` (default `NOTIFY_TO`); se apaga con
+    `NOTIFY_RECORD_ALERTS=false`.
+  - **Omitidos que ahora quedan en la cola** (antes solo iban al log): OC confirmada sin
+    ningun item mapeable, OP con `IMPORTE_TOTAL` nulo o no parseable (las de importe <= 0
+    siguen siendo solo log: ajustes/anulaciones), retenciones descartadas por superar el total
+    de la OP, proveedor sin nombre en RAFAM y deducciones impositivas sin tipo de retencion en
+    el catalogo de Paxapos. Una OC cuyo proveedor no esta migrado encola al proveedor (espera,
+    sin mail). Las deducciones no impositivas (`TIPO_DEDUC=O`: IPS, IOMA, garantias) quedan
+    fuera de alcance y se cierran, igual que las OP `TIPO_OP=N`.
 - **Mail diario**: la seccion "COLA DE REINTENTOS" muestra el estado real de la cola al
   inicio y fin del dia, agrupado por entidad, estado y causa, y ademas un **detalle
   individual** por entidad (los mas viejos primero, con label legible, motivo, intentos y
@@ -479,7 +503,9 @@ Revisar tambien los logs del portal Paxapos si el migrator devuelve errores parc
   inmanejable el mail con una cola grande; si hay mas, el mail lo dice explicitamente y
   apunta a `main.py retry-queue --entity X` para el resto. `CON ADVERTENCIAS` significa
   que solo quedan dependencias pendientes; `CON ERRORES` indica rechazos del backend,
-  validaciones, filas `permanent` o fallas tecnicas.
+  validaciones, filas `permanent` o fallas tecnicas. Las horas de la cola se muestran en
+  hora local del servidor (en la base se guardan en UTC) y el resumen incluye cuantas
+  alertas por registro se mandaron en el dia.
 - **Reconciliacion** (`main.py reconcile`): compara origen RAFAM vs. migrado vs. cola para
   `proveedores`, `ordenes_compra`, `ordenes_pago`, `gastos` (`SOLIC_GASTOS`) y `retenciones`
   (universo = OPs con al menos una fila en `ORDEN_PAGO_DEDUC`). `drift != 0` en cualquier fila

@@ -30,12 +30,17 @@ from .retry_labels import describe_retry_key
 logger = logging.getLogger(__name__)
 
 _TABLE = "retry_queue"
+_ITEM_COLUMNS = (
+    "entity, external_id, reason_code, reason_detail, error_message, attempts, "
+    "status, first_seen, last_attempt, payload_snapshot, alert_state"
+)
 
 # reason_code: clasifica por que la fila no se pudo migrar todavia.
 REASON_VALIDATION_CLIENT = "validation_client"      # rechazada por validation.py
 REASON_DEPENDENCY_MISSING = "dependency_missing"    # FK/OC aun no migrada
 REASON_BACKEND_REJECTED = "backend_rejected"        # 207: error por fila en el receptor
 REASON_BACKEND_UNAVAILABLE = "backend_unavailable"  # SQL/PHP roto en el receptor; la fila esta bien
+REASON_BATCH_FAILED = "batch_failed"                # aislada de un batch que fallo entero
 
 STATUS_PENDING = "pending"
 STATUS_PERMANENT = "permanent"
@@ -54,6 +59,11 @@ DEFAULT_MAX_ATTEMPTS = 10
 # permanent antes de que alguien arreglara el server.
 _NO_ATTEMPT_COUNT_REASONS = frozenset({REASON_DEPENDENCY_MISSING, REASON_BACKEND_UNAVAILABLE})
 
+# Motivos que disparan un mail individual (src/record_alerts.py): algo que no
+# se mando por datos invalidos o que Paxapos rechazo. Esperar una dependencia
+# no alerta; un backend caido se avisa una vez por incidente, no por fila.
+ALERT_REASONS = frozenset({REASON_BACKEND_REJECTED, REASON_VALIDATION_CLIENT, REASON_BATCH_FAILED})
+
 
 @dataclass(frozen=True)
 class RetryItem:
@@ -67,6 +77,8 @@ class RetryItem:
     first_seen: str
     last_attempt: Optional[str]
     payload_snapshot: Optional[str] = None
+    # Ultimo `status` por el que se mando el mail individual (None = nunca).
+    alert_state: Optional[str] = None
 
 
 class RetryStore:
@@ -118,6 +130,8 @@ class RetryStore:
                 next_retry_after TEXT,
                 status TEXT NOT NULL DEFAULT 'pending',
                 payload_snapshot TEXT,
+                alert_state TEXT,
+                alerted_at TEXT,
                 PRIMARY KEY (entity, external_id)
             )
             """
@@ -128,6 +142,13 @@ class RetryStore:
         }
         if "reason_detail" not in existing_columns:
             self._conn.execute(f"ALTER TABLE {_TABLE} ADD COLUMN reason_detail TEXT")
+        if "alert_state" not in existing_columns:
+            self._conn.execute(f"ALTER TABLE {_TABLE} ADD COLUMN alert_state TEXT")
+            self._conn.execute(f"ALTER TABLE {_TABLE} ADD COLUMN alerted_at TEXT")
+            # Lo que ya estaba en la cola antes de existir las alertas por
+            # registro se da por avisado (ya figuraba en el mail diario): sin
+            # esto el primer deploy mandaria un mail por cada fila vieja.
+            self._conn.execute(f"UPDATE {_TABLE} SET alert_state = status")
         self._conn.execute(
             f"CREATE INDEX IF NOT EXISTS idx_{_TABLE}_pending "
             f"ON {_TABLE} (entity, status)"
@@ -320,8 +341,10 @@ class RetryStore:
             clauses.append("external_id = ?")
             params.append(str(external_id))
 
+        # alert_state = NULL: si vuelve a fallar despues del reenvio manual,
+        # se avisa de nuevo.
         cursor = self._conn.execute(
-            f"UPDATE {_TABLE} SET status = ?, attempts = 0, next_retry_after = NULL "
+            f"UPDATE {_TABLE} SET status = ?, attempts = 0, next_retry_after = NULL, alert_state = NULL "
             f"WHERE {' AND '.join(clauses)}",
             [STATUS_PENDING] + params,
         )
@@ -387,6 +410,53 @@ class RetryStore:
         ).fetchall()
         return {row["external_id"] for row in rows}
 
+    def pending_alerts(self) -> list[RetryItem]:
+        """Filas que requieren un mail individual y todavia no lo tuvieron.
+
+        Se avisa una vez por estado: al entrar a la cola (pending) y al pasar a
+        'permanent'. Una fila que sigue fallando igual en cada corrida no
+        vuelve a avisar; `requeue()` resetea el estado para que una nueva
+        falla despues de un reenvio manual si avise.
+        """
+        reasons = sorted(ALERT_REASONS)
+        rows = self._conn.execute(
+            f"SELECT {_ITEM_COLUMNS} FROM {_TABLE} "
+            f"WHERE reason_code IN ({', '.join('?' for _ in reasons)}) "
+            f"AND (alert_state IS NULL OR alert_state != status) "
+            f"ORDER BY first_seen, entity, external_id",
+            reasons,
+        ).fetchall()
+        return [self._row_to_item(row) for row in rows]
+
+    def mark_alerted(self, entity: str, external_id: str, status: str) -> None:
+        """Registra que ya se mando el mail de esta fila para ``status``."""
+        self._conn.execute(
+            f"UPDATE {_TABLE} SET alert_state = ?, alerted_at = datetime('now') "
+            f"WHERE entity = ? AND external_id = ?",
+            (status, entity, str(external_id)),
+        )
+        self._commit()
+
+    @property
+    def max_attempts(self) -> int:
+        return self._max_attempts
+
+    @staticmethod
+    def _row_to_item(row) -> RetryItem:
+        return RetryItem(
+            entity=row["entity"],
+            external_id=row["external_id"],
+            reason_code=row["reason_code"],
+            reason_detail=row["reason_detail"],
+            error_message=row["error_message"],
+            attempts=row["attempts"] or 0,
+            status=row["status"],
+            first_seen=row["first_seen"],
+            last_attempt=row["last_attempt"],
+            payload_snapshot=row["payload_snapshot"],
+            alert_state=row["alert_state"],
+        )
+
     def list_items(
         self,
         entity: str | None = None,
@@ -406,26 +476,10 @@ class RetryStore:
             params.append(str(external_id))
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         rows = self._conn.execute(
-            f"SELECT entity, external_id, reason_code, reason_detail, error_message, attempts, "
-            f"status, first_seen, last_attempt, payload_snapshot "
-            f"FROM {_TABLE} {where} ORDER BY entity, external_id",
+            f"SELECT {_ITEM_COLUMNS} FROM {_TABLE} {where} ORDER BY entity, external_id",
             params,
         ).fetchall()
-        return [
-            RetryItem(
-                entity=row["entity"],
-                external_id=row["external_id"],
-                reason_code=row["reason_code"],
-                reason_detail=row["reason_detail"],
-                error_message=row["error_message"],
-                attempts=row["attempts"] or 0,
-                status=row["status"],
-                first_seen=row["first_seen"],
-                last_attempt=row["last_attempt"],
-                payload_snapshot=row["payload_snapshot"],
-            )
-            for row in rows
-        ]
+        return [self._row_to_item(row) for row in rows]
 
     def counts_by_entity(
         self, entities: Optional[list[str]] = None

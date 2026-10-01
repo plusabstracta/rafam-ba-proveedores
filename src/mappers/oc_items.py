@@ -12,6 +12,7 @@ import logging
 from .. import config as _config
 from ..change_detection import compute_payload_hash
 from ..record_events import note_skip
+from ..retry_store import REASON_DEPENDENCY_MISSING, REASON_VALIDATION_CLIENT
 from ..utils import format_date_only, normalize_text, to_int
 
 logger = logging.getLogger(__name__)
@@ -35,6 +36,14 @@ class OcItemsMapper:
         self._retry_store = retry_store
         # Acumula items sin match de mercaderÃ­a entre batches para report final
         self._missing_mercaderia_matches: dict[str, int] = {}
+
+    def _enqueue(self, entity: str, key: str, reason_code: str, message: str, detail: str, dry_run: bool) -> None:
+        if self._retry_store is None or dry_run:
+            return
+        try:
+            self._retry_store.enqueue(entity, key, reason_code, message, reason_detail=detail)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("Migrator [oc_items]: no se pudo encolar %s %s: %s", entity, key, exc)
 
     def build_payload(
         self,
@@ -102,6 +111,16 @@ class OcItemsMapper:
                         f"el proveedor COD_PROV={cod_prov} no esta migrado (sin link local); "
                         f"primero: resend --entity proveedores --key {cod_prov_norm if cod_prov_norm is not None else cod_prov}",
                     )
+                    # La OC no se encola: oc_items es full_load y vuelve a entrar
+                    # sola cuando el proveedor exista. El que se encola es el
+                    # proveedor, para que _proveedores_retry_filter lo traiga
+                    # aunque el cursor FECHA_ULT_COMP no lo vea nunca.
+                    if cod_prov_norm is not None:
+                        self._enqueue(
+                            "proveedores", str(cod_prov_norm), REASON_DEPENDENCY_MISSING,
+                            f"proveedor requerido por OC {ejercicio}-{uni_compra}-{nro_oc}, sin link local",
+                            "required_by_oc_items", dry_run,
+                        )
                     skipped_no_prov.add(key)
                     continue
 
@@ -221,15 +240,23 @@ class OcItemsMapper:
                     ocs_to_skip_register.append(key)
                 continue
 
-            if not oc_data["items"]:
-                note_skip(
-                    self._events, "oc_items", source_key,
-                    "ningun item mapeable (sin mercaderia identificable o sin cantidad)",
-                )
-                continue
-
             if source_key in permanent_keys and not forced:
                 ocs_to_skip_permanent.append(key)
+                continue
+
+            if not oc_data["items"]:
+                reason = "ningun item mapeable (sin mercaderia identificable o sin cantidad)"
+                note_skip(self._events, "oc_items", source_key, reason)
+                # Solo es un problema si la OC se iba a enviar (R, o con
+                # comprobante/OP): una OC sin confirmar e incompleta es normal.
+                has_cc = bool(str(raw.get("OC_CC_NRO") or "").strip())
+                has_op = bool(link_previo and link_previo.get("has_op"))
+                if estado_actual == "R" or has_cc or has_op:
+                    self._enqueue(
+                        "oc_items", source_key, REASON_VALIDATION_CLIENT,
+                        f"OC {key[0]}-{key[1]}-{key[2]} no se envio: {reason}",
+                        "invalid_items", dry_run,
+                    )
                 continue
 
             # Hash del contenido de la OC. Se computa con la misma forma que
