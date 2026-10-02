@@ -312,3 +312,15 @@ def test_batch_failed_vencido_se_manda_solo(store):
     assert exporter.calls == [[6, 8], [7]]
     # Se mando y no fallo: sigue en la cola hasta que la respuesta lo resuelva.
     assert store.list_items("orden_pago", external_id=bad)[0].status == STATUS_PERMANENT
+
+
+def test_por_defecto_la_espera_vence_a_los_5_dias(tmp_path, monkeypatch):
+    monkeypatch.delenv("RAFAM_WAIT_ALERT_DAYS", raising=False)
+    store = RetryStore(db_path=str(tmp_path / "s.db"))
+    assert store.wait_alert_days == 5
+    store.enqueue("orden_pago", _OP, REASON_DEPENDENCY_MISSING, "OC aun no migrada")
+    _age(store, "orden_pago", _OP, days=4)
+    assert store.attention_items() == [], "4 dias: todavia es una espera normal"
+    _age(store, "orden_pago", _OP, days=6)
+    assert [i.external_id for i in store.attention_items()] == [_OP]
+    store.close()

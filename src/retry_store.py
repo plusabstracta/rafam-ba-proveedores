@@ -96,7 +96,7 @@ WAIT_REASONS = frozenset({REASON_DEPENDENCY_MISSING})
 ALERT_STATE_STALE = "stale"
 
 DEFAULT_PERMANENT_RETRY_HOURS = 6.0
-DEFAULT_WAIT_ALERT_DAYS = 3.0
+DEFAULT_WAIT_ALERT_DAYS = 5.0
 
 # reason_detail de los rechazos terminales (`mark_permanent`): no se
 # reintentan solos. Solo se usa para migrar filas viejas al crear auto_retry.

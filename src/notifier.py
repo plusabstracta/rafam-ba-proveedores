@@ -17,6 +17,7 @@ Variables de entorno:
 
 from __future__ import annotations
 
+import html
 import logging
 import os
 import smtplib
@@ -70,7 +71,7 @@ def send_notification(
     is_html: bool = False,
     extra_recipients: Sequence[str] = (),
     recipients: Sequence[str] | None = None,
-    attachments: Sequence[tuple[str, str, str]] = (),
+    html_body: str | None = None,
 ) -> bool:
     """Envía una notificación por email.
 
@@ -80,7 +81,9 @@ def send_notification(
         is_html: Si True, envía como text/html; si False, como text/plain.
         extra_recipients: Destinatarios adicionales a los configurados en NOTIFY_TO.
         recipients: Si se pasa, reemplaza a NOTIFY_TO (ej. NOTIFY_ALERT_TO).
-        attachments: ``(nombre, contenido texto, subtipo)`` (ej. ``("x.csv", data, "csv")``).
+        html_body: Version HTML del mismo mail (p.ej. con una tabla). Va como
+            alternativa de ``body``: el cliente de correo muestra la HTML y el
+            texto queda para los que no la muestran.
 
     Returns:
         True si el envío fue exitoso, False en caso contrario.
@@ -116,17 +119,16 @@ def send_notification(
 
     full_subject = f"{subject_prefix} {subject}".strip()
 
-    msg = MIMEMultipart("mixed" if attachments else "alternative")
+    msg = MIMEMultipart("alternative")
     msg["Subject"] = full_subject
     msg["From"] = from_addr
     msg["To"] = ", ".join(recipients)
 
     mime_type = "html" if is_html else "plain"
     msg.attach(MIMEText(body, mime_type, "utf-8"))
-    for filename, content, subtype in attachments:
-        part = MIMEText(content, subtype, "utf-8")
-        part.add_header("Content-Disposition", "attachment", filename=filename)
-        msg.attach(part)
+    if html_body:
+        # En multipart/alternative la ultima parte es la preferida.
+        msg.attach(MIMEText(html_body, "html", "utf-8"))
 
     try:
         timeout = int(_env("NOTIFY_SMTP_TIMEOUT", "15"))
@@ -355,13 +357,10 @@ def notify_run_report(
 
     # Lo primero que tiene que ver el operador: que registros no llegaron.
     operator = summary_data.get("operator")
-    attachments: list[tuple[str, str, str]] = []
     if operator:
-        from .operator_report import csv_filename, operator_csv, render_operator_section
+        from .operator_report import render_operator_section
 
         render_operator_section(lines, operator, sep=SEP, sub=SUB)
-        if operator.get("attention"):
-            attachments.append((csv_filename(operator), operator_csv(operator), "csv"))
 
     lines.append("RESUMEN GLOBAL")
     lines.append(SUB)
@@ -552,8 +551,6 @@ def notify_run_report(
     lines.append("Email generado automáticamente por el pipeline de sincronización RAFAM (Madariaga).")
 
     body = "\n".join(lines)
-    if attachments:
-        return send_notification(subject, body, is_html=False, attachments=attachments)
     return send_notification(subject, body, is_html=False)
 
 
@@ -696,42 +693,152 @@ def notify_record_failure(item, *, max_attempts: int) -> bool:
     return send_notification(subject, "\n".join(lines), recipients=_alert_recipients())
 
 
-def notify_record_failures_overflow(items) -> bool:
-    """Un unico mail con los registros que superaron el tope de alertas por corrida."""
-    SEP = "=" * 70
-    subject = f"{len(items)} registro(s) mas no llegaron a Paxapos (resumen por tope de alertas)"
-    lines = [
-        SEP,
-        f"{len(items)} REGISTRO(S) MAS NO LLEGARON A PAXAPOS",
-        SEP,
-        "Se supero el tope de mails individuales por corrida (NOTIFY_RECORD_ALERT_MAX_PER_RUN).",
-        "Si son muchos con el mismo error, probablemente sea un cambio o falla del lado de Paxapos.",
-        "",
-        "Por causa:",
-    ]
-    by_cause: dict[tuple[str, str], int] = {}
+def _short_queue_state(item, *, max_attempts: int) -> str:
+    """Estado en pocas palabras (columna Estado del mail agrupado)."""
+    if item.reason_code in _WAIT_REASONS:
+        return f"en espera hace {_wait_days_label(item.first_seen)}"
+    if item.status == "permanent":
+        if not getattr(item, "auto_retry", 1):
+            return "PERMANENT, sin reintento automatico (rechazo terminal)"
+        next_retry = getattr(item, "next_retry_after", None)
+        if next_retry:
+            return f"PERMANENT, proximo intento {utc_sql_to_local(next_retry)}"
+        return "PERMANENT, reenviar a mano"
+    return f"pendiente, se reintenta cada corrida (intento {item.attempts} de {max_attempts})"
+
+
+def _record_row(item, *, max_attempts: int) -> dict:
+    label = describe_retry_key(item.entity, item.external_id)
+    return {
+        "registro": label,
+        "entidad": item.entity,
+        "id_paxapos": getattr(item, "paxapos_id", None) or "—",
+        "que_paso": _REASON_HEADLINE.get(item.reason_code, item.reason_code),
+        "motivo": f"{item.reason_code}/{item.reason_detail or 'sin detalle'}",
+        "error": str(item.error_message or "sin mensaje"),
+        "estado": _short_queue_state(item, max_attempts=max_attempts),
+        "desde": utc_sql_to_local(item.first_seen),
+        "reenviar": f'{_CLI} resend --entity {item.entity} --key "{label}"',
+    }
+
+
+# (titulo, clave de _record_row) en el orden de la tabla.
+_TABLE_COLUMNS = (
+    ("Registro RAFAM", "registro"),
+    ("Entidad", "entidad"),
+    ("ID Paxapos", "id_paxapos"),
+    ("Que paso", "que_paso"),
+    ("Error", "error"),
+    ("Estado", "estado"),
+    ("En la cola desde", "desde"),
+    ("Reenviar", "reenviar"),
+)
+_ERROR_MAX_CHARS = 1000
+_DEFAULT_MAX_ROWS = 500
+
+
+def _record_alert_max_rows() -> int:
+    raw = _env("NOTIFY_RECORD_ALERT_MAX_ROWS", str(_DEFAULT_MAX_ROWS))
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        logger.warning("NOTIFY_RECORD_ALERT_MAX_ROWS=%r no es valido; se usa %d", raw, _DEFAULT_MAX_ROWS)
+        return _DEFAULT_MAX_ROWS
+
+
+def notify_record_failures_table(items, *, max_attempts: int) -> bool:
+    """UN mail con todos los registros que no llegaron a Paxapos en la corrida.
+
+    Si en una corrida falla mas de un registro, en vez de un mail por cada uno
+    va este: una tabla (HTML, con version en texto) con una fila por registro
+    y una columna por dato. Mas de NOTIFY_RECORD_ALERT_MAX_ROWS filas (default
+    500; 0 = sin tope) se resumen por causa al pie, en el mismo mail.
+    """
+    items = list(items)
+    cap = _record_alert_max_rows()
+    shown = items if cap == 0 else items[:cap]
+    rest = items[len(shown):]
+    rows = [_record_row(item, max_attempts=max_attempts) for item in shown]
+
+    by_entity: dict[str, int] = {}
     for item in items:
+        by_entity[item.entity] = by_entity.get(item.entity, 0) + 1
+    entities_txt = ", ".join(f"{ent}: {n}" for ent, n in sorted(by_entity.items()))
+    subject = f"{len(items)} registros no llegaron a Paxapos ({entities_txt})"
+
+    rest_by_cause: dict[tuple[str, str], int] = {}
+    for item in rest:
         cause = (item.entity, f"{item.reason_code}/{item.reason_detail or 'sin detalle'}")
-        by_cause[cause] = by_cause.get(cause, 0) + 1
-    for (entity, cause), count in sorted(by_cause.items(), key=lambda kv: -kv[1]):
-        lines.append(f"  {count:>5} x {entity} — {cause}")
-    lines += ["", "Detalle:"]
-    for item in items:
-        label = describe_retry_key(item.entity, item.external_id)
-        headline = _REASON_HEADLINE.get(item.reason_code, item.reason_code)
-        if item.reason_code in _WAIT_REASONS:
-            estado = f"en espera hace {_wait_days_label(item.first_seen)}"
-        else:
-            estado = "PERMANENT" if item.status == "permanent" else "pendiente"
-        first_line = str(item.error_message or "sin mensaje").splitlines()[0][:200]
-        lines.append(f"  · {label} — {headline} — {estado}")
-        lines.append(f"      {first_line}")
-    lines += [
-        "",
-        f"Ver todo: {_CLI} retry-queue --entity <entidad>",
-        f"Reenviar: {_CLI} resend --entity <entidad> --from-queue --status all",
+        rest_by_cause[cause] = rest_by_cause.get(cause, 0) + 1
+    rest_lines = [
+        f"{count} x {entity} — {cause}"
+        for (entity, cause), count in sorted(rest_by_cause.items(), key=lambda kv: -kv[1])
     ]
-    return send_notification(subject, "\n".join(lines), recipients=_alert_recipients())
+    intro = (
+        f"En esta corrida {len(items)} registro(s) no llegaron a Paxapos ({entities_txt}). "
+        "Se reintentan solos; revisar en RAFAM el dato de cada uno."
+    )
+    footer = [
+        "Ver el detalle en la cola: " + f"{_CLI} retry-queue --entity <entidad>",
+        "Si no corresponde migrar uno: "
+        + f"{_CLI} retry-queue --dismiss --entity <entidad> --external-id '<clave>' --note 'motivo'",
+        "Se avisa una vez por registro (y otra si pasa a permanent). Mientras no se migre, figura "
+        "todos los dias en la lista PARA REVISAR del resumen diario.",
+    ]
+
+    # Texto (para clientes que no muestran HTML).
+    SEP = "=" * 70
+    text = [SEP, f"{len(items)} REGISTROS NO LLEGARON A PAXAPOS", SEP, intro, ""]
+    for row in rows:
+        text.append(
+            f"· {row['registro']} | {row['entidad']} | ID Paxapos {row['id_paxapos']} | "
+            f"{row['que_paso']} | {row['estado']} | desde {row['desde']}"
+        )
+        text.extend(f"    error: {line}" for line in row["error"][:_ERROR_MAX_CHARS].splitlines())
+        text.append(f"    reenviar: {row['reenviar']}")
+    if rest_lines:
+        text += ["", f"... y {len(rest)} mas (NOTIFY_RECORD_ALERT_MAX_ROWS), por causa:"]
+        text += [f"  {line}" for line in rest_lines]
+    text += [""] + footer
+
+    # HTML: una fila por registro, una columna por dato.
+    cell = 'style="border:1px solid #c8c8c8;padding:4px 8px;vertical-align:top;text-align:left"'
+    head = "".join(
+        f'<th {cell[:-1]};background:#eeeeee">{html.escape(title)}</th>' for title, _key in _TABLE_COLUMNS
+    )
+    body_rows = []
+    for row in rows:
+        cells = []
+        for _title, key in _TABLE_COLUMNS:
+            value = row[key]
+            if key == "error":
+                value = value[:_ERROR_MAX_CHARS]
+                cells.append(f'<td {cell[:-1]};white-space:pre-wrap">{html.escape(value)}</td>')
+            elif key == "reenviar":
+                cells.append(f"<td {cell}><code>{html.escape(value)}</code></td>")
+            else:
+                cells.append(f"<td {cell}>{html.escape(value)}</td>")
+        body_rows.append("<tr>" + "".join(cells) + "</tr>")
+    rest_html = ""
+    if rest_lines:
+        rest_html = (
+            f"<p>... y {len(rest)} mas (NOTIFY_RECORD_ALERT_MAX_ROWS), por causa:</p><ul>"
+            + "".join(f"<li>{html.escape(line)}</li>" for line in rest_lines)
+            + "</ul>"
+        )
+    html_body = (
+        '<div style="font-family:Arial,Helvetica,sans-serif;font-size:13px">'
+        f"<h3>{len(items)} registros no llegaron a Paxapos</h3>"
+        f"<p>{html.escape(intro)}</p>"
+        '<table style="border-collapse:collapse">'
+        f"<tr>{head}</tr>{''.join(body_rows)}</table>"
+        f"{rest_html}"
+        + "".join(f"<p>{html.escape(line)}</p>" for line in footer)
+        + "</div>"
+    )
+    return send_notification(
+        subject, "\n".join(text), html_body=html_body, recipients=_alert_recipients(),
+    )
 
 
 # ─── Alertas por incidente (una entidad entera no se sincroniza) ─────────────

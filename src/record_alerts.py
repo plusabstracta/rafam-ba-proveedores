@@ -1,27 +1,30 @@
-"""record_alerts.py — Un mail por cada registro que no llego a Paxapos.
+"""record_alerts.py — Mail por cada registro que no llego a Paxapos.
 
-El mail diario resume el dia; esto avisa en el momento, con un mail SOLO de
-ese registro: que es (OC/OP/retencion/gasto/proveedor), que respondio Paxapos o
-por que no se envio, y el comando `resend` listo para copiar.
+El mail diario resume el dia; esto avisa en el momento, al final de cada
+corrida: que registro es (OC/OP/retencion/gasto/proveedor), que respondio
+Paxapos o por que no se envio, y el comando `resend` listo para copiar.
+
+* Si en la corrida hay UN registro para avisar: un mail solo de ese registro.
+* Si hay mas de uno: UN mail con todos, en una tabla con una fila por
+  registro y una columna por dato (`notifier.notify_record_failures_table`).
 
 Que alerta (``retry_store.ALERT_REASONS``): rechazos de Paxapos, registros
-omitidos por datos invalidos y registros aislados de un batch caido. Esperar
-una dependencia (OC/OP/proveedor aun no migrado) alerta solo si la espera
-supera RAFAM_WAIT_ALERT_DAYS dias (default 3).
+omitidos por datos invalidos, registros aislados de un batch caido y
+registros leidos sin ID y sin motivo. Esperar una dependencia (OC/OP/proveedor
+aun no migrado) alerta solo si la espera supera RAFAM_WAIT_ALERT_DAYS dias
+(default 5).
 
 Cuando (``RetryStore.pending_alerts``): al entrar a la cola, al pasar a
 'permanent', al vencer una espera y, despues de un reenvio manual
 (`requeue`), si vuelve a fallar.
-La fila se marca como avisada solo si el mail salio: con el SMTP caido se
+Las filas se marcan como avisadas solo si el mail salio: con el SMTP caido se
 reintenta en la proxima corrida.
 
 Configuracion:
-    NOTIFY_RECORD_ALERTS              true/false (default true; requiere NOTIFY_* configurado)
-    NOTIFY_RECORD_ALERT_MAX_PER_RUN   tope de mails individuales por corrida
-                                      (default 25; 0 = sin tope). El resto va en
-                                      UN mail resumen, para no recibir cientos de
-                                      mails si Paxapos rompe algo para todos.
-    NOTIFY_ALERT_TO                   destinatarios (default NOTIFY_TO)
+    NOTIFY_RECORD_ALERTS          true/false (default true; requiere NOTIFY_* configurado)
+    NOTIFY_RECORD_ALERT_MAX_ROWS  filas de la tabla del mail agrupado (default 500;
+                                  0 = sin tope); el resto se resume por causa al pie.
+    NOTIFY_ALERT_TO               destinatarios (default NOTIFY_TO)
 """
 
 from __future__ import annotations
@@ -33,23 +36,10 @@ from . import notifier
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_MAX_PER_RUN = 25
-
 
 def record_alerts_enabled() -> bool:
     raw = os.getenv("NOTIFY_RECORD_ALERTS", "true").strip().lower()
     return raw in {"1", "true", "yes", "on"} and notifier.notifications_enabled()
-
-
-def _max_per_run() -> int:
-    raw = os.getenv("NOTIFY_RECORD_ALERT_MAX_PER_RUN", str(_DEFAULT_MAX_PER_RUN)).strip()
-    try:
-        return max(0, int(raw))
-    except ValueError:
-        logger.warning(
-            "NOTIFY_RECORD_ALERT_MAX_PER_RUN=%r no es valido; se usa %d", raw, _DEFAULT_MAX_PER_RUN,
-        )
-        return _DEFAULT_MAX_PER_RUN
 
 
 def _alert_kind(item) -> str:
@@ -59,7 +49,8 @@ def _alert_kind(item) -> str:
 
 
 def flush_record_alerts(retry_store, link_store=None) -> int:
-    """Manda los mails individuales pendientes. Devuelve cuantos registros se avisaron.
+    """Manda los avisos pendientes (1 mail, o 1 agrupado si son varios).
+    Devuelve cuantos registros se avisaron.
 
     Con ``link_store`` el mail incluye el ID de Paxapos cuando el registro ya
     existe alli (fallo una actualizacion, no un alta).
@@ -74,33 +65,22 @@ def flush_record_alerts(retry_store, link_store=None) -> int:
 
         items = with_paxapos_ids(items, link_store)
 
-    cap = _max_per_run()
-    individual = items if cap == 0 else items[:cap]
-    overflow = [] if cap == 0 else items[cap:]
-
-    alerted = 0
-    for item in individual:
-        if not notifier.notify_record_failure(item, max_attempts=retry_store.max_attempts):
-            # SMTP caido o mal configurado: cortar aca (cada intento puede
-            # tardar el timeout entero) y reintentar en la proxima corrida.
-            logger.warning(
-                "Alertas por registro: no se pudo enviar el mail; quedan %d pendientes para la proxima corrida.",
-                len(items) - alerted,
-            )
-            return alerted
+    if len(items) == 1:
+        sent = notifier.notify_record_failure(items[0], max_attempts=retry_store.max_attempts)
+    else:
+        sent = notifier.notify_record_failures_table(items, max_attempts=retry_store.max_attempts)
+    if not sent:
+        # SMTP caido o mal configurado: no se marca nada y se reintenta en la
+        # proxima corrida.
+        logger.warning(
+            "Alertas por registro: no se pudo enviar el mail; quedan %d pendientes para la proxima corrida.",
+            len(items),
+        )
+        return 0
+    for item in items:
         retry_store.mark_alerted(item.entity, item.external_id, _alert_kind(item))
-        alerted += 1
-
-    if overflow:
-        if notifier.notify_record_failures_overflow(overflow):
-            for item in overflow:
-                retry_store.mark_alerted(item.entity, item.external_id, _alert_kind(item))
-            alerted += len(overflow)
-        else:
-            logger.warning(
-                "Alertas por registro: no se pudo enviar el resumen de %d registro(s) sobre el tope.",
-                len(overflow),
-            )
-    if alerted:
-        logger.info("Alertas por registro enviadas: %d", alerted)
-    return alerted
+    logger.info(
+        "Alertas por registro enviadas: %d registro(s) en %s",
+        len(items), "1 mail" if len(items) == 1 else "1 mail agrupado",
+    )
+    return len(items)

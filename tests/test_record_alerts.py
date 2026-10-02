@@ -45,19 +45,19 @@ def alerts_on(monkeypatch):
 
 @pytest.fixture
 def sent(monkeypatch, alerts_on):
-    """Captura los mails individuales y el de excedente (sin SMTP)."""
+    """Captura el mail individual y el agrupado en tabla (sin SMTP)."""
     mails: list[tuple[str, object]] = []
 
     def _record(item, *, max_attempts):
         mails.append(("record", item))
         return True
 
-    def _overflow(items):
-        mails.append(("overflow", list(items)))
+    def _table(items, *, max_attempts):
+        mails.append(("table", list(items)))
         return True
 
     monkeypatch.setattr(notifier, "notify_record_failure", _record)
-    monkeypatch.setattr(notifier, "notify_record_failures_overflow", _overflow)
+    monkeypatch.setattr(notifier, "notify_record_failures_table", _table)
     return mails
 
 
@@ -158,41 +158,39 @@ class TestCuandoSeAvisa:
 
 
 class TestEnvio:
-    def test_smtp_caido_no_marca_y_corta(self, tmp_path, monkeypatch, alerts_on):
+    def test_smtp_caido_no_marca_nada(self, tmp_path, monkeypatch, alerts_on):
         store = _store(tmp_path)
         for key in (_OP_KEY, _OP_KEY_2, _OP_KEY_3):
             store.enqueue("orden_pago", key, REASON_BACKEND_REJECTED, "rechazada")
         intentos = []
 
-        def _falla(item, *, max_attempts):
-            intentos.append(item.external_id)
+        def _falla(items, *, max_attempts):
+            intentos.append(len(items))
             return False
 
-        monkeypatch.setattr(notifier, "notify_record_failure", _falla)
+        monkeypatch.setattr(notifier, "notify_record_failures_table", _falla)
         assert record_alerts.flush_record_alerts(store) == 0
-        assert len(intentos) == 1, "con el SMTP caido no se insiste con cada fila"
+        assert intentos == [3], "un solo intento de envio con los 3 registros"
         assert len(store.pending_alerts()) == 3, "se reintenta en la proxima corrida"
         store.close()
 
-    def test_tope_por_corrida_manda_un_resumen_con_el_resto(self, tmp_path, monkeypatch, sent):
-        monkeypatch.setenv("NOTIFY_RECORD_ALERT_MAX_PER_RUN", "2")
+    def test_varios_registros_de_la_corrida_van_en_un_solo_mail(self, tmp_path, sent):
         store = _store(tmp_path)
         for key in (_OP_KEY, _OP_KEY_2, _OP_KEY_3):
             store.enqueue("orden_pago", key, REASON_BACKEND_REJECTED, "rechazada")
 
         assert record_alerts.flush_record_alerts(store) == 3
-        assert [kind for kind, _ in sent] == ["record", "record", "overflow"]
-        assert [it.external_id for it in sent[2][1]] == [_OP_KEY_3]
+        assert [kind for kind, _ in sent] == ["table"]
+        assert [it.external_id for it in sent[0][1]] == [_OP_KEY, _OP_KEY_2, _OP_KEY_3]
         assert store.pending_alerts() == []
         store.close()
 
-    def test_tope_cero_es_sin_tope(self, tmp_path, monkeypatch, sent):
-        monkeypatch.setenv("NOTIFY_RECORD_ALERT_MAX_PER_RUN", "0")
+    def test_un_solo_registro_va_en_su_mail(self, tmp_path, sent):
         store = _store(tmp_path)
-        for key in (_OP_KEY, _OP_KEY_2, _OP_KEY_3):
-            store.enqueue("orden_pago", key, REASON_BACKEND_REJECTED, "rechazada")
-        assert record_alerts.flush_record_alerts(store) == 3
-        assert [kind for kind, _ in sent] == ["record"] * 3
+        store.enqueue("orden_pago", _OP_KEY, REASON_BACKEND_REJECTED, "rechazada")
+
+        assert record_alerts.flush_record_alerts(store) == 1
+        assert [kind for kind, _ in sent] == ["record"]
         store.close()
 
     def test_deshabilitado_no_manda_ni_marca(self, tmp_path, monkeypatch, sent):
@@ -269,18 +267,55 @@ class TestContenidoDelMail:
         assert "Revisar en RAFAM lo que espera este registro" in body
 
 
-    def test_mail_de_excedente_agrupa_por_causa(self):
+    def test_mail_agrupado_es_una_tabla_con_una_columna_por_dato(self, monkeypatch):
+        items = [
+            self._item(paxapos_id="4321"),
+            self._item(
+                entity="orden_pago", external_id=_OP_KEY, reason_code=REASON_VALIDATION_CLIENT,
+                reason_detail="invalid_amount", error_message="IMPORTE_TOTAL <nulo> & sin dato",
+            ),
+            self._item(
+                entity="orden_pago", external_id=_OP_KEY_2, reason_code=REASON_DEPENDENCY_MISSING,
+                reason_detail="order_not_migrated", first_seen="2026-01-01 10:00:00",
+                error_message="OC aun no migrada",
+            ),
+        ]
+        with patch.object(notifier, "send_notification", return_value=True) as send:
+            assert notifier.notify_record_failures_table(items, max_attempts=10)
+        subject, text = send.call_args.args[:2]
+        html_body = send.call_args.kwargs["html_body"]
+        assert subject == "3 registros no llegaron a Paxapos (oc_items: 1, orden_pago: 2)"
+        assert send.call_args.kwargs["recipients"] is None
+        # Una columna por dato...
+        for title in ("Registro RAFAM", "Entidad", "ID Paxapos", "Que paso", "Error", "Estado",
+                      "En la cola desde", "Reenviar"):
+            assert f">{title}</th>" in html_body
+        # ...y una fila por registro.
+        assert html_body.count("<tr>") == 4
+        assert ">OC 2026-3-1023</td>" in html_body and ">4321</td>" in html_body
+        assert ">OP 2026-1023</td>" in html_body and ">OP 2026-1024</td>" in html_body
+        assert "IMPORTE_TOTAL &lt;nulo&gt; &amp; sin dato" in html_body, "el error va escapado"
+        assert "en espera hace" in html_body
+        assert 'resend --entity orden_pago --key &quot;OP 2026-1023&quot;' in html_body
+        # La version en texto trae lo mismo.
+        assert "· OC 2026-3-1023 | oc_items | ID Paxapos 4321 | Paxapos lo rechazo" in text
+        assert 'reenviar: .venv/bin/python main.py resend --entity orden_pago --key "OP 2026-1023"' in text
+
+    def test_mail_agrupado_resume_lo_que_pasa_el_tope_de_filas(self, monkeypatch):
+        monkeypatch.setenv("NOTIFY_RECORD_ALERT_MAX_ROWS", "2")
         items = [
             self._item(entity="retenciones", external_id=json.dumps({"ejercicio": 2026, "nro_op": n}),
                        reason_code=REASON_VALIDATION_CLIENT, reason_detail="retention_type_unresolved")
-            for n in (1, 2)
-        ] + [self._item()]
+            for n in (1, 2, 3, 4)
+        ]
         with patch.object(notifier, "send_notification", return_value=True) as send:
-            notifier.notify_record_failures_overflow(items)
-        subject, body = send.call_args.args[:2]
-        assert subject.startswith("3 registro(s) mas")
-        assert "2 x retenciones — validation_client/retention_type_unresolved" in body
-        assert "Retencion de OP 2026-2" in body
+            notifier.notify_record_failures_table(items, max_attempts=10)
+        subject, text = send.call_args.args[:2]
+        html_body = send.call_args.kwargs["html_body"]
+        assert subject.startswith("4 registros no llegaron a Paxapos")
+        assert html_body.count("<tr>") == 3
+        assert "... y 2 mas" in html_body
+        assert "2 x retenciones — validation_client/retention_type_unresolved" in text
 
 
 def test_utc_sql_to_local_convierte_a_la_zona_del_server(monkeypatch):

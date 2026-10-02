@@ -431,7 +431,7 @@ cada registro leido cae en uno de estos grupos:
 | --- | --- | --- |
 | Con ID de Paxapos | Migrado (o sin cambios desde la ultima vez). | Nada. |
 | **Fallo** | Dato invalido en RAFAM (importe nulo, comprobante sin numero, item sin mercaderia...), rechazo de Paxapos, batch caido. | Va a la cola, mail por registro, lista PARA REVISAR del mail diario. |
-| **Espera** | El registro esta bien pero depende de otro (OC/OP/proveedor aun no migrado, OC sin confirmar, OP sin imputacion). | Va a la cola sin gastar intentos. Si pasa `RAFAM_WAIT_ALERT_DAYS` dias (default 3), mail y lista PARA REVISAR. |
+| **Espera** | El registro esta bien pero depende de otro (OC/OP/proveedor aun no migrado, OC sin confirmar, OP sin imputacion). | Va a la cola sin gastar intentos. Si pasa `RAFAM_WAIT_ALERT_DAYS` dias (default 5), mail y lista PARA REVISAR. |
 | **Fuera de alcance** | Una regla dice que no se migra: proveedor excluido, OC anulada que nunca se migro, OP no presupuestaria, deducciones no impositivas, solicitud anulada o sin factura. | Se cuenta (foto de la ultima corrida en el mail diario). |
 | **Sin motivo** | El script lo leyo y no lo envio sin decir por que, Paxapos respondio OK sin ID, o se envio y la respuesta no lo menciona. | Nunca se pierde en silencio: va a la cola como fallo (`unexplained`, `ok_without_id`, `no_response`) y avisa. |
 
@@ -450,7 +450,7 @@ Estados en la cola:
    mail diario lo muestra en DESTRABADOS HOY, para verificar que una correccion funciono.
 
 Para no esperar el reintento automatico: `main.py resend --entity <entidad> --key "<registro>"`
-(el comando sale en cada mail y en el CSV).
+(el comando sale en el mail de cada registro).
 
 ### Detalle
 
@@ -525,11 +525,15 @@ Para no esperar el reintento automatico: `main.py resend --entity <entidad> --ke
   '{"ejercicio": 2026, "nro_op": 123}' --note 'retencion historica fuera de alcance'`.
   El descarte no modifica checkpoints ni links. No usar `reset-*` para limpiar retries: esos
   comandos reinician estado de sincronizacion y pueden provocar reenvios masivos.
-- **Mail por registro** (`src/record_alerts.py`): ademas del resumen diario, cada registro
-  que no llega a Paxapos genera un mail SOLO de ese registro, con el error de Paxapos (o el
-  motivo por el que el script no lo envio), los intentos, las horas en hora local y el
-  comando `resend` listo para copiar. Se manda al final de cada corrida del cron, de
-  `resend` y de `retry-queue --send-now`.
+- **Mail por registro** (`src/record_alerts.py`): ademas del resumen diario, al final de cada
+  corrida (del cron, de `resend` y de `retry-queue --send-now`) se avisa de cada registro que
+  no llego a Paxapos, con el error de Paxapos (o el motivo por el que el script no lo envio),
+  el estado, las horas en hora local y el comando `resend` listo para copiar.
+  - **Uno o varios**: si en la corrida hay un solo registro para avisar, llega un mail solo de
+    ese registro. Si hay mas de uno, llega **un unico mail con todos en una tabla**: una fila
+    por registro y una columna por dato (registro RAFAM, entidad, ID Paxapos, que paso, error,
+    estado, en la cola desde, comando para reenviar). El mail va en HTML con una version en
+    texto para los clientes que no muestran HTML.
   - **Que trae**: registro (OC/OP/retencion/gasto/proveedor), clave RAFAM, ID de Paxapos
     (cuando ya existe alli y lo que fallo es una actualizacion), entidad, que paso, motivo,
     estado (intento N de 10, o proximo reintento si es `permanent`) y el error completo.
@@ -543,9 +547,10 @@ Para no esperar el reintento automatico: `main.py resend --entity <entidad> --ke
     repetida en cada corrida (o en los reintentos automaticos) no vuelve a avisar. Lo que ya
     estaba en la cola al deployar (incluidas las esperas ya vencidas) no dispara mails: figura
     en la lista PARA REVISAR del mail diario.
-  - **Tope**: `NOTIFY_RECORD_ALERT_MAX_PER_RUN` (default 25) mails individuales por corrida;
-    el resto va en un unico mail resumen agrupado por causa. Si el SMTP falla, no se marca
-    nada como avisado y se reintenta en la proxima corrida.
+  - **Tope**: `NOTIFY_RECORD_ALERT_MAX_ROWS` (default 500; `0` = sin tope) filas en la tabla
+    del mail agrupado; si una corrida supera ese numero (Paxapos rechazando todo, por
+    ejemplo), el resto se resume por causa al pie del mismo mail. Si el SMTP falla, no se
+    marca nada como avisado y se reintenta en la proxima corrida.
   - **Destinatarios**: `NOTIFY_ALERT_TO` (default `NOTIFY_TO`); se apaga con
     `NOTIFY_RECORD_ALERTS=false`.
   - **Omitidos que ahora quedan en la cola** (antes solo iban al log): OC confirmada sin
@@ -556,7 +561,7 @@ Para no esperar el reintento automatico: `main.py resend --entity <entidad> --ke
     sin mail). Las deducciones no impositivas (`TIPO_DEDUC=O`: IPS, IOMA, garantias) quedan
     fuera de alcance y se cierran, igual que las OP `TIPO_OP=N`.
   - **Tambien quedan en la cola** (cierre de cuentas): una OC sin confirmar en RAFAM (espera:
-    si sigue asi mas de 3 dias, avisa), una OC cuyo proveedor no esta migrado (espera), una
+    si sigue asi mas de 5 dias, avisa), una OC cuyo proveedor no esta migrado (espera), una
     solicitud de gasto con datos incompletos o ambigua contra las facturas de Paxapos (fallo),
     y cualquier registro leido que el script no envio sin motivo, que Paxapos acepto sin
     devolver ID o que no aparecio en la respuesta (fallo).
@@ -578,11 +583,10 @@ Para no esperar el reintento automatico: `main.py resend --entity <entidad> --ke
 - **Mail diario** (para el operador de RAFAM, primero lo que hay que revisar):
   - **PARA REVISAR EN RAFAM**: todo registro que no llego a Paxapos y necesita que alguien lo
     mire (fallos, `permanent` y esperas vencidas), por entidad, con que paso, desde cuando,
-    intentos, proximo reintento, ID de Paxapos si existe y el error. En el cuerpo se muestran
-    hasta `RAFAM_MAIL_RETRY_DETAIL_LIMIT` por entidad (default 50); **la lista completa va en
-    el CSV adjunto** `rafam_registros_a_revisar_<fecha>.csv` (separado por `;`, abre directo
-    en Excel) con la clave RAFAM y el comando `resend` de cada uno. Las esperas que todavia
-    estan en plazo se informan solo como cantidad.
+    intentos, proximo reintento, ID de Paxapos si existe y el error. Se muestran hasta
+    `RAFAM_MAIL_RETRY_DETAIL_LIMIT` por entidad (default 50; `0` = sin tope); si hay mas, el
+    mail lo dice y apunta a `main.py retry-queue --entity X` para el resto. Las esperas que
+    todavia estan en plazo se informan solo como cantidad.
   - **DESTRABADOS HOY**: lo que salio de la cola en el dia (se migro, quedo fuera de alcance o
     se descarto a mano).
   - **NO SE MIGRAN POR REGLA**: cuantos registros quedaron fuera de alcance en la ultima

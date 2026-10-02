@@ -87,7 +87,7 @@ def _mail_retry_detail_limit() -> int:
     """Tope de registros por entidad en la lista PARA REVISAR EN RAFAM del mail.
 
     El cuerpo del mail se corta a los N mas viejos (los mas urgentes) de cada
-    entidad; la lista completa va siempre en el CSV adjunto (0 = sin tope).
+    entidad, con un puntero a `retry-queue --entity X` para el resto (0 = sin tope).
     """
     raw = os.getenv("RAFAM_MAIL_RETRY_DETAIL_LIMIT", "50")
     try:
@@ -1829,7 +1829,7 @@ def cmd_daily_report(args) -> None:
     summary_data, entity_metrics = aggregate_runs(runs, target_date)
 
     # Lista para el operador de RAFAM (en vivo desde la cola): que registros no
-    # llegaron a Paxapos, que se destrabo hoy, y el CSV adjunto con todo.
+    # llegaron a Paxapos y que se destrabo hoy.
     try:
         retry_store = RetryStore()
         try:

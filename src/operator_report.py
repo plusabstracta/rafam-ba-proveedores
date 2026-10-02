@@ -5,16 +5,14 @@ El resumen diario arma, desde la cola de reintentos en vivo:
 * PARA REVISAR EN RAFAM: todo registro que no llego a Paxapos y necesita que
   alguien lo mire (rechazos de Paxapos, datos invalidos, batches caidos,
   'permanent' y esperas que superaron RAFAM_WAIT_ALERT_DAYS), con que paso,
-  desde cuando, el error y el comando para reenviarlo. Va completo en un CSV
-  adjunto (en el cuerpo del mail, hasta RAFAM_MAIL_RETRY_DETAIL_LIMIT por entidad).
+  desde cuando y el error. Hasta RAFAM_MAIL_RETRY_DETAIL_LIMIT por entidad; el
+  resto, con `main.py retry-queue --entity X`.
 * DESTRABADOS HOY: lo que salio de la cola en el dia (se migro, quedo fuera de
   alcance, se descarto a mano), para verificar que una correccion funciono.
 """
 
 from __future__ import annotations
 
-import csv
-import io
 from datetime import date, datetime, time, timedelta, timezone
 
 from .notifier import _CLI, _REASON_HEADLINE, _WAIT_REASONS, describe_queue_state
@@ -99,26 +97,6 @@ def build_operator_report(retry_store, *, day: date, body_limit: int, link_store
 
 # ─── Render ──────────────────────────────────────────────────────────────────
 
-_CSV_COLUMNS = (
-    "entidad", "registro", "clave_rafam", "id_paxapos", "que_paso", "motivo", "estado", "en_cola_desde", "dias",
-    "ultimo_intento", "intentos", "proximo_reintento", "error", "reenviar",
-)
-
-
-def csv_filename(report: dict) -> str:
-    return f"rafam_registros_a_revisar_{report.get('date', 'hoy')}.csv"
-
-
-def operator_csv(report: dict) -> str:
-    """CSV (`;`, UTF-8 con BOM: Excel en espanol lo abre directo) con TODA la lista."""
-    buf = io.StringIO()
-    writer = csv.writer(buf, delimiter=";", lineterminator="\r\n")
-    writer.writerow(_CSV_COLUMNS)
-    for row in report.get("attention") or []:
-        writer.writerow([row.get(col, "") for col in _CSV_COLUMNS])
-    return "﻿" + buf.getvalue()
-
-
 def render_operator_section(lines: list[str], report: dict, *, sep: str, sub: str) -> None:
     attention = report.get("attention") or []
     waiting = report.get("waiting") or {}
@@ -128,18 +106,16 @@ def render_operator_section(lines: list[str], report: dict, *, sep: str, sub: st
     if not attention:
         lines.append("  Ningun registro necesita revision.")
     else:
-        lines.append(
-            f"  {len(attention)} registro(s) ({int(report.get('new_today') or 0)} nuevo(s) hoy). "
-            f"Lista completa en el adjunto {csv_filename(report)}."
-        )
+        lines.append(f"  {len(attention)} registro(s) ({int(report.get('new_today') or 0)} nuevo(s) hoy).")
         lines.append(
             "  Revisar cada uno en RAFAM (numero mal cargado, duplicado, dato faltante...). "
             "Al corregirlo se migra solo:"
         )
         lines.append(
             f"  los 'pendiente' en la proxima corrida y los 'permanent' en su proximo reintento "
-            f"(cada {float(report.get('retry_hours') or 0):g} h), o ya con el comando de reenvio."
+            f"(cada {float(report.get('retry_hours') or 0):g} h)."
         )
+        lines.append(f'  Para reenviar uno ya: {_CLI} resend --entity <entidad> --key "<registro>"')
         by_entity: dict[str, list[dict]] = {}
         for row in attention:
             by_entity.setdefault(row["entidad"], []).append(row)
@@ -163,7 +139,9 @@ def render_operator_section(lines: list[str], report: dict, *, sep: str, sub: st
                 first = row["error"].splitlines()[0] if row["error"] else ""
                 lines.append(f"        error: {first[:300]}")
             if len(rows) > len(shown):
-                lines.append(f"    ... y {len(rows) - len(shown)} mas (ver el CSV adjunto)")
+                lines.append(
+                    f"    ... y {len(rows) - len(shown)} mas — ver `{_CLI} retry-queue --entity {entity}`"
+                )
     if waiting:
         total = sum(waiting.values())
         detail = ", ".join(f"{ent}: {n}" for ent, n in sorted(waiting.items()))

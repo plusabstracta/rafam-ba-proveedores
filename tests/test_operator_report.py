@@ -1,9 +1,9 @@
-"""Resumen diario: la lista PARA REVISAR EN RAFAM y el CSV para el operador."""
+"""Resumen diario: la lista PARA REVISAR EN RAFAM para el operador."""
 
 from __future__ import annotations
 
-import csv
-import io
+import base64
+import email
 import json
 from argparse import Namespace
 from datetime import date
@@ -12,7 +12,7 @@ import pytest
 
 import main
 from src import notifier, run_history
-from src.operator_report import build_operator_report, local_day_bounds_utc, operator_csv
+from src.operator_report import build_operator_report, local_day_bounds_utc, render_operator_section
 from src.retry_store import (
     REASON_BACKEND_REJECTED,
     REASON_DEPENDENCY_MISSING,
@@ -73,27 +73,20 @@ def test_reporte_arma_la_lista_del_operador(store):
     assert [r["external_id"] for r in report["resolved"]] == ["op-arreglada"]
 
 
-def test_csv_tiene_todo_aunque_el_cuerpo_este_acotado(store):
+def test_lista_acotada_apunta_a_retry_queue(store):
     for n in range(4):
         store.enqueue("orden_pago", json.dumps({"ejercicio": 2026, "nro_op": n}), REASON_VALIDATION_CLIENT, "x")
     report = build_operator_report(store, day=date.today(), body_limit=2)
-
-    data = operator_csv(report)
-    assert data.startswith("﻿"), "BOM para que Excel lo abra en UTF-8"
-    rows = list(csv.DictReader(io.StringIO(data.lstrip("﻿")), delimiter=";"))
-    assert len(rows) == 4
-    assert rows[0]["entidad"] == "orden_pago"
-    assert rows[0]["registro"] == "OP 2026-0"
+    assert len(report["attention"]) == 4
 
     lines: list[str] = []
-    from src.operator_report import render_operator_section
-
     render_operator_section(lines, report, sep="=", sub="-")
     body = "\n".join(lines)
-    assert "... y 2 mas (ver el CSV adjunto)" in body
+    assert body.count("· OP 2026-") == 2
+    assert "... y 2 mas — ver `.venv/bin/python main.py retry-queue --entity orden_pago`" in body
 
 
-def test_mail_diario_muestra_la_lista_y_adjunta_el_csv(store, monkeypatch):
+def test_mail_diario_muestra_la_lista(store, monkeypatch):
     _fill(store)
     report = build_operator_report(store, day=date.today(), body_limit=50)
     monkeypatch.setattr(notifier, "_is_enabled", lambda: True)
@@ -127,13 +120,11 @@ def test_mail_diario_muestra_la_lista_y_adjunta_el_csv(store, monkeypatch):
     assert "'permanent' reintentados solos: 3" in body
     assert "Sin ID de Paxapos (nuevos a la cola): 1 fallo(s), 0 espera(s), 1 sin motivo" in body
     assert "OC anulada en RAFAM que nunca se migro: 103  (ej: OC 2026-1-7)" in body
-    (filename, content, subtype), = sent["attachments"]
-    assert filename == f"rafam_registros_a_revisar_{date.today().isoformat()}.csv"
-    assert subtype == "csv"
-    assert "OC 2026-1-55" in content
+    assert "html_body" not in sent and "attachments" not in sent, "el resumen diario va en texto, sin adjuntos"
+    assert "csv" not in body.lower()
 
 
-def test_send_notification_adjunta_archivos(monkeypatch):
+def test_send_notification_con_version_html(monkeypatch):
     monkeypatch.setenv("NOTIFY_SMTP_HOST", "smtp.test")
     monkeypatch.setenv("NOTIFY_SMTP_PORT", "587")
     monkeypatch.setenv("NOTIFY_FROM", "rafam@test")
@@ -160,10 +151,13 @@ def test_send_notification_adjunta_archivos(monkeypatch):
             captured["raw"] = raw
 
     monkeypatch.setattr(notifier.smtplib, "SMTP", _SMTP)
-    assert notifier.send_notification("asunto", "cuerpo", attachments=[("lista.csv", "a;b\r\n1;2\r\n", "csv")])
-    raw = captured["raw"]
-    assert "multipart/mixed" in raw
-    assert 'filename="lista.csv"' in raw
+    assert notifier.send_notification("asunto", "cuerpo en texto", html_body="<table><tr><td>fila</td></tr></table>")
+    msg = email.message_from_string(captured["raw"])
+    assert msg.get_content_type() == "multipart/alternative"
+    parts = msg.get_payload()
+    assert [p.get_content_type() for p in parts] == ["text/plain", "text/html"]
+    html = base64.b64decode(parts[1].get_payload()).decode("utf-8")
+    assert "<table>" in html
 
 
 def test_daily_report_manda_la_lista_y_poda_el_historial(tmp_path, monkeypatch):
@@ -218,16 +212,29 @@ def test_id_de_paxapos_en_la_lista_y_en_el_mail_del_registro(store, tmp_path, mo
 
     monkeypatch.setenv("NOTIFY_RECORD_ALERTS", "true")
     monkeypatch.setattr(notifier, "notifications_enabled", lambda: True)
-    bodies = []
+    mails = []
     monkeypatch.setattr(
-        notifier, "send_notification", lambda subject, body, **kw: bodies.append(body) or True,
+        notifier, "send_notification",
+        lambda subject, body, **kw: mails.append((subject, body, kw.get("html_body"))) or True,
     )
+    # Dos registros en la misma corrida: UN mail con la tabla.
     assert record_alerts.flush_record_alerts(store, link_store=links) == 2
-    oc_body = next(b for b in bodies if "OC 2026-1-55" in b)
+    [(subject, text, html_body)] = mails
+    assert subject.startswith("2 registros no llegaron a Paxapos")
+    assert ">OC 2026-1-55</td>" in html_body and ">4321</td>" in html_body
+    assert ">oc_items</td>" in html_body and ">Error guardando Pedido</td>" in html_body
+    assert "· OP 2026-1023 | orden_pago | ID Paxapos — |" in text
+
+    # Un solo registro: su propio mail, con el mismo detalle.
+    mails.clear()
+    store.enqueue("oc_items", _OC, REASON_BACKEND_REJECTED, "Error guardando Pedido", reason_detail="validation_error")
+    store.requeue("oc_items", _OC)  # vuelve a avisar como despues de un reenvio manual
+    store.enqueue("oc_items", _OC, REASON_BACKEND_REJECTED, "Error guardando Pedido", reason_detail="validation_error")
+    assert record_alerts.flush_record_alerts(store, link_store=links) == 1
+    [(subject, oc_body, html_body)] = mails
+    assert html_body is None
     assert "ID Paxapos     : 4321 (ya existe en Paxapos: fallo la actualizacion)" in oc_body
     assert f"Clave RAFAM    : {_OC}" in oc_body
     assert "Entidad        : oc_items" in oc_body
     assert "Error guardando Pedido" in oc_body
-    op_body = next(b for b in bodies if "OP 2026-1023" in b)
-    assert "ID Paxapos     : — (todavia no existe en Paxapos)" in op_body
     links.close()
