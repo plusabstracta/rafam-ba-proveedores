@@ -96,6 +96,8 @@ def test_aggregate_runs_latencias_y_diferidos_sobreviven_la_agregacion(hist):
     lat = metrics[0]["batch_latency"]
     assert lat == {"min": 0.5, "max": 2.0, "sum": 4.0, "count": 3}
     assert metrics[0]["migrator_deferred"] == 3
+    # Cantidad de corridas de la entidad: el mail promedia la duracion con esto.
+    assert metrics[0]["runs"] == 2
     # Diferidos no marcan la entidad en error.
     assert metrics[0]["success"] is True
 

@@ -248,26 +248,6 @@ def _parse_hhmmss(value: str) -> float:
     return h * 3600 + m * 60 + s
 
 
-def _latency_stats(metrics: dict) -> tuple[float, float, float]:
-    """(min, prom, max) de latencia por batch.
-
-    Prefiere la lista cruda ``batch_times`` (corrida individual); si no esta,
-    usa el resumen ``batch_latency`` que persiste run_history para el mail diario.
-    """
-    batch_times = metrics.get("batch_times") or []
-    if batch_times:
-        return min(batch_times), sum(batch_times) / len(batch_times), max(batch_times)
-    summary = metrics.get("batch_latency") or {}
-    count = int(summary.get("count", 0) or 0)
-    if count <= 0:
-        return 0.0, 0.0, 0.0
-    return (
-        float(summary.get("min", 0.0) or 0.0),
-        float(summary.get("sum", 0.0) or 0.0) / count,
-        float(summary.get("max", 0.0) or 0.0),
-    )
-
-
 def _emit_error_block(lines: list[str], metrics: dict, indent: str = "  ") -> None:
     """Agrega al reporte el bloque de diagnóstico de un fallo de entidad.
 
@@ -334,19 +314,15 @@ def notify_run_report(
     total_entities = len(entity_metrics)
     ok_entities = sum(1 for m in entity_metrics if m.get("success"))
     fail_entities = total_entities - ok_entities
-    total_records = sum(m.get("records_ok", 0) for m in entity_metrics)
     total_migrator_sent = sum(m.get("migrator_sent", 0) for m in entity_metrics)
     total_migrator_saved = sum(m.get("migrator_saved", 0) for m in entity_metrics)
     total_migrator_errors = sum(m.get("migrator_errors", 0) for m in entity_metrics)
-    total_migrator_deferred = sum(int(m.get("migrator_deferred", 0) or 0) for m in entity_metrics)
     total_created = sum(m.get("migrator_created", 0) for m in entity_metrics)
     total_updated = sum(m.get("migrator_updated", 0) for m in entity_metrics)
     total_replaced = sum(m.get("migrator_replaced", 0) for m in entity_metrics)
     total_deleted = sum(m.get("migrator_deleted", 0) for m in entity_metrics)
     total_skipped = sum(m.get("migrator_skipped", 0) for m in entity_metrics)
     total_unclassified = sum(m.get("migrator_unclassified", 0) for m in entity_metrics)
-    total_unchanged = sum(m.get("source_unchanged", 0) for m in entity_metrics)
-    total_excluded = sum(m.get("source_excluded", 0) for m in entity_metrics)
     total_invalid = sum(m.get("source_invalid", 0) for m in entity_metrics)
     total_batches_ok = sum(m.get("batches_ok", 0) for m in entity_metrics)
     total_batches_failed = sum(m.get("batches_failed", 0) for m in entity_metrics)
@@ -354,8 +330,6 @@ def notify_run_report(
     total_records_isolated = sum(int(m.get("records_isolated", 0) or 0) for m in entity_metrics)
     total_bisect_requests = sum(int(m.get("bisect_requests", 0) or 0) for m in entity_metrics)
     runs_count = summary_data.get("runs_count")
-    global_speed_min = (total_records / run_mins) if run_mins > 0 else 0.0
-    global_speed_sec = (total_records / run_secs) if run_secs > 0 else 0.0
 
     lines: list[str] = []
     lines.append(SEP)
@@ -374,7 +348,6 @@ def notify_run_report(
     if runs_count is not None:
         lines.append(f"  • Corridas agregadas    : {runs_count}")
     lines.append(f"  • Entidades procesadas   : {total_entities}  (OK: {ok_entities}, con error: {fail_entities})")
-    lines.append(f"  • Filas leídas de RAFAM  : {total_records:,}")
     lines.append(f"  • Items enviados Paxapos : {total_migrator_sent:,}")
     lines.append(f"  • Confirmados por Paxapos: {total_migrator_saved:,}")
     lines.append(f"      Altas nuevas         : {total_created:,}")
@@ -383,11 +356,8 @@ def notify_run_report(
     lines.append(f"      Bajas                : {total_deleted:,}")
     lines.append(f"      Omitidos/ya existentes: {total_skipped:,}")
     lines.append(f"      Sin modo clasificable: {total_unclassified:,}")
-    lines.append(f"  • Sin cambios, no enviados: {total_unchanged:,}")
-    lines.append(f"  • Excluidos por configuración: {total_excluded:,}")
     lines.append(f"  • Filas inválidas        : {total_invalid:,}")
     lines.append(f"  • Rechazados por Paxapos : {total_migrator_errors:,}")
-    lines.append(f"  • Diferidos (dependencia pendiente): {total_migrator_deferred:,}")
     lines.append(f"  • Batches OK / con error : {total_batches_ok} / {total_batches_failed}")
     if total_batches_recovered or total_records_isolated:
         lines.append(
@@ -405,8 +375,6 @@ def notify_run_report(
             f"  • Avisos de incidente enviados: {int(summary_data.get('incident_alerts_sent') or 0):,}"
             "  (entidad sin sincronizar: Paxapos caido o batch sin aislar)"
         )
-    lines.append(f"  • Velocidad global       : {global_speed_min:,.1f} reg/min   ({global_speed_sec:,.1f} reg/s)")
-    lines.append("  • Nota                  : filas leídas no equivale a altas nuevas en Paxapos")
     lines.append("")
 
     # Error general de la corrida
@@ -428,29 +396,23 @@ def notify_run_report(
             and int(m.get("source_invalid", 0) or 0) == 0
         )
         ent_status = "OK" if ent_ok else "ERROR"
-        duration = m.get("duration_secs", 0.0) or 0.0
+        # En el resumen diario duration_secs es la suma de todas las corridas
+        # del dia: se muestra el promedio de UNA corrida de la entidad.
+        entity_runs = max(1, int(m.get("runs", 1) or 1))
+        duration = (m.get("duration_secs", 0.0) or 0.0) / entity_runs
         dur_min = duration / 60.0
-        records = m.get("records_ok", 0)
         migrator_sent = m.get("migrator_sent", 0)
         migrator_saved = m.get("migrator_saved", 0)
         migrator_errors = m.get("migrator_errors", 0)
-        speed_min = (records / dur_min) if dur_min > 0 else 0.0
-        speed_sec = (records / duration) if duration > 0 else 0.0
-        query_dur = m.get("query_duration_secs", 0.0) or 0.0
-        b_min, b_avg, b_max = _latency_stats(m)
 
         lines.append(f"[{ent}]  ({m.get('mode', '—')})  →  {ent_status}")
-        lines.append(f"  Filas leídas de RAFAM   : {records:,}")
         lines.append(f"  Items enviados Paxapos  : {migrator_sent:,}")
         lines.append(f"  Confirmados por Paxapos : {migrator_saved:,}")
         lines.append(f"    Altas / updates       : {m.get('migrator_created', 0):,} / {m.get('migrator_updated', 0):,}")
         lines.append(f"    Reemplazos / bajas    : {m.get('migrator_replaced', 0):,} / {m.get('migrator_deleted', 0):,}")
         lines.append(f"    Omitidos / sin modo   : {m.get('migrator_skipped', 0):,} / {m.get('migrator_unclassified', 0):,}")
-        lines.append(f"  Sin cambios, no enviados: {m.get('source_unchanged', 0):,}")
-        lines.append(f"  Excluidos por configuración: {m.get('source_excluded', 0):,}")
         lines.append(f"  Filas inválidas         : {m.get('source_invalid', 0):,}")
         lines.append(f"  Rechazados por Paxapos  : {migrator_errors:,}")
-        lines.append(f"  Diferidos (dependencia) : {int(m.get('migrator_deferred', 0) or 0):,}")
         lines.append(f"  Batches OK / con error  : {m.get('batches_ok', 0)} / {m.get('batches_failed', 0)}")
         if int(m.get("batches_recovered", 0) or 0) or int(m.get("records_isolated", 0) or 0):
             lines.append(
@@ -458,10 +420,12 @@ def notify_run_report(
                 f"(registros aislados: {int(m.get('records_isolated', 0) or 0):,}, "
                 f"requests extra: {int(m.get('bisect_requests', 0) or 0):,})"
             )
-        lines.append(f"  Duración                : {duration:.2f} s   ({dur_min:.2f} min)")
-        lines.append(f"  Query origen (SQL)      : {query_dur:.2f} s")
-        lines.append(f"  Velocidad               : {speed_min:,.1f} reg/min   ({speed_sec:,.1f} reg/s)")
-        lines.append(f"  Latencia batch (POST)   : min {b_min:.3f}s | prom {b_avg:.3f}s | max {b_max:.3f}s")
+        if entity_runs > 1:
+            lines.append(
+                f"  Duración prom. corrida  : {duration:.2f} s   ({dur_min:.2f} min, promedio de {entity_runs} corridas)"
+            )
+        else:
+            lines.append(f"  Duración                : {duration:.2f} s   ({dur_min:.2f} min)")
         if not ent_ok:
             lines.append(f"  {SUB}")
             _emit_error_block(lines, m, indent="  ")

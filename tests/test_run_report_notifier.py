@@ -68,9 +68,20 @@ def test_notify_run_report_enabled(mock_send, mock_is_enabled, clean_env):
         assert "00:05:00" in body
         assert "Corridas agregadas" in body
         assert "144" in body
-        assert "Filas leídas de RAFAM" in body
         assert "Registros migrados" not in body
-        assert "filas leídas no equivale a altas nuevas" in body
+        # Metricas sacadas del mail (no aportaban al operador).
+        for removed in (
+            "Filas leídas de RAFAM",
+            "Sin cambios, no enviados",
+            "Excluidos por configuración",
+            "Diferidos",
+            "Velocidad",
+            "filas leídas no equivale a altas nuevas",
+            "Query origen",
+            "Latencia batch",
+        ):
+            assert removed not in body
+        assert "Filas inválidas" in body
         assert "Items enviados Paxapos" in body
         assert "Confirmados por Paxapos" in body
         assert "Altas nuevas" in body
@@ -227,3 +238,23 @@ def test_notify_run_report_sin_retry_detail_no_rompe(mock_send, mock_is_enabled,
     mock_send.return_value = True
 
     assert notify_run_report(summary_data, [], dry_run=False) is True
+
+
+@patch("src.notifier._is_enabled", return_value=True)
+@patch("src.notifier.send_notification")
+def test_notify_run_report_duracion_es_promedio_por_corrida(mock_send, mock_is_enabled, clean_env):
+    """En el resumen diario la duracion por entidad es la de UNA corrida, no la suma del dia."""
+    summary_data = {"duration_formatted": "00:30:00", "runs_count": 3, "success": True}
+    entity_metrics = [
+        {"entity": "oc_items", "mode": "DIARIO", "success": True, "runs": 3, "duration_secs": 300.0},
+        {"entity": "proveedores", "mode": "INCREMENTAL", "success": True, "duration_secs": 12.0},
+    ]
+    mock_send.return_value = True
+
+    assert notify_run_report(summary_data, entity_metrics) is True
+    body = mock_send.call_args[0][1]
+
+    assert "Duración prom. corrida  : 100.00 s   (1.67 min, promedio de 3 corridas)" in body
+    assert "300.00 s" not in body
+    # Corrida individual (sin `runs`): la duracion se muestra tal cual.
+    assert "Duración                : 12.00 s   (0.20 min)" in body

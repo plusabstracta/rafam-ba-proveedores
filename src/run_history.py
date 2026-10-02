@@ -217,6 +217,9 @@ def aggregate_runs(runs: list[dict], date_str: str) -> tuple[dict, list[dict]]:
                 {
                     "entity": name,
                     "mode": "DIARIO",
+                    # Corridas del dia en las que corrio la entidad (para
+                    # mostrar la duracion promedio de una corrida).
+                    "runs": 0,
                     "records_ok": 0,
                     "migrator_sent": 0,
                     "migrator_saved": 0,
@@ -249,6 +252,7 @@ def aggregate_runs(runs: list[dict], date_str: str) -> tuple[dict, list[dict]]:
                     "error_trace": None,
                 },
             )
+            agg["runs"] += 1
             agg["records_ok"] += int(m.get("records_ok", 0) or 0)
             agg["migrator_sent"] += int(m.get("migrator_sent", 0) or 0)
             agg["migrator_saved"] += int(m.get("migrator_saved", 0) or 0)
