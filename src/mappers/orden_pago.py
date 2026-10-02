@@ -9,9 +9,9 @@ from __future__ import annotations
 import json
 import logging
 
-from ..record_events import note_skip
+from ..record_events import GROUP_ESPERA, GROUP_FALLO, GROUP_FUERA, note_skip
 from ..utils import env_bool, format_date_only, parse_money, to_int
-from ..retry_store import REASON_DEPENDENCY_MISSING, REASON_VALIDATION_CLIENT
+from ..retry_store import REASON_DEPENDENCY_MISSING, REASON_VALIDATION_CLIENT, RESOLVED_OUT_OF_SCOPE
 from ..validation import validate_amount
 from .clasificaciones import code_str as clasif_code_str
 from .clasificaciones import parent_code as clasif_parent_code
@@ -47,8 +47,13 @@ class OrdenPagoMapper:
     _force_keys: frozenset = frozenset()
     _events = None
 
-    def _note_skip(self, key: tuple[int, int], reason: str) -> None:
-        note_skip(self._events, "orden_pago", self._op_source_key(key[0], key[1]), reason)
+    def _note_skip(
+        self, key: tuple[int, int], reason: str, *, group: str = GROUP_FALLO, detail: str | None = None,
+    ) -> None:
+        note_skip(
+            self._events, "orden_pago", self._op_source_key(key[0], key[1]), reason,
+            group=group, detail=detail,
+        )
 
     def __init__(self, *, link_store, lookup_resolver, source_repo=None, retry_store=None, resolve_gastos_fn=None):
         self._link_store = link_store
@@ -95,9 +100,9 @@ class OrdenPagoMapper:
         intentos y dispara el mail individual del registro.
         """
         if reason_code == REASON_DEPENDENCY_MISSING:
-            self._note_skip(key, f"queda en espera: {reason}")
+            self._note_skip(key, f"queda en espera: {reason}", group=GROUP_ESPERA, detail=reason_detail)
         else:
-            self._note_skip(key, reason)
+            self._note_skip(key, reason, group=GROUP_FALLO, detail=reason_detail)
         if self._retry_store is None or dry_run:
             return
         try:
@@ -111,12 +116,17 @@ class OrdenPagoMapper:
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning("No se pudo encolar OP %s-%s: %s", key[0], key[1], exc)
 
-    def _resolve_op(self, key: tuple[int, int], dry_run: bool) -> None:
-        """Saca la OP de la cola de reintentos (ya esta migrada y al dia)."""
+    def _resolve_op(self, key: tuple[int, int], dry_run: bool, *, out_of_scope: bool = False) -> None:
+        """Saca la OP de la cola de reintentos (ya esta migrada y al dia, o
+        ``out_of_scope``: una regla de negocio dice que no se migra)."""
         if self._retry_store is None or dry_run:
             return
         try:
-            self._retry_store.resolve("orden_pago", self._op_source_key(key[0], key[1]))
+            sk = self._op_source_key(key[0], key[1])
+            if out_of_scope:
+                self._retry_store.resolve("orden_pago", sk, how=RESOLVED_OUT_OF_SCOPE)
+            else:
+                self._retry_store.resolve("orden_pago", sk)
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning("No se pudo resolver OP %s-%s en la cola: %s", key[0], key[1], exc)
 
@@ -308,17 +318,23 @@ class OrdenPagoMapper:
                 skipped_estado[estado or "(vacio)"] = skipped_estado.get(estado or "(vacio)", 0) + 1
                 self._note_skip(
                     key, f"ESTADO_OP={estado or '(vacio)'}: solo se migran OPs confirmadas (ESTADO_OP=C)",
+                    group=GROUP_FUERA, detail="payment_not_confirmed",
                 )
                 continue
             confirmado = str(raw.get("CONFIRMADO", "")).strip().upper()
             if confirmado != "S":
                 skipped_confirmado[confirmado or "(vacio)"] = skipped_confirmado.get(confirmado or "(vacio)", 0) + 1
-                self._note_skip(key, f"CONFIRMADO={confirmado or '(vacio)'}: solo se migran OPs con CONFIRMADO=S")
+                self._note_skip(
+                    key, f"CONFIRMADO={confirmado or '(vacio)'}: solo se migran OPs con CONFIRMADO=S",
+                    group=GROUP_FUERA, detail="payment_not_confirmed",
+                )
                 continue
             fecha_confirm = format_date_only(raw.get("FECH_CONFIRM") or "")
             if not fecha_confirm:
                 skipped_no_fech_confirm += 1
-                self._note_skip(key, "sin FECH_CONFIRM en RAFAM")
+                self._note_skip(
+                    key, "sin FECH_CONFIRM en RAFAM", group=GROUP_FUERA, detail="payment_not_confirmed",
+                )
                 continue
 
             sk = json.dumps({"ejercicio": ejercicio, "nro_op": nro_op}, sort_keys=True)
@@ -365,9 +381,12 @@ class OrdenPagoMapper:
             )
             if is_cod_prov_excluded(prov_candidate):
                 skipped_excluded_prov += 1
-                self._note_skip(key, f"proveedor excluido por configuracion (COD_PROV={prov_candidate})")
+                self._note_skip(
+                    key, f"proveedor excluido por configuracion (COD_PROV={prov_candidate})",
+                    group=GROUP_FUERA, detail="excluded_provider",
+                )
                 # Nunca va a migrar: si quedo encolada antes de excluirla, cerrarla.
-                self._resolve_op(key, dry_run)
+                self._resolve_op(key, dry_run, out_of_scope=True)
                 logger.info(
                     "Migrator [orden_pago] OP %s-%s: omitida - proveedor excluido (COD_PROV=%s)",
                     ejercicio, nro_op, prov_candidate,
@@ -404,7 +423,18 @@ class OrdenPagoMapper:
             )
             if not res_importe.ok:
                 reason = res_importe.reason or ""
-                self._note_skip(key, f"IMPORTE_TOTAL={importe_raw!r} invalido: {reason}")
+                # NULL/no parseable: dato roto (fallo). <= 0: ajuste contable o
+                # anulacion, no se crean egresos en $0 (fuera de alcance).
+                if "negativo" in reason or "cero" in reason:
+                    self._note_skip(
+                        key, f"IMPORTE_TOTAL={importe_raw!r}: no se crean egresos en $0 o negativos ({reason})",
+                        group=GROUP_FUERA, detail="non_positive_amount",
+                    )
+                else:
+                    self._note_skip(
+                        key, f"IMPORTE_TOTAL={importe_raw!r} invalido: {reason}",
+                        group=GROUP_FALLO, detail="invalid_amount",
+                    )
                 # NULL o no parseable es un dato roto en RAFAM: va a la cola
                 # (y al mail del registro). <= 0 es un ajuste contable o una
                 # anulacion esperable: solo se loguea.
@@ -519,8 +549,11 @@ class OrdenPagoMapper:
                         # uno. Encolarla como dependencia la dejaba 'pending' para
                         # siempre (340 OP en sep-2026). Fuera de alcance: se cierra.
                         skipped_no_presupuestaria += 1
-                        self._note_skip(key, "OP no presupuestaria (TIPO_OP=N) sin imputacion: fuera de alcance")
-                        self._resolve_op(key, dry_run)
+                        self._note_skip(
+                            key, "OP no presupuestaria (TIPO_OP=N) sin imputacion: fuera de alcance",
+                            group=GROUP_FUERA, detail="non_budget_payment",
+                        )
+                        self._resolve_op(key, dry_run, out_of_scope=True)
                         logger.debug(
                             "Migrator [orden_pago] OP %s-%s omitida: TIPO_OP=N sin imputacion (fuera de alcance)",
                             key[0], key[1],
@@ -602,6 +635,7 @@ class OrdenPagoMapper:
                         key,
                         f"OC {', '.join(oc_cortas)} aun no migrada en Paxapos; primero: "
                         + " ".join(f"resend --entity oc_items --key {oc}" for oc in oc_cortas),
+                        group=GROUP_ESPERA, detail="order_not_migrated",
                     )
                     self._enqueue_op(
                         key,
@@ -628,6 +662,7 @@ class OrdenPagoMapper:
                     key,
                     f"proveedor COD_PROV={prov_sin_link[0]} aun no migrado en Paxapos; primero: "
                     f"resend --entity proveedores --key {prov_sin_link[0]}",
+                    group=GROUP_ESPERA, detail="provider_not_migrated",
                 )
                 self._enqueue_op(
                     key,

@@ -27,7 +27,11 @@ from email.mime.text import MIMEText
 from typing import Sequence
 
 from .retry_labels import describe_retry_key
-from .utils import utc_sql_to_local
+from .utils import days_since_utc_sql, utc_sql_to_local
+
+# Motivos de espera (mismo valor que retry_store.WAIT_REASONS; no se importa
+# retry_store para no acoplar el notifier a la cola).
+_WAIT_REASONS = frozenset({"dependency_missing"})
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +70,7 @@ def send_notification(
     is_html: bool = False,
     extra_recipients: Sequence[str] = (),
     recipients: Sequence[str] | None = None,
+    attachments: Sequence[tuple[str, str, str]] = (),
 ) -> bool:
     """Envía una notificación por email.
 
@@ -75,6 +80,7 @@ def send_notification(
         is_html: Si True, envía como text/html; si False, como text/plain.
         extra_recipients: Destinatarios adicionales a los configurados en NOTIFY_TO.
         recipients: Si se pasa, reemplaza a NOTIFY_TO (ej. NOTIFY_ALERT_TO).
+        attachments: ``(nombre, contenido texto, subtipo)`` (ej. ``("x.csv", data, "csv")``).
 
     Returns:
         True si el envío fue exitoso, False en caso contrario.
@@ -110,13 +116,17 @@ def send_notification(
 
     full_subject = f"{subject_prefix} {subject}".strip()
 
-    msg = MIMEMultipart("alternative")
+    msg = MIMEMultipart("mixed" if attachments else "alternative")
     msg["Subject"] = full_subject
     msg["From"] = from_addr
     msg["To"] = ", ".join(recipients)
 
     mime_type = "html" if is_html else "plain"
     msg.attach(MIMEText(body, mime_type, "utf-8"))
+    for filename, content, subtype in attachments:
+        part = MIMEText(content, subtype, "utf-8")
+        part.add_header("Content-Disposition", "attachment", filename=filename)
+        msg.attach(part)
 
     try:
         timeout = int(_env("NOTIFY_SMTP_TIMEOUT", "15"))
@@ -343,6 +353,16 @@ def notify_run_report(
     lines.append(f"Duración total: {duration_fmt}   ({run_mins:.2f} min / {run_secs:.0f} s)")
     lines.append("")
 
+    # Lo primero que tiene que ver el operador: que registros no llegaron.
+    operator = summary_data.get("operator")
+    attachments: list[tuple[str, str, str]] = []
+    if operator:
+        from .operator_report import csv_filename, operator_csv, render_operator_section
+
+        render_operator_section(lines, operator, sep=SEP, sub=SUB)
+        if operator.get("attention"):
+            attachments.append((csv_filename(operator), operator_csv(operator), "csv"))
+
     lines.append("RESUMEN GLOBAL")
     lines.append(SUB)
     if runs_count is not None:
@@ -374,6 +394,17 @@ def notify_run_report(
         lines.append(
             f"  • Avisos de incidente enviados: {int(summary_data.get('incident_alerts_sent') or 0):,}"
             "  (entidad sin sincronizar: Paxapos caido o batch sin aislar)"
+        )
+    if operator:
+        lines.append(
+            f"  • Para revisar en RAFAM   : {len(operator.get('attention') or []):,}"
+            f"  ({int(operator.get('new_today') or 0):,} nuevo(s) hoy)"
+        )
+    total_permanent_retried = sum(int(m.get("permanent_retried", 0) or 0) for m in entity_metrics)
+    if total_permanent_retried:
+        lines.append(
+            f"  • 'permanent' reintentados solos: {total_permanent_retried:,}"
+            "  (intentos automaticos de registros trabados)"
         )
     lines.append("")
 
@@ -420,6 +451,16 @@ def notify_run_report(
                 f"(registros aislados: {int(m.get('records_isolated', 0) or 0):,}, "
                 f"requests extra: {int(m.get('bisect_requests', 0) or 0):,})"
             )
+        ledger_new = m.get("ledger_new") or {}
+        if any(ledger_new.values()):
+            lines.append(
+                "  Sin ID de Paxapos (nuevos a la cola): "
+                f"{int(ledger_new.get('queued_fallo', 0) or 0):,} fallo(s), "
+                f"{int(ledger_new.get('queued_espera', 0) or 0):,} espera(s), "
+                f"{int(ledger_new.get('unexplained', 0) or 0):,} sin motivo"
+            )
+        if int(m.get("permanent_retried", 0) or 0):
+            lines.append(f"  'permanent' reintentados: {int(m.get('permanent_retried', 0) or 0):,}")
         if entity_runs > 1:
             lines.append(
                 f"  Duración prom. corrida  : {duration:.2f} s   ({dur_min:.2f} min, promedio de {entity_runs} corridas)"
@@ -429,6 +470,23 @@ def notify_run_report(
         if not ent_ok:
             lines.append(f"  {SUB}")
             _emit_error_block(lines, m, indent="  ")
+        lines.append("")
+
+    # Fuera de alcance: foto de la ultima corrida (sumar 144 corridas no dice nada).
+    fuera_rows = [
+        (m.get("entity", "?"), (m.get("ledger_last") or {}).get("fuera_detail") or {})
+        for m in entity_metrics
+    ]
+    if any(detail for _, detail in fuera_rows):
+        lines.append("NO SE MIGRAN POR REGLA (fuera de alcance, ultima corrida)")
+        lines.append(SUB)
+        for ent, detail in fuera_rows:
+            for info in sorted(detail.values(), key=lambda d: -int(d.get("count", 0) or 0)):
+                ejemplos = ", ".join(info.get("examples") or [])
+                lines.append(
+                    f"  • [{ent}] {info.get('label', '?')}: {int(info.get('count', 0) or 0):,}"
+                    + (f"  (ej: {ejemplos})" if ejemplos else "")
+                )
         lines.append("")
 
     # Cola de reintentos
@@ -494,6 +552,8 @@ def notify_run_report(
     lines.append("Email generado automáticamente por el pipeline de sincronización RAFAM (Madariaga).")
 
     body = "\n".join(lines)
+    if attachments:
+        return send_notification(subject, body, is_html=False, attachments=attachments)
     return send_notification(subject, body, is_html=False)
 
 
@@ -503,6 +563,7 @@ _REASON_HEADLINE = {
     "backend_rejected": "Paxapos lo rechazo",
     "validation_client": "no se envio (datos invalidos)",
     "batch_failed": "fallo el envio (aislado de un batch caido)",
+    "dependency_missing": "sigue sin migrarse (espera vencida)",
 }
 
 # Contexto extra en el mail por registro, segun el motivo.
@@ -512,7 +573,48 @@ _REASON_NOTE = {
         "SOLO (los demas se enviaron bien). Suele ser un dato que hace fallar a Paxapos:\n"
         "revisar el log de Paxapos a la hora del ultimo intento."
     ),
+    "dependency_missing": (
+        "El registro no tiene errores propios, pero depende de otro que todavia no esta en\n"
+        "Paxapos (o de un estado de RAFAM que no cambia: OC sin confirmar, OP sin imputacion).\n"
+        "Una espera normal se resuelve en horas; esta ya supero el plazo. Revisar en RAFAM\n"
+        "el motivo de arriba. Cuando se resuelva, se migra solo en la proxima corrida."
+    ),
 }
+
+
+def _wait_days_label(first_seen) -> str:
+    days = days_since_utc_sql(first_seen)
+    if days is None:
+        return "varios dias"
+    return f"{int(days)} dia(s)" if days >= 1 else "menos de 1 dia"
+
+
+def _paxapos_id_text(item) -> str:
+    paxapos_id = getattr(item, "paxapos_id", None)
+    if paxapos_id:
+        return f"{paxapos_id} (ya existe en Paxapos: fallo la actualizacion)"
+    return "— (todavia no existe en Paxapos)"
+
+
+def describe_queue_state(item, *, max_attempts: int) -> str:
+    """Estado de la fila en la cola en palabras (mail por registro y lista del operador)."""
+    if item.reason_code in _WAIT_REASONS:
+        return (
+            f"en espera hace {_wait_days_label(item.first_seen)} — se reintenta solo en cada "
+            "corrida y se migra apenas se resuelva lo que espera"
+        )
+    if item.status == "permanent":
+        base = f"PERMANENT — agoto {item.attempts} intento(s) seguidos"
+        if not getattr(item, "auto_retry", 1):
+            return f"{base}; NO se reintenta solo (rechazo terminal): reenviar a mano si corresponde"
+        next_retry = getattr(item, "next_retry_after", None)
+        if next_retry:
+            return (
+                f"{base}; ya no se reintenta en cada corrida pero se vuelve a intentar solo: "
+                f"proximo intento {utc_sql_to_local(next_retry)} (hora local)"
+            )
+        return f"{base}; no se reintenta solo (RAFAM_PERMANENT_RETRY_HOURS=0): reenviar a mano"
+    return f"pendiente — se reintenta solo en cada corrida (intento {item.attempts} de {max_attempts})"
 
 _CLI = ".venv/bin/python main.py"
 
@@ -523,25 +625,23 @@ def _alert_recipients() -> list[str] | None:
 
 
 def notify_record_failure(item, *, max_attempts: int) -> bool:
-    """Mail SOLO de este registro (rechazado por Paxapos u omitido por datos invalidos).
+    """Mail SOLO de este registro (rechazado por Paxapos, omitido por datos
+    invalidos o en espera hace mas de RAFAM_WAIT_ALERT_DAYS dias).
 
-    ``item`` es un `retry_store.RetryItem`. Se manda al entrar a la cola y otra
-    vez si pasa a 'permanent' (ver RetryStore.pending_alerts).
+    ``item`` es un `retry_store.RetryItem`. Se manda al entrar a la cola, otra
+    vez si pasa a 'permanent', y una vez cuando una espera se vence (ver
+    RetryStore.pending_alerts).
     """
     label = describe_retry_key(item.entity, item.external_id)
     headline = _REASON_HEADLINE.get(item.reason_code, item.reason_code)
     permanent = item.status == "permanent"
-    if permanent:
+    if item.reason_code in _WAIT_REASONS:
+        subject = f"{label}: hace {_wait_days_label(item.first_seen)} que no se puede migrar (espera vencida)"
+    elif permanent:
         subject = f"{label}: PASO A PERMANENT ({headline})"
-        estado = (
-            f"PERMANENT — agoto {item.attempts} intento(s) y ya no se reintenta solo"
-        )
     else:
         subject = f"{label}: {headline}"
-        estado = (
-            f"pendiente — se reintenta solo en cada corrida "
-            f"(intento {item.attempts} de {max_attempts})"
-        )
+    estado = describe_queue_state(item, max_attempts=max_attempts)
 
     SEP = "=" * 70
     SUB = "-" * 70
@@ -551,11 +651,13 @@ def notify_record_failure(item, *, max_attempts: int) -> bool:
         "REGISTRO QUE NO LLEGO A PAXAPOS",
         SEP,
         f"Registro       : {label}",
+        f"Clave RAFAM    : {item.external_id}",
+        f"ID Paxapos     : {_paxapos_id_text(item)}",
         f"Entidad        : {item.entity}",
         f"Que paso       : {headline}",
         f"Motivo         : {item.reason_code} / {item.reason_detail or 'sin detalle'}",
         f"Estado         : {estado}",
-        f"Primera falla  : {utc_sql_to_local(item.first_seen)} (hora local)",
+        f"En la cola desde: {utc_sql_to_local(item.first_seen)} (hora local)",
         f"Ultimo intento : {utc_sql_to_local(item.last_attempt)} (hora local)",
         f"Servidor       : {socket.gethostname()}",
         "",
@@ -567,12 +669,18 @@ def notify_record_failure(item, *, max_attempts: int) -> bool:
     if note:
         lines.append("")
         lines.extend(f"  {line}" for line in note.splitlines())
+    if item.reason_code in _WAIT_REASONS:
+        first_step = "  1. Revisar en RAFAM lo que espera este registro (ver ERROR) y destrabarlo."
+        second_step = "  2. Se migra solo en la proxima corrida; para no esperar (probar con --dry-run):"
+    else:
+        first_step = "  1. Corregir la causa (el dato en RAFAM o la configuracion en Paxapos)."
+        second_step = "  2. Se reintenta solo; para reenviarlo ya (probar antes agregando --dry-run):"
     lines += [
         "",
         "QUE HACER",
         SUB,
-        "  1. Corregir la causa (el dato en RAFAM o la configuracion en Paxapos).",
-        "  2. Reenviarlo (probar antes agregando --dry-run):",
+        first_step,
+        second_step,
         f'       {_CLI} resend --entity {item.entity} --key "{label}"',
         "",
         "  Ver el detalle en la cola:",
@@ -582,7 +690,8 @@ def notify_record_failure(item, *, max_attempts: int) -> bool:
         f"--external-id '{external_id}' --note 'motivo'",
         "",
         SEP,
-        "Se avisa una vez por registro (y otra si pasa a permanent). El resumen diario sigue igual.",
+        "Se avisa una vez por registro (y otra si pasa a permanent). Mientras no se migre,",
+        "figura todos los dias en la lista PARA REVISAR del resumen diario.",
     ]
     return send_notification(subject, "\n".join(lines), recipients=_alert_recipients())
 
@@ -610,7 +719,10 @@ def notify_record_failures_overflow(items) -> bool:
     for item in items:
         label = describe_retry_key(item.entity, item.external_id)
         headline = _REASON_HEADLINE.get(item.reason_code, item.reason_code)
-        estado = "PERMANENT" if item.status == "permanent" else "pendiente"
+        if item.reason_code in _WAIT_REASONS:
+            estado = f"en espera hace {_wait_days_label(item.first_seen)}"
+        else:
+            estado = "PERMANENT" if item.status == "permanent" else "pendiente"
         first_line = str(item.error_message or "sin mensaje").splitlines()[0][:200]
         lines.append(f"  · {label} — {headline} — {estado}")
         lines.append(f"      {first_line}")

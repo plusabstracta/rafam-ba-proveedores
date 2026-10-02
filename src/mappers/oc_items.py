@@ -11,7 +11,7 @@ import logging
 
 from .. import config as _config
 from ..change_detection import compute_payload_hash
-from ..record_events import note_skip
+from ..record_events import GROUP_ESPERA, GROUP_FALLO, GROUP_FUERA, note_skip
 from ..retry_store import REASON_DEPENDENCY_MISSING, REASON_VALIDATION_CLIENT
 from ..utils import format_date_only, normalize_text, to_int
 
@@ -36,6 +36,20 @@ class OcItemsMapper:
         self._retry_store = retry_store
         # Acumula items sin match de mercaderÃ­a entre batches para report final
         self._missing_mercaderia_matches: dict[str, int] = {}
+
+    def _resolve(self, source_key: str, dry_run: bool, queued: set[str]) -> None:
+        """Saca la OC de la cola (ya esta al dia en Paxapos).
+
+        ``queued``: claves de oc_items en la cola al armar el batch. oc_items
+        relee TODAS las OC en cada corrida: sin este filtro serian miles de
+        escrituras por corrida para OCs que nunca estuvieron en la cola.
+        """
+        if self._retry_store is None or dry_run or source_key not in queued:
+            return
+        try:
+            self._retry_store.resolve("oc_items", source_key)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("Migrator [oc_items]: no se pudo resolver %s en la cola: %s", source_key, exc)
 
     def _enqueue(self, entity: str, key: str, reason_code: str, message: str, detail: str, dry_run: bool) -> None:
         if self._retry_store is None or dry_run:
@@ -88,6 +102,7 @@ class OcItemsMapper:
                     note_skip(
                         self._events, "oc_items", _oc_source_key(key),
                         f"proveedor excluido por configuracion (COD_PROV={cod_prov})",
+                        group=GROUP_FUERA, detail="excluded_provider",
                     )
                     skipped_no_prov.add(key)
                     continue
@@ -110,6 +125,7 @@ class OcItemsMapper:
                         self._events, "oc_items", _oc_source_key(key),
                         f"el proveedor COD_PROV={cod_prov} no esta migrado (sin link local); "
                         f"primero: resend --entity proveedores --key {cod_prov_norm if cod_prov_norm is not None else cod_prov}",
+                        group=GROUP_ESPERA, detail="provider_not_migrated",
                     )
                     # La OC no se encola: oc_items es full_load y vuelve a entrar
                     # sola cuando el proveedor exista. El que se encola es el
@@ -202,6 +218,12 @@ class OcItemsMapper:
             if self._retry_store is not None
             else set()
         )
+        queued_keys: set[str] = set()
+        if self._retry_store is not None and not dry_run:
+            try:
+                queued_keys = {it.external_id for it in self._retry_store.list_items(entity="oc_items")}
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning("Migrator [oc_items]: no se pudo leer la cola: %s", exc)
 
         for key, oc_data in grouped.items():
             raw = grouped_raw[key]
@@ -228,6 +250,8 @@ class OcItemsMapper:
                         # Sin este corte, oc_items (full_load) reenviaba las
                         # mismas ~12 bajas en cada corrida (1.728 por dia).
                         skipped_already_deleted += 1
+                        # Paxapos ya tiene la baja: si quedo algo en la cola, esta viejo.
+                        self._resolve(source_key, dry_run, queued_keys)
                         continue
                     oc_data["Pedido"]["id"] = int(link_previo["remote_id"])
                     oc_data["Pedido"]["deleted"] = 1
@@ -236,6 +260,7 @@ class OcItemsMapper:
                     note_skip(
                         self._events, "oc_items", source_key,
                         "OC anulada (estado A) que nunca se migro: no hay nada que dar de baja en Paxapos",
+                        group=GROUP_FUERA, detail="cancelled_never_migrated",
                     )
                     ocs_to_skip_register.append(key)
                 continue
@@ -246,11 +271,19 @@ class OcItemsMapper:
 
             if not oc_data["items"]:
                 reason = "ningun item mapeable (sin mercaderia identificable o sin cantidad)"
-                note_skip(self._events, "oc_items", source_key, reason)
                 # Solo es un problema si la OC se iba a enviar (R, o con
-                # comprobante/OP): una OC sin confirmar e incompleta es normal.
+                # comprobante/OP): una OC sin confirmar e incompleta es normal
+                # (espera a que la confirmen, como cualquier OC sin confirmar).
                 has_cc = bool(str(raw.get("OC_CC_NRO") or "").strip())
                 has_op = bool(link_previo and link_previo.get("has_op"))
+                if estado_actual == "R" or has_cc or has_op:
+                    note_skip(self._events, "oc_items", source_key, reason, group=GROUP_FALLO, detail="invalid_items")
+                else:
+                    note_skip(
+                        self._events, "oc_items", source_key,
+                        f"OC sin confirmar en RAFAM (estado {estado_actual or '(vacio)'}) y {reason}",
+                        group=GROUP_ESPERA, detail="order_not_confirmed",
+                    )
                 if estado_actual == "R" or has_cc or has_op:
                     self._enqueue(
                         "oc_items", source_key, REASON_VALIDATION_CLIENT,
@@ -283,6 +316,12 @@ class OcItemsMapper:
                     else:
                         ocs_same_state.append(key)
                         skipped_same_state += 1
+                        # Paxapos ya tiene exactamente este contenido (mismo
+                        # hash aceptado): un error viejo en la cola quedo
+                        # resuelto (p.ej. items sin mapear que se corrigieron
+                        # y se enviaron en otra corrida). Los 'permanent' no
+                        # llegan aca (se excluyen antes).
+                        self._resolve(source_key, dry_run, queued_keys)
             else:
                 has_cc = bool(str(raw.get("OC_CC_NRO") or "").strip())
                 has_op = bool(link_previo and link_previo.get("has_op"))
@@ -298,8 +337,9 @@ class OcItemsMapper:
                 else:
                     note_skip(
                         self._events, "oc_items", source_key,
-                        f"estado {estado_actual or '(vacio)'} sin comprobante ni OP: "
+                        f"OC sin confirmar en RAFAM (estado {estado_actual or '(vacio)'}) y sin comprobante ni OP: "
                         "solo se migran OCs confirmadas (R) o con comprobante/OP",
+                        group=GROUP_ESPERA, detail="order_not_confirmed",
                     )
                     ocs_to_skip_register.append(key)
 

@@ -182,3 +182,15 @@ def utc_sql_to_local(value: str | None) -> str:
     except ValueError:
         return str(value)
     return parsed.replace(tzinfo=timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def days_since_utc_sql(value: str | None, now: datetime | None = None) -> float | None:
+    """Dias transcurridos desde un timestamp UTC de SQLite (None si no parsea)."""
+    if not value:
+        return None
+    try:
+        parsed = datetime.strptime(str(value), "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+    current = now or datetime.now(timezone.utc)
+    return max(0.0, (current - parsed).total_seconds() / 86400)

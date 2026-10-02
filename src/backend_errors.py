@@ -31,6 +31,14 @@ class BackendInfraError(RuntimeError):
     """El receptor fallo por infraestructura (SQL/PHP), no por los datos enviados."""
 
 
+class SourceUnavailableError(RuntimeError):
+    """Una consulta secundaria a RAFAM no se pudo hacer (tabla/permiso/conexion).
+
+    No es culpa de un registro: el batch queda caido (watermark congelado) y
+    se relee en la proxima corrida, en vez de saltearlo como si estuviera OK.
+    """
+
+
 # Marcadores (lowercase) de fallos del backend que NO dependen de la fila.
 _SYSTEMIC_MARKERS = (
     "sqlstate",

@@ -10,7 +10,7 @@ import hashlib
 import json
 import logging
 
-from ..record_events import note_skip
+from ..record_events import GROUP_EN_PAXAPOS, GROUP_FALLO, GROUP_FUERA, note_skip
 from ..retry_labels import record_base_key, record_key_from_row
 from ..utils import format_date_only, parse_money, to_int
 from .gasto_matching import comprobante_key as _comprobante_key
@@ -47,8 +47,36 @@ class SolicGastosMapper:
     _events = None
     _retry_store = None
 
-    def _note_skip(self, key, reason: str) -> None:
-        note_skip(self._events, "solic_gastos", key, reason)
+    def _note_skip(self, key, reason: str, *, group: str = GROUP_FALLO, detail: str | None = None) -> None:
+        note_skip(self._events, "solic_gastos", key, reason, group=group, detail=detail)
+
+    @staticmethod
+    def _unmappable_note(raw: dict) -> tuple[str, str, str]:
+        """(motivo, grupo, detalle) de una fila que `_map_solic_gasto` no mapea.
+
+        Mismo orden de reglas que `_map_solic_gasto`: separa lo que todavia no
+        corresponde enviar (anulada, sin factura) de un dato roto en RAFAM.
+        """
+        if not format_date_only(raw.get("FECH_SOLIC")):
+            return "la solicitud no tiene FECH_SOLIC en RAFAM", GROUP_FALLO, "invalid_row"
+        if str(raw.get("ESTADO_SOLIC", "")).strip().upper() == "A":
+            return "solicitud anulada en RAFAM (ESTADO_SOLIC=A)", GROUP_FUERA, "cancelled"
+        if to_int(raw.get("CTA_COMPROB_COUNT")) != 1:
+            return (
+                "la solicitud todavia no tiene comprobante (factura) cargado en RAFAM",
+                GROUP_FUERA, "no_receipt_yet",
+            )
+        if parse_money(raw.get("CTA_IMPORTE_COMPR")) is None and parse_money(raw.get("IMPORTE_TOT")) is None:
+            return (
+                "el comprobante no tiene importe en RAFAM (CTA_IMPORTE_COMPR e IMPORTE_TOT vacios)",
+                GROUP_FALLO, "invalid_amount",
+            )
+        if not str(raw.get("CTA_NRO_COMPROB") or "").strip():
+            return (
+                "el comprobante no tiene numero en RAFAM (CTA_COMPROB.NRO_COMPROB vacio)",
+                GROUP_FALLO, "missing_receipt_number",
+            )
+        return "la solicitud no se pudo mapear (datos incompletos)", GROUP_FALLO, "invalid_row"
 
     def _resolve_retry(self, sk: str | None, dry_run: bool) -> None:
         """Cierra en la cola un gasto que ya esta bien en Paxapos.
@@ -122,10 +150,8 @@ class SolicGastosMapper:
             if gasto is not None:
                 candidates.append((gasto, raw))
             else:
-                self._note_skip(
-                    record_key_from_row("solic_gastos", raw),
-                    "la solicitud no se pudo mapear (sin comprobante o datos incompletos)",
-                )
+                reason, group, detail = self._unmappable_note(raw)
+                self._note_skip(record_key_from_row("solic_gastos", raw), reason, group=group, detail=detail)
 
         candidates.extend(self._expand_multi_comprobante(multi_pending))
 
@@ -140,6 +166,7 @@ class SolicGastosMapper:
                     ext,
                     "ninguna OC enviada a Paxapos referencia esta solicitud "
                     "(el gasto se enriquece solo sobre OCs migradas)",
+                    group=GROUP_FUERA, detail="order_not_sent",
                 )
                 continue
             sk = json.dumps(ext, sort_keys=True) if ext else None
@@ -223,14 +250,17 @@ class SolicGastosMapper:
                     skipped_ambiguous += 1
                     self._note_skip(
                         m["external_id"],
-                        "ambiguo: la OC tiene varias facturas en Paxapos y no se pudo elegir una",
+                        "ambiguo: la OC tiene varias facturas en Paxapos y ninguna coincide con el "
+                        "comprobante de RAFAM (revisar numero/importe de la factura)",
+                        group=GROUP_FALLO, detail="ambiguous_match",
                     )
                 else:
                     skipped_no_match += 1
                     self._note_skip(
                         m["external_id"],
                         "Paxapos no tiene un gasto parcial para este comprobante "
-                        "(el proveedor aun no subio la factura)",
+                        "(el proveedor aun no subio la factura; el gasto lo crea la OP al pagarse)",
+                        group=GROUP_FUERA, detail="no_paxapos_gasto",
                     )
                 continue
 
@@ -256,13 +286,17 @@ class SolicGastosMapper:
                 self._note_skip(
                     m["external_id"],
                     f"el gasto id={resolved.get('id')} ya esta completo en Paxapos: no hay campos vacios para enriquecer",
+                    group=GROUP_EN_PAXAPOS, detail="already_complete",
                 )
                 continue
 
             gasto_id = resolved.get("id")
             if gasto_id is None:
                 skipped_no_match += 1
-                self._note_skip(m["external_id"], "resolver_gasto devolvio el gasto sin id")
+                self._note_skip(
+                    m["external_id"], "resolver_gasto de Paxapos devolvio el gasto sin id",
+                    group=GROUP_FALLO, detail="resolver_without_id",
+                )
                 continue
 
             payload_hash = _stable_payload_hash({"id": gasto_id, "enrich": enrich})
@@ -365,6 +399,12 @@ class SolicGastosMapper:
             )
 
         out: list[tuple[dict, dict]] = []
+        for key in raw_by_key.keys() - comps.keys():
+            self._note_skip(
+                gasto_external_id(*key),
+                "CTA_COMPROB_COUNT indica varios comprobantes pero REG_COMP/CTA_COMPROB no devolvio ninguno",
+                group=GROUP_FALLO, detail="receipts_not_found",
+            )
         for key, comp_rows in comps.items():
             base = raw_by_key.get(key)
             if base is None:
@@ -376,6 +416,8 @@ class SolicGastosMapper:
                 candidate["CTA_COMPROB_COUNT"] = 1
                 gasto = self._map_solic_gasto(candidate)
                 if gasto is None:
+                    reason, group, detail = self._unmappable_note(candidate)
+                    self._note_skip(gasto_external_id(*key), reason, group=group, detail=detail)
                     continue
                 nro_comprob = str(comp.get("CTA_NRO_COMPROB") or "").strip()
                 gasto["external_id"] = {**gasto["external_id"], "nro_comprob": nro_comprob}

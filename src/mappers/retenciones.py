@@ -10,9 +10,10 @@ import hashlib
 import json
 import logging
 
+from ..backend_errors import SourceUnavailableError
 from ..config import is_cod_prov_excluded
-from ..record_events import note_skip
-from ..retry_store import REASON_DEPENDENCY_MISSING, REASON_VALIDATION_CLIENT
+from ..record_events import GROUP_ESPERA, GROUP_FALLO, GROUP_FUERA, note_skip
+from ..retry_store import REASON_DEPENDENCY_MISSING, REASON_VALIDATION_CLIENT, RESOLVED_OUT_OF_SCOPE
 from ..utils import normalize_text, to_int
 from ..validation import validate_amount
 
@@ -80,10 +81,13 @@ class RetencionesMapper:
         # 2. Traer deducciones por OP
         deducciones_by_op = self._source_repo.fetch_deducciones_for_ops(op_keys)
         if deducciones_by_op is None:
-            logger.error(
-                "Migrator [retenciones]: ORDEN_PAGO_DEDUC no disponible; batch omitido."
+            # Antes se salteaba el batch "OK": el watermark avanzaba y esas
+            # retenciones no se volvian a leer. Ahora el batch queda caido y
+            # se relee cuando la tabla vuelva.
+            raise SourceUnavailableError(
+                "Migrator [retenciones]: ORDEN_PAGO_DEDUC no disponible en RAFAM; "
+                f"el batch de {len(op_keys)} OP(s) queda pendiente para la proxima corrida"
             )
-            return None, {}
 
         # 3. Construir payload
         retenciones_payload: list[dict] = []
@@ -114,50 +118,32 @@ class RetencionesMapper:
                 note_skip(
                     self._events, "retenciones", op_sk,
                     f"proveedor excluido por configuracion (COD_PROV={prov_by_key.get((ejercicio, nro_op))})",
+                    group=GROUP_FUERA, detail="excluded_provider",
                 )
                 # Misma blocklist que orden_pago (sueldos, IPS, IOMA, cajas chicas):
                 # sus deducciones no son retenciones a proveedores. Cerrar la cola
                 # si quedo encolada antes de la exclusion.
                 skipped_excluded += 1
-                self._resolve_retry(op_sk, dry_run)
+                self._resolve_retry(op_sk, dry_run, out_of_scope=True)
                 continue
 
             deducciones = deducciones_by_op.get((ejercicio, nro_op), [])
             if not deducciones:
                 skipped_no_deduc += 1
-                note_skip(self._events, "retenciones", op_sk, "la OP no tiene deducciones en ORDEN_PAGO_DEDUC")
+                note_skip(
+                    self._events, "retenciones", op_sk, "la OP no tiene deducciones en ORDEN_PAGO_DEDUC",
+                    group=GROUP_FUERA, detail="no_deductions",
+                )
                 # Sin deducciones no hay nada que migrar: si estaba en la cola
                 # (p.ej. por un tipo de retencion no resuelto), cerrarla.
-                self._resolve_retry(op_sk, dry_run)
+                self._resolve_retry(op_sk, dry_run, out_of_scope=True)
                 continue
 
-            op_link = self._link_store.get_link("orden_pago", op_sk)
-            if not op_link or not op_link.get("remote_id"):
-                skipped_no_link += 1
-                note_skip(
-                    self._events, "retenciones", op_sk,
-                    f"la OP {ejercicio}-{nro_op} aun no esta migrada; primero: "
-                    f"resend --entity orden_pago --key {ejercicio}-{nro_op}",
-                )
-                if self._retry_store is not None and not dry_run:
-                    self._retry_store.enqueue(
-                        "retenciones",
-                        op_sk,
-                        REASON_DEPENDENCY_MISSING,
-                        f"OP {ejercicio}-{nro_op} aun no migrada en Paxapos",
-                        reason_detail="payment_not_migrated",
-                    )
-                continue
-            if op_link.get("deleted_at"):
-                # El Egreso destino fue borrado en Paxapos (baja manual, terminal
-                # por contrato): no hay a que aplicarle las retenciones.
-                skipped_permanent += 1
-                note_skip(
-                    self._events, "retenciones", op_sk,
-                    f"el Egreso id={op_link.get('remote_id')} de la OP fue borrado en Paxapos",
-                )
-                continue
-
+            # Se mapea ANTES de mirar si la OP ya esta migrada: si ninguna
+            # deduccion es una retencion (o el catalogo no las resuelve) no
+            # tiene sentido esperar a la OP. Antes estas OPs quedaban en la cola
+            # "esperando la OP" para siempre cuando la OP tampoco se migraba
+            # (p.ej. no presupuestaria): ahora la espera larga avisa por mail.
             mapped: list[dict] = []
             for ded in deducciones:
                 ret = self._map_deduccion_dict(ded, ejercicio, nro_op)
@@ -178,14 +164,16 @@ class RetencionesMapper:
                         f"OP {ejercicio}-{nro_op}: {len(deducciones)} deduccion(es) no impositivas "
                         f"(TIPO_DEDUC=O: {_describe(deducciones)}); Paxapos no las modela como retencion"
                     )
-                    note_skip(self._events, "retenciones", op_sk, msg)
-                    self._resolve_retry(op_sk, dry_run)
+                    note_skip(self._events, "retenciones", op_sk, msg, group=GROUP_FUERA, detail="non_tax_deductions")
+                    self._resolve_retry(op_sk, dry_run, out_of_scope=True)
                     continue
                 msg = (
                     f"OP {ejercicio}-{nro_op}: {len(deducciones)} deduccion(es) sin tipo de retencion "
                     f"resoluble en el catalogo tipos_retencion de Paxapos ({_describe(deducciones)})"
                 )
-                note_skip(self._events, "retenciones", op_sk, msg)
+                note_skip(
+                    self._events, "retenciones", op_sk, msg, group=GROUP_FALLO, detail="retention_type_unresolved",
+                )
                 if self._retry_store is not None and not dry_run:
                     self._retry_store.enqueue(
                         "retenciones",
@@ -194,6 +182,35 @@ class RetencionesMapper:
                         msg,
                         reason_detail="retention_type_unresolved",
                     )
+                continue
+
+            op_link = self._link_store.get_link("orden_pago", op_sk)
+            if not op_link or not op_link.get("remote_id"):
+                skipped_no_link += 1
+                note_skip(
+                    self._events, "retenciones", op_sk,
+                    f"la OP {ejercicio}-{nro_op} aun no esta migrada; primero: "
+                    f"resend --entity orden_pago --key {ejercicio}-{nro_op}",
+                    group=GROUP_ESPERA, detail="payment_not_migrated",
+                )
+                if self._retry_store is not None and not dry_run:
+                    self._retry_store.enqueue(
+                        "retenciones",
+                        op_sk,
+                        REASON_DEPENDENCY_MISSING,
+                        f"OP {ejercicio}-{nro_op} aun no migrada en Paxapos",
+                        reason_detail="payment_not_migrated",
+                    )
+                continue
+            if op_link.get("deleted_at"):
+                # El Egreso destino fue borrado en Paxapos (baja manual, terminal
+                # por contrato): no hay a que aplicarle las retenciones.
+                skipped_permanent += 1
+                note_skip(
+                    self._events, "retenciones", op_sk,
+                    f"el Egreso id={op_link.get('remote_id')} de la OP fue borrado en Paxapos",
+                    group=GROUP_FUERA, detail="destination_deleted",
+                )
                 continue
 
             # Idempotencia
@@ -242,12 +259,15 @@ class RetencionesMapper:
         }
         return payload, pending_fingerprints
 
-    def _resolve_retry(self, op_sk: str, dry_run: bool) -> None:
+    def _resolve_retry(self, op_sk: str, dry_run: bool, *, out_of_scope: bool = False) -> None:
         """Saca la OP de la cola de retenciones (nada pendiente para ella)."""
         if self._retry_store is None or dry_run:
             return
         try:
-            self._retry_store.resolve("retenciones", op_sk)
+            if out_of_scope:
+                self._retry_store.resolve("retenciones", op_sk, how=RESOLVED_OUT_OF_SCOPE)
+            else:
+                self._retry_store.resolve("retenciones", op_sk)
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning("Migrator [retenciones]: no se pudo resolver %s en la cola: %s", op_sk, exc)
 

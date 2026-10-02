@@ -131,6 +131,9 @@ def record_run(summary_data: dict, entity_metrics: list[dict]) -> None:
                 # (18k batches/dia en oc_items) pero sin esto el mail diario
                 # mostraba 0.000s en todas las entidades.
                 "batch_latency": summarize_latency(m.get("batch_times") or []),
+                "permanent_retried": m.get("permanent_retried", 0),
+                # Cierre de cuentas de la corrida (src/record_ledger.py).
+                "ledger": m.get("ledger"),
                 "error_msg": m.get("error_msg"),
                 "error_type": m.get("error_type"),
                 "error_kind": m.get("error_kind"),
@@ -243,6 +246,12 @@ def aggregate_runs(runs: list[dict], date_str: str) -> tuple[dict, list[dict]]:
                     "query_duration_secs": 0.0,
                     "batch_times": [],
                     "batch_latency": None,
+                    "permanent_retried": 0,
+                    # Registros sin ID de Paxapos que entraron a la cola en el dia.
+                    "ledger_new": {"queued_fallo": 0, "queued_espera": 0, "unexplained": 0},
+                    # Foto de la ultima corrida (fuera de alcance se cuenta en cada
+                    # corrida: sumarlas no tiene sentido).
+                    "ledger_last": None,
                     "success": True,
                     "error_msg": None,
                     "error_type": None,
@@ -254,6 +263,12 @@ def aggregate_runs(runs: list[dict], date_str: str) -> tuple[dict, list[dict]]:
             )
             agg["runs"] += 1
             agg["records_ok"] += int(m.get("records_ok", 0) or 0)
+            agg["permanent_retried"] += int(m.get("permanent_retried", 0) or 0)
+            ledger = m.get("ledger")
+            if isinstance(ledger, dict):
+                for key in agg["ledger_new"]:
+                    agg["ledger_new"][key] += int(ledger.get(key, 0) or 0)
+                agg["ledger_last"] = ledger
             agg["migrator_sent"] += int(m.get("migrator_sent", 0) or 0)
             agg["migrator_saved"] += int(m.get("migrator_saved", 0) or 0)
             agg["migrator_errors"] += int(m.get("migrator_errors", 0) or 0)

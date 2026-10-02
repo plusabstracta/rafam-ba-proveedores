@@ -39,9 +39,9 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from .auth_circuit_breaker import AuthCircuitOpenError
-from .backend_errors import BackendInfraError
+from .backend_errors import BackendInfraError, SourceUnavailableError
 from .retry_labels import RESENDABLE_ENTITIES, describe_retry_key, record_base_key, record_key_from_row
-from .retry_store import ALERT_REASONS, REASON_BATCH_FAILED, STATUS_PENDING
+from .retry_store import ALERT_REASONS, REASON_BATCH_FAILED, RESOLVED_NOT_SENT, STATUS_PENDING
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +76,11 @@ def is_infra_failure(exc: Exception) -> bool:
     Con estos errores partir el batch no sirve (fallarian todas las mitades) y
     solo agrega carga a un backend que ya esta mal.
     """
-    if isinstance(exc, (BackendInfraError, AuthCircuitOpenError, OSError, http.client.HTTPException, sqlite3.Error)):
+    if isinstance(
+        exc,
+        (BackendInfraError, SourceUnavailableError, AuthCircuitOpenError, OSError,
+         http.client.HTTPException, sqlite3.Error),
+    ):
         return True
     status = _http_status(exc)
     if status is not None:
@@ -389,7 +393,9 @@ class BatchIsolator:
         if self._retry_store is None or self._dry_run:
             return
         try:
-            self._retry_store.resolve_if_reason(self.entity, key, REASON_BATCH_FAILED)
+            self._retry_store.resolve_if_reason(
+                self.entity, key, REASON_BATCH_FAILED, how=RESOLVED_NOT_SENT,
+            )
         except Exception:  # noqa: BLE001 - se reintenta en la proxima corrida
             logger.warning("[%s] no se pudo sacar %s de la cola", self.entity, key, exc_info=True)
 
@@ -436,6 +442,15 @@ class BatchIsolator:
                 except Exception:  # noqa: BLE001 - sin cola se aisla igual, con menos evidencia
                     logger.warning("[%s] no se pudo leer la cola para aislar batches", self.entity, exc_info=True)
                     items = []
+                # 'permanent' cuyo reintento automatico vence en esta corrida:
+                # se mandan como cualquier pendiente (un batch_failed, solo).
+                due: set = set()
+                due_fn = getattr(self._retry_store, "due_permanent_external_ids", None)
+                if callable(due_fn):
+                    try:
+                        due = set(due_fn(self.entity))
+                    except Exception:  # noqa: BLE001 - sin el dato, el permanent no se manda solo
+                        logger.warning("[%s] no se pudieron leer los permanent a reintentar", self.entity, exc_info=True)
                 for item in items:
                     if item.reason_code not in ALERT_REASONS:
                         continue
@@ -443,13 +458,16 @@ class BatchIsolator:
                     if base is None:
                         continue
                     failing.add(base)
-                    if item.reason_code == REASON_BATCH_FAILED and item.status == STATUS_PENDING:
+                    if item.reason_code == REASON_BATCH_FAILED and (
+                        item.status == STATUS_PENDING or item.external_id in due
+                    ):
                         known_bad.add(base)
             self._queue_sets = (known_bad, failing)
         return self._queue_sets
 
     def _known_bad(self) -> set:
-        """Claves 'pending' como batch_failed: se mandan solas."""
+        """Claves batch_failed que se reintentan en esta corrida ('pending' o
+        'permanent' con el reintento vencido): se mandan solas."""
         return self._load_queue_sets()[0]
 
     def _failing(self) -> set:

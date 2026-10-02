@@ -156,6 +156,21 @@ def record_base_key(entity: str, external_id) -> str | None:
     return _compose(entity, [data[f] for f in fields])
 
 
+def row_key_fn(entity: str, columns: list[str]):
+    """Funcion fila (tupla) -> clave base, con los indices de columna resueltos
+    una sola vez. Equivale a `record_key_from_row` sin armar un dict por fila
+    (oc_items relee todos los items en cada corrida). None si la entidad o las
+    columnas no alcanzan para armar la clave."""
+    cols = _ROW_COLUMNS.get(entity)
+    if cols is None:
+        return None
+    index = {str(c).upper(): i for i, c in enumerate(columns)}
+    positions = [index.get(c) for c in cols]
+    if any(p is None for p in positions):
+        return lambda row: None
+    return lambda row: _compose(entity, [row[p] for p in positions])
+
+
 def record_key_from_row(entity: str, raw: dict) -> str | None:
     """Clave base desde una fila RAFAM (dict columna -> valor)."""
     cols = _ROW_COLUMNS.get(entity)

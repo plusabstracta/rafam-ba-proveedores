@@ -421,12 +421,46 @@ Revisar tambien los logs del portal Paxapos si el migrator devuelve errores parc
 
 ## Fiabilidad: cola de reintentos, reportes y backups
 
+### Ciclo de vida de un registro (cron cada 10 minutos)
+
+Regla: **todo registro que el cron lee de RAFAM y no termina con ID de Paxapos tiene un
+motivo registrado**. Al final de cada entidad, `src/record_ledger.py` cierra las cuentas y
+cada registro leido cae en uno de estos grupos:
+
+| Grupo | Que es | Que pasa |
+| --- | --- | --- |
+| Con ID de Paxapos | Migrado (o sin cambios desde la ultima vez). | Nada. |
+| **Fallo** | Dato invalido en RAFAM (importe nulo, comprobante sin numero, item sin mercaderia...), rechazo de Paxapos, batch caido. | Va a la cola, mail por registro, lista PARA REVISAR del mail diario. |
+| **Espera** | El registro esta bien pero depende de otro (OC/OP/proveedor aun no migrado, OC sin confirmar, OP sin imputacion). | Va a la cola sin gastar intentos. Si pasa `RAFAM_WAIT_ALERT_DAYS` dias (default 3), mail y lista PARA REVISAR. |
+| **Fuera de alcance** | Una regla dice que no se migra: proveedor excluido, OC anulada que nunca se migro, OP no presupuestaria, deducciones no impositivas, solicitud anulada o sin factura. | Se cuenta (foto de la ultima corrida en el mail diario). |
+| **Sin motivo** | El script lo leyo y no lo envio sin decir por que, Paxapos respondio OK sin ID, o se envio y la respuesta no lo menciona. | Nunca se pierde en silencio: va a la cola como fallo (`unexplained`, `ok_without_id`, `no_response`) y avisa. |
+
+Estados en la cola:
+
+1. `pending`: se reintenta en **cada corrida** (los incrementales lo reinyectan en la query).
+2. `permanent`: agoto 10 intentos seguidos. Deja de reintentarse cada 10 minutos, pero **no
+   se abandona**: se vuelve a intentar solo cada `RAFAM_PERMANENT_RETRY_HOURS` horas
+   (default 6). Si el operador corrige el dato en RAFAM, se migra en el proximo intento sin
+   que nadie corra un comando. `retry-queue` muestra el proximo intento de cada uno.
+   - Excepcion: los rechazos terminales (el Egreso fue borrado a mano en Paxapos) no se
+     reintentan solos; solo a mano con `resend` o `retry-queue --requeue`.
+   - Al deployar esta version, los `permanent` que ya estaban en la cola se reintentan en la
+     primera corrida.
+3. Al migrarse (o quedar fuera de alcance) sale de la cola y queda en `retry_resolved`: el
+   mail diario lo muestra en DESTRABADOS HOY, para verificar que una correccion funciono.
+
+Para no esperar el reintento automatico: `main.py resend --entity <entidad> --key "<registro>"`
+(el comando sale en cada mail y en el CSV).
+
+### Detalle
+
 - **Cola de reintentos**: las filas salteadas por dependencia faltante o rechazadas por el
   receptor (207 por fila) se encolan en `retry_queue` y se **reinyectan en la query** de la
   proxima corrida para `proveedores`, `solic_gastos`, `orden_pago` y `retenciones`
   (`oc_items` y `clasificaciones` son full-scan y se auto-recuperan solos — con la unica
-  excepcion de lo que ya paso a `permanent`, ver abajo). Las filas esperando una dependencia
-  no "queman" intentos; las rechazadas pasan a `permanent` tras 10 intentos.
+  excepcion de lo que esta `permanent`, ver abajo). Las filas esperando una dependencia
+  no "queman" intentos; las rechazadas pasan a `permanent` tras 10 intentos y desde ahi se
+  reintentan solas cada `RAFAM_PERMANENT_RETRY_HOURS` horas.
 - **Invariante de checkpoint**: el watermark de una entidad NUNCA avanza sobre una fila que no
   quedo, o bien confirmada por Paxapos, o bien registrada en `retry_queue`. Un batch cuyo POST
   responde 200 pero trae un error de fila que el pipeline **no puede** encolar (external_id
@@ -463,12 +497,13 @@ Revisar tambien los logs del portal Paxapos si el migrator devuelve errores parc
   `--status pending` o `--status permanent` para filtrar) lista TODAS las filas de esa entidad,
   con el label legible, motivo, detalle, intentos, estado, `first_seen`/`last_attempt` y el
   ultimo error completo del receptor. Sin `--entity` lista toda la cola de todas las entidades.
-- **Reencolar lo `permanent`**: una fila `permanent` NO se reinyecta mas, asi que cuando el
-  rechazo se arregla del lado de Paxapos hay que devolverla a la cola a mano con `--requeue`
-  (opcionalmente con `--external-id` para acotar a una sola fila). Caso tipico: core#406 — el
-  gate de `cantidad > 0` tiraba la OC entera por un renglon con cantidad 0; tras deployar el
-  fix, `main.py retry-queue --entity oc_items --requeue` (la cola usa el nombre de la
-  entidad del pipeline, `oc_items`, no la seccion `ordenes_compra` del migrator).
+- **Reencolar lo `permanent`**: una fila `permanent` se reintenta sola cada
+  `RAFAM_PERMANENT_RETRY_HOURS` horas. Para no esperar (p.ej. despues de deployar un fix en
+  Paxapos) se la devuelve a `pending` con `--requeue` (opcionalmente con `--external-id` para
+  acotar a una sola fila) y entra en la proxima corrida. Caso tipico: core#406 — el gate de
+  `cantidad > 0` tiraba la OC entera por un renglon con cantidad 0; tras deployar el fix,
+  `main.py retry-queue --entity oc_items --requeue` (la cola usa el nombre de la entidad del
+  pipeline, `oc_items`, no la seccion `ordenes_compra` del migrator).
 - **Forzar el reenvio YA (sin esperar al proximo cron)**:
   - Uno o varios registros puntuales, esten o no en la cola: `main.py resend` (ver
     [Reenviar registros puntuales](#reenviar-registros-puntuales-mainpy-resend)).
@@ -495,13 +530,19 @@ Revisar tambien los logs del portal Paxapos si el migrator devuelve errores parc
   motivo por el que el script no lo envio), los intentos, las horas en hora local y el
   comando `resend` listo para copiar. Se manda al final de cada corrida del cron, de
   `resend` y de `retry-queue --send-now`.
+  - **Que trae**: registro (OC/OP/retencion/gasto/proveedor), clave RAFAM, ID de Paxapos
+    (cuando ya existe alli y lo que fallo es una actualizacion), entidad, que paso, motivo,
+    estado (intento N de 10, o proximo reintento si es `permanent`) y el error completo.
   - **Que avisa**: rechazos de Paxapos (`backend_rejected`), registros omitidos por datos
-    invalidos (`validation_client`) y registros aislados de un batch caido (`batch_failed`).
-    Esperar una dependencia (`dependency_missing`) y el backend caido (`backend_unavailable`)
-    no generan mails por registro.
-  - **Cuando**: al entrar a la cola, al pasar a `permanent` y, si se reenvia a mano (`resend`
-    sobre un `permanent`), cuando vuelve a fallar. La misma falla repetida en cada corrida no
-    vuelve a avisar. Lo que ya estaba en la cola al deployar esta version no dispara mails.
+    invalidos (`validation_client`), registros aislados de un batch caido (`batch_failed`) y
+    registros leidos sin ID y sin motivo. Esperar una dependencia (`dependency_missing`) avisa
+    solo cuando la espera supera `RAFAM_WAIT_ALERT_DAYS` dias (una vez); el backend caido
+    (`backend_unavailable`) se avisa por incidente, no por registro.
+  - **Cuando**: al entrar a la cola, al pasar a `permanent`, al vencer una espera y, si se
+    reenvia a mano (`resend` sobre un `permanent`), cuando vuelve a fallar. La misma falla
+    repetida en cada corrida (o en los reintentos automaticos) no vuelve a avisar. Lo que ya
+    estaba en la cola al deployar (incluidas las esperas ya vencidas) no dispara mails: figura
+    en la lista PARA REVISAR del mail diario.
   - **Tope**: `NOTIFY_RECORD_ALERT_MAX_PER_RUN` (default 25) mails individuales por corrida;
     el resto va en un unico mail resumen agrupado por causa. Si el SMTP falla, no se marca
     nada como avisado y se reintenta en la proxima corrida.
@@ -514,6 +555,13 @@ Revisar tambien los logs del portal Paxapos si el migrator devuelve errores parc
     el catalogo de Paxapos. Una OC cuyo proveedor no esta migrado encola al proveedor (espera,
     sin mail). Las deducciones no impositivas (`TIPO_DEDUC=O`: IPS, IOMA, garantias) quedan
     fuera de alcance y se cierran, igual que las OP `TIPO_OP=N`.
+  - **Tambien quedan en la cola** (cierre de cuentas): una OC sin confirmar en RAFAM (espera:
+    si sigue asi mas de 3 dias, avisa), una OC cuyo proveedor no esta migrado (espera), una
+    solicitud de gasto con datos incompletos o ambigua contra las facturas de Paxapos (fallo),
+    y cualquier registro leido que el script no envio sin motivo, que Paxapos acepto sin
+    devolver ID o que no aparecio en la respuesta (fallo).
+  - Si la tabla de deducciones (`ORDEN_PAGO_DEDUC`) no responde, el batch de retenciones
+    queda caido (watermark congelado, se relee) en vez de saltearse como si estuviera OK.
 - **Mail de incidente** (`src/incident_alerts.py`): cuando el problema es la entidad entera y
   no un registro — Paxapos o la red caidos, un batch que no se pudo aislar, o la corrida que no
   arranca (RAFAM caido) — llega UN mail por incidente con el ultimo error, desde cuando, y que
@@ -527,24 +575,31 @@ Revisar tambien los logs del portal Paxapos si el migrator devuelve errores parc
 - **Delay entre batches**: `RAFAM_SYNC_BATCH_DELAY_SECONDS` solo se espera despues de un batch
   que hizo POST; los batches donde todo esta sin cambios (la mayoria de `oc_items`, que es
   full-scan) ya no esperan.
-- **Mail diario**: la seccion "COLA DE REINTENTOS" muestra el estado real de la cola al
-  inicio y fin del dia, agrupado por entidad, estado y causa, y ademas un **detalle
-  individual** por entidad (los mas viejos primero, con label legible, motivo, intentos y
-  error) acotado a `RAFAM_MAIL_RETRY_DETAIL_LIMIT` filas (default 50) para no volver
-  inmanejable el mail con una cola grande; si hay mas, el mail lo dice explicitamente y
-  apunta a `main.py retry-queue --entity X` para el resto. `CON ADVERTENCIAS` significa
-  que solo quedan dependencias pendientes; `CON ERRORES` indica rechazos del backend,
-  validaciones, filas `permanent` o fallas tecnicas. Las horas de la cola se muestran en
-  hora local del servidor (en la base se guardan en UTC) y el resumen incluye cuantas
-  alertas por registro se mandaron en el dia.
+- **Mail diario** (para el operador de RAFAM, primero lo que hay que revisar):
+  - **PARA REVISAR EN RAFAM**: todo registro que no llego a Paxapos y necesita que alguien lo
+    mire (fallos, `permanent` y esperas vencidas), por entidad, con que paso, desde cuando,
+    intentos, proximo reintento, ID de Paxapos si existe y el error. En el cuerpo se muestran
+    hasta `RAFAM_MAIL_RETRY_DETAIL_LIMIT` por entidad (default 50); **la lista completa va en
+    el CSV adjunto** `rafam_registros_a_revisar_<fecha>.csv` (separado por `;`, abre directo
+    en Excel) con la clave RAFAM y el comando `resend` de cada uno. Las esperas que todavia
+    estan en plazo se informan solo como cantidad.
+  - **DESTRABADOS HOY**: lo que salio de la cola en el dia (se migro, quedo fuera de alcance o
+    se descarto a mano).
+  - **NO SE MIGRAN POR REGLA**: cuantos registros quedaron fuera de alcance en la ultima
+    corrida, por motivo y con ejemplos.
+  - Por entidad: registros sin ID que entraron a la cola en el dia y `permanent` reintentados.
+  - La seccion "COLA DE REINTENTOS" muestra el estado de la cola al inicio y fin del dia,
+    agrupado por entidad, estado y causa. `CON ADVERTENCIAS` significa que solo quedan
+    dependencias pendientes; `CON ERRORES` indica rechazos del backend, validaciones, filas
+    `permanent` o fallas tecnicas. Las horas se muestran en hora local del servidor (en la
+    base se guardan en UTC) y el resumen incluye cuantas alertas por registro se mandaron.
 - **Reconciliacion** (`main.py reconcile`): compara origen RAFAM vs. migrado vs. cola para
   `proveedores`, `ordenes_compra`, `ordenes_pago`, `gastos` (`SOLIC_GASTOS`) y `retenciones`
   (universo = OPs con al menos una fila en `ORDEN_PAGO_DEDUC`). `drift != 0` en cualquier fila
   es señal de perdida silenciosa a investigar — correrlo despues de un incidente grande de
   backend es la forma mas rapida de confirmar que nada quedo afuera de la cola.
-- **Metricas del mail**: "Filas leidas de RAFAM" es trabajo del scanner, "Items enviados a
-  Paxapos" es el payload real y "Altas nuevas" cuenta exclusivamente resultados
-  `mode=create`. Actualizaciones, reemplazos, bajas y omitidos se informan por separado.
+- **Metricas del mail**: "Items enviados a Paxapos" es el payload real y "Altas nuevas"
+  cuenta exclusivamente resultados `mode=create`. Actualizaciones, reemplazos, bajas y omitidos se informan por separado.
   Proveedores ya vinculados cuyo `payload_hash` no cambio no se vuelven a enviar, excepto si
   estan en la cola de reintentos.
 - **OPs sin orden de compra** (`RAFAM_MIGRAR_OP_SIN_OC`, default `true`): los pagos de gasto

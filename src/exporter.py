@@ -73,6 +73,7 @@ from .mappers.clasificaciones import (
     persist_links as clasif_persist_links,
 )
 from .record_events import RecordOutcome
+from .retry_labels import record_base_key
 from .retry_store import REASON_BACKEND_REJECTED, REASON_DEPENDENCY_MISSING, REASON_VALIDATION_CLIENT
 from .backend_errors import (
     BackendInfraError,
@@ -330,6 +331,40 @@ class MigratorExporter(BaseExporter):
 
     def get_last_batch_outcomes(self) -> list[RecordOutcome]:
         return list(getattr(self, "_last_outcomes", []) or [])
+
+    def get_last_batch_sent_keys(self) -> set[tuple[str, str]]:
+        """``(entidad, clave base)`` de cada registro que viajo en los POST del
+        ultimo batch. El cierre de cuentas (src/record_ledger.py) lo cruza con
+        la respuesta: un registro enviado sin resultado no puede perderse."""
+        return set(getattr(self, "_last_sent_keys", set()) or set())
+
+    # Seccion del payload -> entidad de la cola (gastos embebidos en OP -> solic_gastos).
+    _PAYLOAD_SECTION_ENTITY = {
+        "proveedores": "proveedores",
+        "ordenes_compra": "oc_items",
+        "gastos": "solic_gastos",
+        "ordenes_pago": "orden_pago",
+        "retenciones": "retenciones",
+    }
+
+    def _tracked_post(self, url: str, payload: dict) -> dict:
+        """POST a importar.json registrando que registros viajaron."""
+        sent = getattr(self, "_last_sent_keys", None)
+        if sent is None:
+            sent = self._last_sent_keys = set()
+        if isinstance(payload, dict):
+            for section, entity in self._PAYLOAD_SECTION_ENTITY.items():
+                items = payload.get(section)
+                if not isinstance(items, list):
+                    continue
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    key = self._outcome_key(section, item.get("external_id"))
+                    base = record_base_key(entity, key) if key is not None else None
+                    if base is not None:
+                        sent.add((entity, base))
+        return self._post_json(url, payload)
 
     # Seccion de la respuesta `results`/`errors` por nombre de entidad de config.
     _RESULT_SECTION_BY_ENTITY = {
@@ -716,6 +751,7 @@ class MigratorExporter(BaseExporter):
     def write_batch(self, entity: str, columns: list[str], rows: list[tuple]) -> None:
         self._last_parsed = None
         self._last_outcomes = []
+        self._last_sent_keys = set()
         self._reset_last_batch_migrator_metrics()
         unrecorded_errors = 0
         try:
@@ -805,7 +841,7 @@ class MigratorExporter(BaseExporter):
             "Migrator request [clasificaciones] POST %s dry_run=%s nodos=%d",
             url, self._dry_run, nodos,
         )
-        parsed = self._post_json(url, payload)
+        parsed = self._tracked_post(url, payload)
         self._last_parsed = parsed
 
         # En dry_run el receptor no persiste: guardar links aca dejaria ids
@@ -968,7 +1004,7 @@ class MigratorExporter(BaseExporter):
                 dry_run=self._dry_run,
                 payload_options=self._payload_options(),
                 import_url=self._import_url,
-                post_fn=self._post_json,
+                post_fn=self._tracked_post,
                 link_store=self._link_store,
                 raise_on_errors_fn=self._raise_on_errors_fn(),
                 force_external_ids=force_external_ids,
@@ -989,7 +1025,7 @@ class MigratorExporter(BaseExporter):
                 dry_run=self._dry_run,
                 payload_options=self._payload_options(),
                 import_url=self._import_url,
-                post_fn=self._post_json,
+                post_fn=self._tracked_post,
                 link_store=self._link_store,
                 raise_on_errors_fn=self._raise_on_errors_fn(),
             )
@@ -1034,7 +1070,7 @@ class MigratorExporter(BaseExporter):
                 dry_run=self._dry_run,
                 payload_options=self._payload_options(),
                 import_url=self._import_url,
-                post_fn=self._post_json,
+                post_fn=self._tracked_post,
                 link_store=self._link_store,
                 raise_on_errors_fn=self._raise_on_errors_fn(),
             )
@@ -1060,7 +1096,7 @@ class MigratorExporter(BaseExporter):
                       url, self._dry_run,
                       len(payload.get("ordenes_pago", [])),
                       len(payload.get("gastos", [])))
-        parsed = self._post_json(url, payload)
+        parsed = self._tracked_post(url, payload)
         self._last_parsed = parsed
         self._set_last_batch_migrator_metrics(
             sent=self._payload_count(payload, payload_sections),
@@ -1086,7 +1122,7 @@ class MigratorExporter(BaseExporter):
         url = self._import_url
         logger.debug("Migrator request [retenciones] POST %s dry_run=%s ops=%d",
                       url, self._dry_run, len(payload.get("retenciones", [])))
-        parsed = self._post_json(url, payload)
+        parsed = self._tracked_post(url, payload)
         self._last_parsed = parsed
         self._set_last_batch_migrator_metrics(
             sent=self._payload_count(payload, payload_sections),

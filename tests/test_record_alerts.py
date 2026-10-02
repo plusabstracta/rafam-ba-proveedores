@@ -234,14 +234,39 @@ class TestContenidoDelMail:
         assert send.call_args.kwargs["recipients"] == ["compras@example.test", "soporte@example.test"]
 
     def test_mail_de_paso_a_permanent(self):
-        item = self._item(status=STATUS_PERMANENT, attempts=10, reason_code=REASON_VALIDATION_CLIENT)
+        item = self._item(
+            status=STATUS_PERMANENT, attempts=10, reason_code=REASON_VALIDATION_CLIENT,
+            next_retry_after="2026-10-01 19:10:00",
+        )
         with patch.object(notifier, "send_notification", return_value=True) as send:
             notifier.notify_record_failure(item, max_attempts=10)
         subject, body = send.call_args.args[:2]
         assert subject.startswith("OC 2026-3-1023: PASO A PERMANENT")
         assert "datos invalidos" in subject
-        assert "ya no se reintenta solo" in body
+        # 'permanent' ya no es un callejon sin salida: dice cuando se reintenta solo.
+        assert "ya no se reintenta en cada corrida pero se vuelve a intentar solo" in body
+        assert f"proximo intento {utc_sql_to_local('2026-10-01 19:10:00')}" in body
         assert send.call_args.kwargs["recipients"] is None, "sin NOTIFY_ALERT_TO va a NOTIFY_TO"
+
+    def test_mail_de_permanent_terminal_no_promete_reintento(self):
+        item = self._item(status=STATUS_PERMANENT, attempts=1, auto_retry=0)
+        with patch.object(notifier, "send_notification", return_value=True) as send:
+            notifier.notify_record_failure(item, max_attempts=10)
+        body = send.call_args.args[1]
+        assert "NO se reintenta solo (rechazo terminal)" in body
+
+    def test_mail_de_espera_vencida(self):
+        item = self._item(
+            reason_code=REASON_DEPENDENCY_MISSING, reason_detail="order_not_migrated",
+            first_seen="2026-01-01 10:00:00",
+            error_message="OP 2026-1023: OC aun no migrada en Paxapos",
+        )
+        with patch.object(notifier, "send_notification", return_value=True) as send:
+            notifier.notify_record_failure(item, max_attempts=10)
+        subject, body = send.call_args.args[:2]
+        assert "que no se puede migrar (espera vencida)" in subject
+        assert "OC aun no migrada" in body
+        assert "Revisar en RAFAM lo que espera este registro" in body
 
 
     def test_mail_de_excedente_agrupa_por_causa(self):

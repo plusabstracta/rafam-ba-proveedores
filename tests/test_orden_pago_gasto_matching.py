@@ -46,7 +46,7 @@ class FakeRetryStore:
     def enqueue(self, entity, sk, reason, detail, reason_detail=None):
         self.enqueued.append((entity, sk, reason_detail))
 
-    def resolve(self, entity, sk):
+    def resolve(self, entity, sk, how=None):
         pass
 
 

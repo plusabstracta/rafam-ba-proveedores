@@ -40,6 +40,8 @@ from src.logging_config import setup_file_logging
 from src.models import Checkpoint
 from src.record_alerts import flush_record_alerts
 from src.record_events import RecordEventSink
+from src.record_ledger import LEDGER_ENTITIES, RunLedger, close_entity
+from src.operator_report import build_operator_report
 from src.retry_labels import (
     RESENDABLE_ENTITIES,
     describe_retry_key,
@@ -82,50 +84,16 @@ def _infra_abort_after() -> int:
 
 
 def _mail_retry_detail_limit() -> int:
-    """Tope de items individuales por entidad en la seccion COLA DE REINTENTOS del mail.
+    """Tope de registros por entidad en la lista PARA REVISAR EN RAFAM del mail.
 
-    El resumen agrupado por causa no tiene tope (son pocas filas). El detalle
-    fila-a-fila si podria crecer sin limite con una cola grande, asi que se
-    corta a los N mas viejos (los mas urgentes) con un puntero a
-    `retry-queue --entity X` para ver el resto.
+    El cuerpo del mail se corta a los N mas viejos (los mas urgentes) de cada
+    entidad; la lista completa va siempre en el CSV adjunto (0 = sin tope).
     """
     raw = os.getenv("RAFAM_MAIL_RETRY_DETAIL_LIMIT", "50")
     try:
         return max(0, int(raw))
     except ValueError:
         return 50
-
-
-def _build_retry_detail(retry_store: RetryStore, entities: list[str]) -> dict[str, dict]:
-    """Arma, por entidad, el detalle individual (label legible + motivo + intentos)
-    de lo que sigue pendiente/permanent AHORA MISMO, para el mail diario.
-
-    Snapshot en vivo (no historico): el detalle fila-a-fila no se persiste en
-    run_history.jsonl (solo los conteos agregados por `summary_by_reason`), asi
-    que se lee directo de retry_queue al armar el mail.
-    """
-    limit = _mail_retry_detail_limit()
-    detail: dict[str, dict] = {}
-    for entity in entities:
-        items = retry_store.list_items(entity=entity)
-        if not items:
-            continue
-        items = sorted(items, key=lambda it: it.first_seen or "")
-        rows = [
-            {
-                "label": describe_retry_key(entity, it.external_id),
-                "reason_code": it.reason_code,
-                "reason_detail": it.reason_detail,
-                "attempts": it.attempts,
-                "status": it.status,
-                "first_seen": it.first_seen,
-                "last_attempt": it.last_attempt,
-                "error_message": it.error_message,
-            }
-            for it in items[:limit]
-        ]
-        detail[entity] = {"items": rows, "total": len(items)}
-    return detail
 
 
 def _effective_batch_size(entity: str, requested_batch_size: int) -> int:
@@ -303,11 +271,18 @@ def _sync_entity(
     limit: int | None,
     dry_run: bool,
     retry_store=None,
+    *,
+    sink: RecordEventSink | None = None,
+    link_store=None,
 ) -> tuple[bool, str | None, dict]:
     """Execute the incremental sync for a single entity.
 
     Returns (True, None, metrics) si la entidad se sincronizo OK, (False, error_msg, metrics) si hubo error.
     El caller usa este flag para devolver exit code != 0 al SO/cron y notificar.
+
+    Con ``sink`` (motivos de omision de los mappers) y ``link_store`` se cierra
+    las cuentas de la entidad al final (src/record_ledger.py): ningun registro
+    leido queda sin ID de Paxapos y sin motivo.
     """
     t_start = time.monotonic()
     cp  = engine.get_checkpoint(entity)
@@ -393,16 +368,39 @@ def _sync_entity(
         "incident_kind": None,
         "incident_detail": None,
         "incident_keys": [],
+        # 'permanent' que se reintentaron solos en esta corrida.
+        "permanent_retried": 0,
+        # Cierre de cuentas (src/record_ledger.py); None = no se evaluo.
+        "ledger": None,
     }
+
+    ledger = (
+        RunLedger(entity)
+        if (
+            retry_store is not None and sink is not None and link_store is not None
+            and not dry_run and entity in LEDGER_ENTITIES
+        )
+        else None
+    )
+    retry_as_of: str | None = None
 
     try:
         t_query_start = time.monotonic()
         # Reinyectar lo pendiente en la cola de reintentos: sin esto una fila
         # salteada por dependencia faltante queda fuera del cursor para siempre
-        # (el watermark avanza igual que si se hubiera migrado).
+        # (el watermark avanza igual que si se hubiera migrado). Incluye los
+        # 'permanent' cuyo reintento automatico ya vencio.
         retry_keys = None
         if retry_store is not None:
             try:
+                retry_as_of = retry_store.now()
+                due_permanent = retry_store.due_permanent_external_ids(entity)
+                if due_permanent:
+                    metrics["permanent_retried"] = len(due_permanent)
+                    logger.info(
+                        "[%s] Reintento automatico de %d registro(s) 'permanent' (vencio su espera de %g h).",
+                        entity, len(due_permanent), retry_store.permanent_retry_hours,
+                    )
                 retry_keys = retry_store.pending_external_ids(entity)
             except Exception as retry_exc:  # pragma: no cover - defensive
                 retry_lookup_failed_detail = str(retry_exc)
@@ -450,18 +448,30 @@ def _sync_entity(
                 except (TypeError, ValueError):
                     pass
 
+        def after_write(_exc) -> None:
+            record_migrator_metrics()
+            if ledger is None:
+                return
+            outcomes_fn = getattr(exporter, "get_last_batch_outcomes", None)
+            if callable(outcomes_fn):
+                ledger.add_outcomes(outcomes_fn())
+            sent_fn = getattr(exporter, "get_last_batch_sent_keys", None)
+            if callable(sent_fn):
+                ledger.add_sent(sent_fn())
+
         isolator = BatchIsolator(
             exporter,
             entity,
             retry_store=retry_store,
             dry_run=dry_run,
             delay=batch_delay,
-            after_write=lambda _exc: record_migrator_metrics(),
+            after_write=after_write,
         )
 
         def process_batch(batch: list[tuple]) -> None:
             nonlocal last_id, last_ts, total, batch_count, failed_batches, last_batch_error, last_batch_error_detail, batches_ok
             nonlocal infra_streak, abort_entity, infra_failed_batches
+            batch_keys = ledger.see_rows(columns, batch) if ledger is not None else []
             bid, bts = engine.extract_cursor_values(columns, batch, entity)
             if bid is not None:
                 last_id = max(last_id, bid) if last_id is not None else bid
@@ -487,6 +497,9 @@ def _sync_entity(
                 exc = outcome.error
                 failed_batches += 1
                 last_batch_error = str(exc)
+                if ledger is not None:
+                    # Se releen en la proxima corrida (watermark congelado).
+                    ledger.mark_failed(batch_keys)
                 # Capturar contexto detallado (clase, archivo/línea, traceback,
                 # y respuesta cruda del migrator) para el reporte por email.
                 last_batch_error_detail = format_exception_context(
@@ -592,6 +605,14 @@ def _sync_entity(
                 describe_retry_key(entity, key) for key in dict.fromkeys(unresolved_keys)
             ][:10]
 
+        if not dry_run and retry_store is not None:
+            _close_entity_books(
+                entity, ledger, metrics, sink=sink, retry_store=retry_store, link_store=link_store,
+                # Solo si se leyo todo: un 'permanent' vencido que no se llego a
+                # leer (batch caido, corte por backend, --limit) sigue vencido.
+                retry_as_of=retry_as_of if (failed_batches == 0 and not abort_entity and limit is None) else None,
+            )
+
         if dry_run:
             logger.info("[DRY RUN   ] %s — %d registros (sin avanzar checkpoint)", entity, total)
         else:
@@ -675,6 +696,42 @@ def _sync_entity(
         metrics["migrator_error"] = _info["error_message"]
         metrics["duration_secs"] = time.monotonic() - t_start
         return False, str(exc), metrics
+
+
+def _close_entity_books(
+    entity: str,
+    ledger: RunLedger | None,
+    metrics: dict,
+    *,
+    sink: RecordEventSink | None,
+    retry_store,
+    link_store,
+    retry_as_of: str | None,
+) -> None:
+    """Cierre de cuentas + reintento de 'permanent'; nunca corta la corrida.
+
+    ``retry_as_of`` es None cuando la entidad no termino de leer todo (batch
+    caido, corte por backend o ``--limit``): los 'permanent' vencidos que no se
+    llegaron a mandar siguen vencidos y se reintentan en la proxima corrida.
+    """
+    if ledger is not None:
+        try:
+            metrics["ledger"] = close_entity(
+                ledger, sink=sink, retry_store=retry_store, link_store=link_store,
+            )
+        except Exception:  # noqa: BLE001 - el cierre no puede romper la corrida
+            logger.warning("[%s] No se pudo cerrar las cuentas de la entidad", entity, exc_info=True)
+    if retry_as_of is not None:
+        try:
+            deferred = retry_store.defer_due_permanents(entity, retry_as_of)
+            if deferred:
+                logger.info(
+                    "[%s] %d 'permanent' vencido(s) no se enviaron (el script ya no los manda); "
+                    "se vuelven a intentar en %g h.",
+                    entity, deferred, retry_store.permanent_retry_hours,
+                )
+        except Exception:  # noqa: BLE001
+            logger.warning("[%s] No se pudo reprogramar el reintento de los 'permanent'", entity, exc_info=True)
 
 
 def _warn_missing_cursor_fields(cfg, columns: list[str], entity: str) -> None:
@@ -770,6 +827,12 @@ def _cmd_run_locked(args) -> None:
         # cancela por una fila mala; el watermark avanza con seguridad porque lo
         # pendiente queda registrado aca.
         retry_store = RetryStore()
+        # Motivos por los que los mappers omiten registros: el cierre de
+        # cuentas de cada entidad los usa para que nada quede sin ID y sin motivo.
+        skip_sink = RecordEventSink()
+        if hasattr(exporter, "attach_event_sink"):
+            exporter.attach_event_sink(skip_sink)
+        link_store = getattr(exporter, "_link_store", None)
         if hasattr(exporter, "attach_retry_store"):
             exporter.attach_retry_store(retry_store)
             pending = retry_store.counts_by_entity(entities=targets)
@@ -787,7 +850,10 @@ def _cmd_run_locked(args) -> None:
             if hasattr(exporter, "attach_source"):
                 exporter.attach_source(source_repo)
             for entity in targets:
-                ok, err_msg, metrics = _sync_entity(source_repo, engine, exporter, entity, args.batch_size, args.limit, args.dry_run, retry_store)
+                ok, err_msg, metrics = _sync_entity(
+                    source_repo, engine, exporter, entity, args.batch_size, args.limit, args.dry_run, retry_store,
+                    sink=skip_sink, link_store=link_store,
+                )
                 entity_metrics.append(metrics)
                 if not ok:
                     failed_entities.append(entity)
@@ -804,7 +870,7 @@ def _cmd_run_locked(args) -> None:
         # Un mail por cada registro que en esta corrida quedo rechazado u
         # omitido por datos invalidos (el resumen diario sigue igual).
         if retry_store and not args.dry_run:
-            record_alerts_sent = _flush_record_alerts(retry_store)
+            record_alerts_sent = _flush_record_alerts(retry_store, link_store)
         # Un mail por incidente si una entidad entera no se pudo sincronizar
         # (Paxapos caido, batch que no se pudo aislar) y otro al normalizarse.
         if not args.dry_run:
@@ -1121,6 +1187,11 @@ def _cmd_retry_queue_locked(args) -> None:
                 f"first_seen={utc_sql_to_local(it.first_seen)}, "
                 f"last_attempt={utc_sql_to_local(it.last_attempt)} (hora local)"
             )
+            if it.status == STATUS_PERMANENT:
+                if not it.auto_retry:
+                    print("    reintento automatico: NO (rechazo terminal; solo a mano con --requeue o resend)")
+                elif it.next_retry_after:
+                    print(f"    proximo reintento automatico: {utc_sql_to_local(it.next_retry_after)} (hora local)")
             if it.error_message:
                 print(f"    ultimo error: {it.error_message}")
         print()
@@ -1128,10 +1199,10 @@ def _cmd_retry_queue_locked(args) -> None:
         retry_store.close()
 
 
-def _flush_record_alerts(retry_store: RetryStore) -> int:
+def _flush_record_alerts(retry_store: RetryStore, link_store=None) -> int:
     """Mails individuales pendientes; un fallo del mail nunca corta el comando."""
     try:
-        return flush_record_alerts(retry_store)
+        return flush_record_alerts(retry_store, link_store=link_store)
     except Exception:  # noqa: BLE001 - las alertas no pueden romper la corrida
         logger.warning("No se pudieron enviar las alertas por registro", exc_info=True)
         return 0
@@ -1757,18 +1828,27 @@ def cmd_daily_report(args) -> None:
 
     summary_data, entity_metrics = aggregate_runs(runs, target_date)
 
+    # Lista para el operador de RAFAM (en vivo desde la cola): que registros no
+    # llegaron a Paxapos, que se destrabo hoy, y el CSV adjunto con todo.
     try:
         retry_store = RetryStore()
         try:
-            entities_in_report = sorted(
-                {m.get("entity") for m in entity_metrics if m.get("entity")}
-            )
-            summary_data["retry_detail_end"] = _build_retry_detail(retry_store, entities_in_report)
+            link_store = EntityLinkStore()
+            try:
+                summary_data["operator"] = build_operator_report(
+                    retry_store,
+                    day=date.fromisoformat(target_date),
+                    body_limit=_mail_retry_detail_limit(),
+                    link_store=link_store,
+                )
+            finally:
+                link_store.close()
+            retry_store.prune_resolved(keep_days=30)
         finally:
             retry_store.close()
     except Exception:
         logger.warning(
-            "No se pudo armar el detalle individual de la cola de reintentos para el mail",
+            "No se pudo armar la lista de registros a revisar para el mail",
             exc_info=True,
         )
 
