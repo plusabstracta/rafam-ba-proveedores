@@ -14,6 +14,7 @@ from ..retry_store import REASON_DEPENDENCY_MISSING
 from ..validation import validate_amount
 from .clasificaciones import code_str as clasif_code_str
 from .clasificaciones import parent_code as clasif_parent_code
+from .deducciones import map_non_tax_deduction
 from .gasto_matching import elegir_gasto_portal, gasto_ids_pareados
 from .solic_gastos import gasto_external_id
 from .solic_gastos import persist_links as persist_links_gastos
@@ -1013,6 +1014,19 @@ class OrdenPagoMapper:
         monto_retenido = res_monto.value
 
         descripcion = str(ded.get("descripcion") or "").strip()
+
+        # paxapos#738: garantia / caja de medicos (mapa configurable) viajan como
+        # deduccion NO impositiva: restan del neto, sin tipo de impuesto ni certificado.
+        non_tax = map_non_tax_deduction(
+            ded,
+            cod_text=cod_text,
+            monto_retenido=monto_retenido,
+            descripcion=descripcion,
+            ejercicio=ejercicio,
+            nro_op=nro_op,
+        )
+        if non_tax is not None:
+            return non_tax
 
         tipo_retencion_id = self._lookup.resolve_tipo_retencion_id(cod_text, descripcion)
         if tipo_retencion_id is None:

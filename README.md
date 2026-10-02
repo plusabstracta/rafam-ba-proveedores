@@ -464,6 +464,12 @@ Revisar tambien los logs del portal Paxapos si el migrator devuelve errores parc
     `main.py run` sin `--entity` — ya reinyecta automaticamente todo lo `pending` de cada
     entidad, sin esperar el cron. Para `permanent`, primero `main.py retry-queue --requeue`
     (sin `--entity` reencola TODAS las entidades) y despues `main.py run`.
+- **Deducciones no impositivas (Garantia cod 4, Caja de Medicos cod 8 — paxapos#738)**: se
+  mandan como deduccion NO impositiva (restan del neto, sin certificado) segun
+  `RAFAM_NON_TAX_DEDUCTION_MAP` (ver `.env.example`). Las OP ya migradas se reenvian con
+  `make reprocess-non-tax-dry` (informe, no escribe nada) y `make reprocess-non-tax` (encola en la
+  cola LOCAL), y despues `main.py run --entity retenciones --dry-run` (preview) / sin `--dry-run`.
+  Requiere Paxapos v3.16.0 ya desplegado (ver `docs/rafam_paxapos_equivalencias.md` §2.5).
 - **Inspeccionar una fila exacta**: `main.py retry-queue --entity retenciones --external-id
   '{"ejercicio": 2026, "nro_op": 123}'` muestra causa, detalle estable, primer registro,
   ultimo intento y error completo.
