@@ -14,6 +14,7 @@ from ..config import is_cod_prov_excluded
 from ..retry_store import REASON_DEPENDENCY_MISSING
 from ..utils import normalize_text, to_int
 from ..validation import validate_amount
+from .deducciones import map_non_tax_deduction
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +88,7 @@ class RetencionesMapper:
         skipped_unchanged = 0
         skipped_permanent = 0
         skipped_excluded = 0
+        non_tax_sent = 0
 
         # Igual que oc_items (paxapos#489): una OP dentro de la ventana de
         # reproceso vuelve a entrar en cada corrida; sin esta exclusion una
@@ -144,9 +146,11 @@ class RetencionesMapper:
                     mapped.append(ret)
             if not mapped:
                 # Hay deducciones pero ninguna mapeo. Dos causas distintas:
-                #  - todas son TIPO_DEDUC='O' (IPS, IOMA, sindicato, garantia...):
-                #    no son retenciones impositivas y Paxapos no las modela; no
-                #    hay nada que "resolver" del lado del catalogo;
+                #  - todas son TIPO_DEDUC='O' sin mapeo en RAFAM_NON_TAX_DEDUCTION_MAP
+                #    (IPS, IOMA, sindicato...): no son retenciones impositivas y no
+                #    se mandan como deduccion no impositiva; no hay nada que
+                #    "resolver" del lado del catalogo. (Garantia y caja de medicos
+                #    SI estan mapeadas: llegan a `mapped`, paxapos#738);
                 #  - hay alguna 'I' que el catalogo tipos_retencion no matchea
                 #    (o el lookup fallo al cargarse): eso si es un pendiente real.
                 # Ambas se encolan (para no perderlas si el catalogo cambia) pero
@@ -156,7 +160,7 @@ class RetencionesMapper:
                         detail = "non_tax_deduction"
                         msg = (
                             f"OP {ejercicio}-{nro_op}: {len(deducciones)} deduccion(es) no impositivas "
-                            f"(TIPO_DEDUC=O: {_describe(deducciones)}); Paxapos no las modela como retencion"
+                            f"(TIPO_DEDUC=O: {_describe(deducciones)}); sin mapeo en RAFAM_NON_TAX_DEDUCTION_MAP"
                         )
                     else:
                         detail = "retention_type_unresolved"
@@ -181,6 +185,7 @@ class RetencionesMapper:
                 continue
 
             pending_fingerprints[op_sk] = (fingerprint, len(mapped))
+            non_tax_sent += sum(1 for r in mapped if r.get("no_impositiva"))
             retenciones_payload.append({
                 "external_id": {"ejercicio": ejercicio, "nro_op": nro_op},
                 # egreso_id resuelve el destino por id directo; el backend cae a
@@ -199,6 +204,12 @@ class RetencionesMapper:
             )
 
         self._flush_retencion_skip_counters("retenciones")
+        if non_tax_sent:
+            logger.info(
+                "Migrator [retenciones]: %d deduccion(es) no impositiva(s) (garantia, caja de medicos...) "
+                "en este batch; restan del neto en Paxapos, sin certificado (paxapos#738)",
+                non_tax_sent,
+            )
 
         if not retenciones_payload:
             logger.info("Migrator [retenciones]: nada para enviar en este batch")
@@ -249,6 +260,19 @@ class RetencionesMapper:
 
         descripcion = str(ded.get("descripcion") or "").strip()
 
+        # paxapos#738: garantia / caja de medicos (mapa configurable) viajan como
+        # deduccion NO impositiva: restan del neto, sin tipo de impuesto ni certificado.
+        non_tax = map_non_tax_deduction(
+            ded,
+            cod_text=cod_text,
+            monto_retenido=monto_retenido,
+            descripcion=descripcion,
+            ejercicio=ejercicio,
+            nro_op=nro_op,
+        )
+        if non_tax is not None:
+            return non_tax
+
         tipo_retencion_id = self._lookup.resolve_tipo_retencion_id(cod_text, descripcion)
         if tipo_retencion_id is None:
             alias = self._lookup.retencion_alias(descripcion or cod_text)
@@ -258,8 +282,9 @@ class RetencionesMapper:
         if tipo_retencion_id is None:
             key = descripcion or f"CODIGO_DEDUC={cod_text}"
             if str(ded.get("tipo_deduc") or "").strip().upper() == "O":
-                # No impositiva: se omite a proposito, pero se acumula el importe
-                # porque Paxapos recalcula neto_transferido solo con lo enviado.
+                # No impositiva SIN mapeo (las mapeadas ya salieron arriba): se omite
+                # a proposito, pero se acumula el importe porque Paxapos recalcula
+                # neto_transferido solo con lo enviado.
                 self._retencion_skipped_non_tax[key] = self._retencion_skipped_non_tax.get(key, 0.0) + float(monto_retenido)
             elif not self._lookup.tipos_retencion:
                 self._retencion_skipped_no_catalog += 1
@@ -317,7 +342,8 @@ class RetencionesMapper:
             self._retencion_skipped_no_match = {}
         if self._retencion_skipped_non_tax:
             logger.info(
-                "Migrator [%s]: deducciones no impositivas (TIPO_DEDUC=O) omitidas, importe por concepto: %s",
+                "Migrator [%s]: deducciones no impositivas (TIPO_DEDUC=O) SIN mapeo omitidas "
+                "(ver RAFAM_NON_TAX_DEDUCTION_MAP), importe por concepto: %s",
                 entity_label,
                 {k: round(v, 2) for k, v in self._retencion_skipped_non_tax.items()},
             )

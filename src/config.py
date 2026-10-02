@@ -234,6 +234,68 @@ def is_cod_prov_excluded(cod_prov: object) -> bool:
         return False
 
 
+# -- paxapos/paxapos#738: deducciones NO impositivas -------------------------
+#
+# RAFAM clasifica sus deducciones en DEDUCCIONES.TIPO_DEDUC: 'I' (impositiva:
+# Ganancias, IIBB, SUSS, IVA) y 'O' (otra: IPS, IOMA, sindicatos, embargos...).
+# Dos 'O' las aplica RAFAM a proveedores reales y restan del neto que cobran:
+# Garantia (cod 4, fondo de reparo de obra) y Caja de Medicos (cod 8). Paxapos
+# las modela como deduccion NO impositiva (account_retenciones.es_no_impositiva):
+# restan del neto, se ven con su nombre y NO llevan certificado.
+#
+# Este mapa dice QUE codigos de DEDUCCIONES.CODIGO se mandan como no impositivos
+# y con que nombre los ve el proveedor. Una 'O' sin mapeo (IPS, IOMA...) sigue
+# omitida y encolada como `non_tax_deduction`.
+#
+# RAFAM_NON_TAX_DEDUCTION_MAP="4=Fondo de garantia,8=Caja de Medicos"
+#   - sin definir: el mapa de abajo (Madariaga: cod 4 y cod 8);
+#   - definida: REEMPLAZA al default (para sumar un codigo hay que repetir el 4
+#     y el 8); vacia ("") desactiva todo y vuelve al comportamiento anterior.
+_NON_TAX_DEDUCTION_DEFAULT: dict[str, str] = {
+    "4": "Fondo de garant\u00eda",
+    "8": "Caja de M\u00e9dicos",
+}
+
+
+def _normalize_deduction_code(value: object) -> str:
+    """'04', ' 4 ' y 4 son el mismo codigo; un codigo no numerico queda como texto."""
+    text = str(value if value is not None else "").strip()
+    return str(int(text)) if text.isdigit() else text
+
+
+def non_tax_deduction_map() -> dict[str, str]:
+    """Mapa codigo RAFAM -> nombre a mostrar de las deducciones no impositivas.
+
+    Se lee del entorno en cada llamada (barato, y permite cambiarlo sin
+    reiniciar un proceso largo ni depender del orden de imports en los tests).
+    """
+    raw = os.getenv("RAFAM_NON_TAX_DEDUCTION_MAP")
+    if raw is None:
+        return dict(_NON_TAX_DEDUCTION_DEFAULT)
+    out: dict[str, str] = {}
+    for token in raw.split(","):
+        code, sep, name = token.partition("=")
+        code = _normalize_deduction_code(code)
+        name = " ".join(name.split())
+        if not sep or not code or not name:
+            continue
+        out[code] = name[:100]  # largo de account_retenciones.concepto
+    return out
+
+
+def non_tax_deduction_concept(codigo_deduc: object, tipo_deduc: object = None) -> str | None:
+    """Nombre a mostrar si la deduccion es no impositiva mapeada, o None.
+
+    Una deduccion que RAFAM marca 'I' (impositiva) NUNCA es no impositiva, aunque
+    su codigo este en el mapa: un mapa mal configurado no puede esconder una
+    retencion fiscal. TIPO_DEDUC ausente (catalogo sin esa columna) no bloquea:
+    el operador mapeo ese codigo a proposito.
+    """
+    if str(tipo_deduc or "").strip().upper() == "I":
+        return None
+    return non_tax_deduction_map().get(_normalize_deduction_code(codigo_deduc))
+
+
 # ── issue #414: base imponible de OC_ITEMS.IMP_UNITARIO ─────────────────────
 #
 # Compras.DiagnosticoImportesOc (lado Paxapos) detecto que una porcion

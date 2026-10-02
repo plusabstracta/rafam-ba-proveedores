@@ -250,14 +250,16 @@ class TestRetencionesEgresoBorrado:
         retry.close()
 
     def test_deducciones_no_impositivas_se_encolan_con_detalle_propio(self, monkeypatch, tmp_path):
-        """IPS/IOMA/garantia (TIPO_DEDUC=O) no son retenciones para Paxapos: no es
-        un problema de catalogo, y el reporte debe distinguirlo de 'unresolved'."""
+        """IPS/IOMA (TIPO_DEDUC=O) SIN mapeo no son retenciones para Paxapos: no es
+        un problema de catalogo, y el reporte debe distinguirlo de 'unresolved'.
+        (Garantia y caja de medicos si tienen mapeo: paxapos#738, ver
+        tests/test_non_tax_deductions.py.)"""
         exporter = _migrator(monkeypatch, tmp_path)
         retry = RetryStore(db_path=str(tmp_path / "retry.db"))
         exporter.attach_retry_store(retry)
         exporter._link_store.save_link("orden_pago", _OP_SK, "5001")
         exporter.attach_source(_FakeSourceRepo({(2026, 100): [
-            {"codigo_deduc": "4", "importe_reten": 10.0, "descripcion": "Garantia", "tipo_deduc": "O"},
+            {"codigo_deduc": "2", "importe_reten": 10.0, "descripcion": "RETENCIONES I.O.M.A.", "tipo_deduc": "O"},
             {"codigo_deduc": "1", "importe_reten": 5.0, "descripcion": "RETENCIONES I.P.S.", "tipo_deduc": "O"},
         ]}))
 
@@ -268,7 +270,8 @@ class TestRetencionesEgresoBorrado:
         item = retry.list_items("retenciones")[0]
         assert item.reason_code == REASON_DEPENDENCY_MISSING
         assert item.reason_detail == "non_tax_deduction"
-        assert "Garantia" in item.error_message
+        assert "I.P.S." in item.error_message
+        assert "RAFAM_NON_TAX_DEDUCTION_MAP" in item.error_message
         retry.close()
 
     def test_impositiva_sin_match_sigue_siendo_unresolved(self, monkeypatch, tmp_path):
@@ -279,7 +282,7 @@ class TestRetencionesEgresoBorrado:
         # cod 318 'Profesiones Liberales' es I pero no tiene alias ni match por nombre.
         exporter.attach_source(_FakeSourceRepo({(2026, 100): [
             {"codigo_deduc": "318", "importe_reten": 10.0, "descripcion": "Profesiones Liberales", "tipo_deduc": "I"},
-            {"codigo_deduc": "4", "importe_reten": 5.0, "descripcion": "Garantia", "tipo_deduc": "O"},
+            {"codigo_deduc": "1", "importe_reten": 5.0, "descripcion": "RETENCIONES I.P.S.", "tipo_deduc": "O"},
         ]}))
 
         with patch.object(exporter, "_post_json") as post:

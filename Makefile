@@ -23,7 +23,7 @@ LIMIT ?=
 	migrate-all migrate-all-dry \
 	sync-proveedores sync-oc sync-all \
 	reset-all reset-clasificaciones reset-proveedores reset-oc_items reset-solic_gastos reset-orden_pago reset-retenciones \
-	check-integrity-dry check-integrity audit-op-scope install-cron show-cron uninstall-cron \
+	check-integrity-dry check-integrity audit-op-scope reprocess-non-tax reprocess-non-tax-dry install-cron show-cron uninstall-cron \
 	backfill-gastos backfill-gastos-dry \
 	test coverage
 
@@ -62,6 +62,8 @@ help:
 	@echo "  make check-integrity-dry  Ejecuta verificador de integridad en modo lectura (dry-run)"
 	@echo "  make check-integrity      Aplica correcciones de integridad (anulaciones + reenvio de proveedores)"
 	@echo "  make audit-op-scope       Solo lectura: que OP/deducciones quedan fuera de alcance (TIPO_OP N, LIQ, TIPO_DEDUC O) y cruce con la cola"
+	@echo "  make reprocess-non-tax-dry  Preview (no escribe): OP migradas con garantia/caja de medicos a reenviar (paxapos#738)"
+	@echo "  make reprocess-non-tax      Encola en la cola LOCAL esas OP; despues: main.py run --entity retenciones [--dry-run]"
 	@echo "  make backfill-gastos      Recupera links faltantes de gastos ya migrados (escaneo completo, no toca checkpoint)"
 	@echo "  make backfill-gastos-dry  Preview del backfill (no persiste, solo muestra cuantos gastos se reenviarian)"
 	@echo "  make install-cron         Instala/actualiza los cron jobs basados en cron.conf con flock"
@@ -231,6 +233,15 @@ check-integrity:
 # Auditoria de alcance de OP (solo lectura, contra la fuente configurada en .env).
 audit-op-scope:
 	$(PY) scripts/audit_op_scope.py $(AUDIT_ARGS)
+
+# Reproceso de deducciones no impositivas (garantia / caja de medicos, paxapos#738):
+# lee RAFAM (solo lectura) y, con --apply, encola en la cola LOCAL las OP ya migradas
+# que se enviaron sin esas deducciones. NO escribe en RAFAM ni en Paxapos.
+reprocess-non-tax-dry:
+	$(PY) scripts/reprocess_non_tax_deductions.py --dry-run
+
+reprocess-non-tax:
+	$(PY) scripts/reprocess_non_tax_deductions.py --apply
 
 # Backfill unico: recupera links locales faltantes de gastos ya migrados.
 # Fuerza un escaneo COMPLETO de solic_gastos (ignora la ventana de 30 dias) sin

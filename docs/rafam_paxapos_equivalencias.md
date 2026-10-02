@@ -187,6 +187,22 @@ graph TD
 
 - **Idempotencia (Fingerprint F4):** Calcula un hash SHA-1 (`_retenciones_fingerprint`) del conjunto de retenciones de la OP. Si la OP ya fue migrada y las retenciones no sufrieron cambios, se omiten (`skip`).
 
+#### Deducciones no impositivas (Garantía, Caja de Médicos) — paxapos/paxapos#738
+
+RAFAM clasifica `DEDUCCIONES.TIPO_DEDUC` en `I` (impositiva: Ganancias, IIBB, SUSS, IVA) y `O` (otra: IPS, IOMA, sindicatos, embargos, **Garantía** cod 4, **Retenciones Caja de Médicos** cod 8). Garantía y Caja de Médicos las aplica RAFAM a proveedores reales y **restan del neto que cobran**; Paxapos (v3.16.0) las modela como *deducción no impositiva* dentro de `account_retenciones` (`es_no_impositiva=1`): restan de `Egreso.neto_transferido`, se ven con su nombre en la orden de pago y en los pagos del proveedor, y **no** llevan certificado ni entran al libro de retenciones.
+
+| Campo RAFAM | Campo Paxapos | Notas |
+|---|---|---|
+| `CODIGO_DEDUC` (en `RAFAM_NON_TAX_DEDUCTION_MAP`) | `codigo_externo` + `no_impositiva: true` | Default `4`→Garantía, `8`→Caja de Médicos. Una `I` nunca es no impositiva aunque su código esté en el mapa. |
+| nombre del mapa | `concepto` | Default `Fondo de garantía` / `Caja de Médicos`. Es lo que ve el proveedor. |
+| `IMPORTE_RETEN` / `ALICUOTA` | `monto_retenido` / `alicuota` | Igual que una retención. |
+| — | `tipo_impuesto_id`, `numero_certificado` | **No se envían** (no es una retención fiscal). |
+
+- **Config:** `RAFAM_NON_TAX_DEDUCTION_MAP="4=Fondo de garantía,8=Caja de Médicos"`. Sin definir usa ese default; definida **reemplaza** al default (repetir el 4 y el 8 al sumar un código); vacía desactiva el mapeo (comportamiento anterior).
+- Una `O` **sin mapeo** (IPS, IOMA...) sigue omitida; si es lo único de la OP, se encola como `non_tax_deduction`.
+- **Reproceso de las OP ya migradas** (se enviaron sin la garantía): `make reprocess-non-tax-dry` (informe, no escribe) y `make reprocess-non-tax` (encola en la cola LOCAL las que falten); después `python main.py run --entity retenciones --dry-run` (preview) y sin `--dry-run`. El receptor hace `replace` por egreso y recalcula el neto.
+- **Orden de deploy:** primero Paxapos v3.16.0 (migrar con `update_tenants`), después este migrador. Un migrador nuevo contra un Paxapos viejo hace fallar (y encolar) las OP con deducciones no impositivas.
+
 ---
 
 ### 2.6 `GASTOS` → `account_categorias` (Entidad `clasificaciones`)
@@ -264,7 +280,7 @@ Para paliar despasajes de tiempo en los que una entidad (ej: OP o Gasto) se crea
 | 103 | Retención de Ganancias | tributo | retencion | 1 (Nacional) |
 | 104 | Retención de IIBB | tributo | retencion | 2 (Provincial) |
 | 105 | Retención SUSS | tributo | retencion | 1 (Nacional) |
-| 110 | Retención Caja de Médicos | tributo | retencion | 99 (Otros) |
+| 110 | Retención Caja de Médicos | tributo | retencion | 99 (Otros) |  <!-- paxapos#738: la Caja de Médicos de RAFAM (cod 8) ya NO usa este tipo: viaja como deducción no impositiva -->
 
 ### 4.4 `afip_tipo_facturas`
 
