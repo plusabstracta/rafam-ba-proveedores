@@ -193,3 +193,65 @@ class TestCli:
     def test_dry_run_y_apply_son_excluyentes(self):
         with pytest.raises(SystemExit):
             script.main(["--dry-run", "--apply"])
+
+
+class TestRescatePermanent:
+    """plusabstracta/rafam-ba-proveedores#20: permanent por rechazo de un backend viejo."""
+
+    def _retry(self, tmp_path):
+        retry = RetryStore(db_path=str(tmp_path / "retry.db"))
+        # OP 100 (con link): permanent por rechazo del receptor viejo, en 'retenciones'.
+        retry.mark_permanent("retenciones", _sk(2026, 100), "backend_rejected",
+                             "requiere tipo_impuesto_id valido", reason_detail="validation")
+        # OP 200 (con link): Egreso borrado a mano -> NO se rescata.
+        retry.mark_permanent("retenciones", _sk(2026, 200), "backend_rejected",
+                             "Egreso borrado", reason_detail="destination_deleted")
+        # OP 300 (sin link): OP embebida rechazada entera -> permanent en orden_pago.
+        retry.mark_permanent("orden_pago", _sk(2026, 300), "backend_rejected",
+                             "requiere tipo_impuesto_id valido", reason_detail="validation")
+        return retry
+
+    def _plan(self, retry):
+        op_links = {_sk(2026, 100): {"remote_id": "5001"}, _sk(2026, 200): {"remote_id": "5002"}}
+        return {p["nro_op"]: p for p in script.build_plan(
+            _candidatos(_engine()),
+            op_links=op_links,
+            pending_ids=retry.pending_external_ids("retenciones"),
+            permanent_ids=retry.permanent_external_ids("retenciones"),
+            requeue_permanent=script.rescuable_permanent(retry),
+        )}
+
+    def test_rescuable_excluye_destination_deleted(self, tmp_path):
+        retry = self._retry(tmp_path)
+        r = script.rescuable_permanent(retry)
+        assert r["retenciones"] == {_sk(2026, 100)}
+        assert r["orden_pago"] == {_sk(2026, 300)}
+        retry.close()
+
+    def test_clasifica_rescate_y_terminal(self, tmp_path):
+        retry = self._retry(tmp_path)
+        plan = self._plan(retry)
+        assert plan[100]["state"] == script.ST_REQUEUE_PERMANENT
+        assert plan[200]["state"] == script.ST_PERMANENT
+        assert plan[300]["state"] == script.ST_REQUEUE_PERMANENT, "OP embebida sin link"
+        assert plan[300]["requeue_entities"] == ["orden_pago"]
+        retry.close()
+
+    def test_dry_run_no_toca_la_cola_y_lista_el_rescate(self, tmp_path):
+        retry = self._retry(tmp_path)
+        report = script.format_report(list(self._plan(retry).values()), apply=False, ejercicio_min=2026)
+        assert "PERMANENT POR RECHAZO" in report and ": 2 OP" in report
+        assert retry.pending_external_ids("retenciones") == set()
+        assert len(retry.permanent_external_ids("retenciones")) == 2
+        retry.close()
+
+    def test_apply_devuelve_a_pending_solo_las_rescatables(self, tmp_path):
+        retry = self._retry(tmp_path)
+        n = script.apply_plan(list(self._plan(retry).values()), retry)
+        assert n == 2
+        assert retry.pending_external_ids("retenciones") == {_sk(2026, 100)}
+        assert retry.pending_external_ids("orden_pago") == {_sk(2026, 300)}
+        assert retry.permanent_external_ids("retenciones") == {_sk(2026, 200)}, "destination_deleted intacta"
+        # Idempotente: ya estan pending, el plan las ve como 'ya_en_cola' / no rescatables.
+        assert script.rescuable_permanent(retry)["retenciones"] == set()
+        retry.close()

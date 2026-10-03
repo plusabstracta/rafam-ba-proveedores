@@ -63,7 +63,7 @@ help:
 	@echo "  make check-integrity      Aplica correcciones de integridad (anulaciones + reenvio de proveedores)"
 	@echo "  make audit-op-scope       Solo lectura: que OP/deducciones quedan fuera de alcance (TIPO_OP N, LIQ, TIPO_DEDUC O) y cruce con la cola"
 	@echo "  make reprocess-non-tax-dry  Preview (no escribe): OP migradas con garantia/caja de medicos a reenviar (paxapos#738)"
-	@echo "  make reprocess-non-tax      Encola en la cola LOCAL esas OP; despues: main.py run --entity retenciones [--dry-run]"
+	@echo "  make reprocess-non-tax      Encola en la cola LOCAL esas OP y rescata las permanent por rechazo (backend viejo, #20); despues: main.py run --entity retenciones [--dry-run]"
 	@echo "  make backfill-gastos      Recupera links faltantes de gastos ya migrados (escaneo completo, no toca checkpoint)"
 	@echo "  make backfill-gastos-dry  Preview del backfill (no persiste, solo muestra cuantos gastos se reenviarian)"
 	@echo "  make install-cron         Instala/actualiza los cron jobs basados en cron.conf con flock"
