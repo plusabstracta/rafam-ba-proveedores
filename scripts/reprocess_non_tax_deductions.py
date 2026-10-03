@@ -17,8 +17,17 @@ los ultimos 30 dias): se reinyecta por la cola de reintentos. Este script:
      deduccion mapeada (y no 'I'), que ya esten migradas a Paxapos (link local);
   2. informa cuales ya estan en la cola (``non_tax_deduction`` de antes: van solas),
      cuales hay que encolar y el importe que va a bajar de ``neto_transferido``;
-  3. con ``--apply`` ENCOLA las que faltan (escribe SOLO la cola local SQLite:
+  3. con ``--apply`` ENCOLA las que faltan y DEVUELVE A 'pending' las que quedaron
+     'permanent' por un rechazo de deduccion (escribe SOLO la cola local SQLite:
      nunca RAFAM ni Paxapos).
+
+Rescate de 'permanent' (plusabstracta/rafam-ba-proveedores#20): si el migrador corrio
+contra un Paxapos < v3.16.0, el receptor rechazaba la deduccion
+(``requiere tipo_impuesto_id valido``) y tras ~10 corridas la fila (``retenciones`` u
+``orden_pago`` embebida) pasaba a 'permanent'. Esas se reencolan (equivale a
+``retry-queue --requeue`` acotado a estas OP). NO se tocan las 'permanent' por
+``destination_deleted`` (Egreso borrado a mano en Paxapos) ni las de otro motivo
+que no sea un rechazo del receptor.
 
 Modo por defecto = ``--dry-run`` (solo informa). Despues del ``--apply``::
 
@@ -49,13 +58,18 @@ sys.path.insert(0, str(REPO_ROOT))
 from sqlalchemy import select  # noqa: E402
 
 from src.config import ENTITY_CONFIGS, non_tax_deduction_concept, non_tax_deduction_map  # noqa: E402
-from src.retry_store import REASON_DEPENDENCY_MISSING  # noqa: E402
+from src.retry_store import REASON_BACKEND_REJECTED, REASON_DEPENDENCY_MISSING, STATUS_PERMANENT  # noqa: E402
 
 REASON_DETAIL_REPROCESS = "non_tax_deduction_reprocess"
+REASON_DETAIL_DESTINATION_DELETED = "destination_deleted"
+# Entidades de la cola donde el rechazo de una deduccion deja la fila 'permanent':
+# 'retenciones' (corrida --entity retenciones) y 'orden_pago' (OP con retenciones[] embebidas).
+REQUEUE_ENTITIES = ("retenciones", "orden_pago")
 
 # Estados del plan por OP.
 ST_ALREADY_PENDING = "ya_en_cola"          # entra sola en la proxima corrida
 ST_TO_ENQUEUE = "encolar"                  # migrada, hay que reinyectarla
+ST_REQUEUE_PERMANENT = "reencolar_permanent"  # permanent por rechazo (backend viejo): volver a pending
 ST_PERMANENT = "permanente_en_cola"        # rechazo terminal (ej. Egreso borrado): no tocar
 ST_NOT_MIGRATED = "sin_migrar"             # el flujo normal ya la manda completa cuando migre
 
@@ -144,16 +158,24 @@ def build_plan(
     op_links: dict[str, dict],
     pending_ids: set[str],
     permanent_ids: set[str],
+    requeue_permanent: dict[str, set[str]] | None = None,
 ) -> list[dict]:
     """Clasifica cada OP candidata. Funcion pura (sin I/O).
 
     ``op_links``: ``source_key -> link`` de la entidad ``orden_pago`` (lo migrado).
+    ``requeue_permanent``: ``entidad -> source_keys`` 'permanent' que se pueden
+    devolver a 'pending' (ver ``rescuable_permanent``). Una OP con una fila asi es
+    ``reencolar_permanent`` aunque no tenga link (la OP embebida rechazada entera).
     """
+    requeue_permanent = requeue_permanent or {}
     plan: list[dict] = []
     for (ejercicio, nro_op), deds in sorted(candidates.items()):
         sk = _op_source_key(ejercicio, nro_op)
         link = op_links.get(sk)
-        if not link or not link.get("remote_id") or link.get("deleted_at"):
+        rescue = [e for e in REQUEUE_ENTITIES if sk in requeue_permanent.get(e, ())]
+        if rescue:
+            state = ST_REQUEUE_PERMANENT
+        elif not link or not link.get("remote_id") or link.get("deleted_at"):
             state = ST_NOT_MIGRATED
         elif sk in permanent_ids:
             state = ST_PERMANENT
@@ -166,6 +188,7 @@ def build_plan(
             "nro_op": nro_op,
             "source_key": sk,
             "state": state,
+            "requeue_entities": rescue,
             "egreso_id": link.get("remote_id") if link else None,
             "deducciones": [
                 {
@@ -204,10 +227,11 @@ def format_report(plan: list[dict], *, apply: bool, ejercicio_min: int) -> str:
     labels = {
         ST_TO_ENQUEUE: "A ENCOLAR (migradas; hay que reinyectarlas)",
         ST_ALREADY_PENDING: "YA EN COLA (non_tax_deduction de antes: entran solas en la proxima corrida)",
+        ST_REQUEUE_PERMANENT: "PERMANENT POR RECHAZO (backend viejo; se devuelven a pending)",
         ST_PERMANENT: "PERMANENTES EN COLA (rechazo terminal, ej. Egreso borrado: no se tocan)",
         ST_NOT_MIGRATED: "SIN MIGRAR (el flujo normal las manda completas cuando migren)",
     }
-    for state in (ST_TO_ENQUEUE, ST_ALREADY_PENDING, ST_PERMANENT, ST_NOT_MIGRATED):
+    for state in (ST_TO_ENQUEUE, ST_REQUEUE_PERMANENT, ST_ALREADY_PENDING, ST_PERMANENT, ST_NOT_MIGRATED):
         items = by_state.get(state, [])
         lines.append(f"{labels[state]}: {len(items)} OP")
         if items:
@@ -219,7 +243,11 @@ def format_report(plan: list[dict], *, apply: bool, ejercicio_min: int) -> str:
                 lines.append(f"    ... y {len(items) - 50} mas")
         lines.append("")
 
-    reprocesables = by_state.get(ST_TO_ENQUEUE, []) + by_state.get(ST_ALREADY_PENDING, [])
+    reprocesables = (
+        by_state.get(ST_TO_ENQUEUE, [])
+        + by_state.get(ST_REQUEUE_PERMANENT, [])
+        + by_state.get(ST_ALREADY_PENDING, [])
+    )
     lines.append(
         f"Total a reenviar: {len(reprocesables)} OP; "
         f"importe que baja de Egreso.neto_transferido: {_fmt(sum((d['importe'] for it in reprocesables for d in it['deducciones']), Decimal(0)))}"
@@ -232,10 +260,35 @@ def format_report(plan: list[dict], *, apply: bool, ejercicio_min: int) -> str:
     return "\n".join(lines)
 
 
+def rescuable_permanent(retry_store) -> dict[str, set[str]]:
+    """'permanent' de la cola que son un rechazo del receptor y se pueden reencolar.
+
+    Excluye ``destination_deleted`` (el Egreso se borro a mano: reenviar no sirve) y
+    todo lo que no sea ``backend_rejected``. Solo lectura.
+    """
+    out: dict[str, set[str]] = {}
+    for entity in REQUEUE_ENTITIES:
+        out[entity] = {
+            it.external_id
+            for it in retry_store.list_items(entity, status=STATUS_PERMANENT)
+            if it.reason_code == REASON_BACKEND_REJECTED
+            and it.reason_detail != REASON_DETAIL_DESTINATION_DELETED
+        }
+    return out
+
+
 def apply_plan(plan: list[dict], retry_store) -> int:
-    """Encola (cola local SQLite) las OP en estado 'encolar'. Devuelve cuantas."""
+    """Encola (cola local SQLite) las OP 'encolar' y devuelve a pending las 'reencolar_permanent'.
+
+    Devuelve cuantas OP se tocaron.
+    """
     enqueued = 0
     for item in plan:
+        if item["state"] == ST_REQUEUE_PERMANENT:
+            for entity in item["requeue_entities"]:
+                retry_store.requeue(entity, item["source_key"])
+            enqueued += 1
+            continue
         if item["state"] != ST_TO_ENQUEUE:
             continue
         resumen = ", ".join(f"{d['concepto']} {_fmt(d['importe'])}" for d in item["deducciones"])
@@ -255,7 +308,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--ejercicio-min", type=int, default=ENTITY_CONFIGS["orden_pago"].ejercicio_min)
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--dry-run", action="store_true", help="Solo informa (default). No escribe nada.")
-    mode.add_argument("--apply", action="store_true", help="Encola en la cola LOCAL las OP migradas a reenviar.")
+    mode.add_argument("--apply", action="store_true", help="Encola (y rescata las 'permanent' por rechazo) en la cola LOCAL.")
     args = parser.parse_args(argv)
 
     os.chdir(REPO_ROOT)
@@ -281,10 +334,11 @@ def main(argv: list[str] | None = None) -> int:
             op_links=op_links,
             pending_ids=retry.pending_external_ids("retenciones"),
             permanent_ids=retry.permanent_external_ids("retenciones"),
+            requeue_permanent=rescuable_permanent(retry),
         )
         print(format_report(plan, apply=args.apply, ejercicio_min=args.ejercicio_min))
         if args.apply:
-            print(f"\nEncoladas: {apply_plan(plan, retry)} OP.")
+            print(f"\nEncoladas/reencoladas: {apply_plan(plan, retry)} OP.")
     finally:
         retry.close()
         links.close()
